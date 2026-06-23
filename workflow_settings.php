@@ -9,37 +9,252 @@ if($_SERVER['REQUEST_METHOD']==='POST'){ if(empty($_POST['csrf_token'])||!hash_e
 if(($_GET['msg']??'')==='created')$message='Workflow step created successfully.'; elseif(($_GET['msg']??'')==='updated')$message='Workflow step updated successfully.';
 $steps=[]; $res=$conn->query("SELECT * FROM workflow_steps ORDER BY order_type, sort_order, id"); while($row=$res->fetch_assoc())$steps[]=$row;
 ?>
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Workflow Settings - Subhiksha Cards</title><?php include __DIR__ . '/includes/links.php'; ?>
-<?php include __DIR__ . '/includes/theme-loader.php'; ?>
-<style>
-.master-page .page-head{padding:24px 28px;margin-bottom:18px}
-.master-page .page-head h1{font-size:30px;font-weight:900;color:var(--text-main)}
-.master-stat-card{padding:18px;min-height:112px;display:flex;align-items:center;gap:14px}
-.master-stat-icon{width:52px;height:52px;border-radius:16px;display:grid;place-items:center;color:#fff;flex:0 0 auto}
-.master-stat-card span{display:block;font-size:12px;color:var(--text-muted);font-weight:900;text-transform:uppercase}
-.master-stat-card strong{font-size:24px;font-weight:900;color:var(--text-main)}
-.master-card{padding:24px}
-.master-title{font-size:18px;font-weight:900;color:var(--text-main);margin-bottom:18px}
-.status-pill{font-size:11px;font-weight:900;border-radius:999px;padding:5px 9px}
-.status-pill.active{color:var(--success-color);background:color-mix(in srgb,var(--success-color) 14%,transparent)}
-.status-pill.inactive{color:var(--danger-color);background:color-mix(in srgb,var(--danger-color) 14%,transparent)}
-.form-control,.form-select{border-radius:14px;min-height:46px}
-.modal-content{border:0;border-radius:22px;background:var(--card-bg);color:var(--text-main)}
-.modal-header,.modal-footer{border-color:var(--border-soft)}
-.small-muted{display:block;margin-top:3px;color:var(--text-muted);font-size:11px;font-weight:700}
-@media(max-width:991px){.master-card{padding:18px}.master-page .page-head{padding:20px}}
-</style>
-</head>
-<body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
-<div id="mobileOverlay"></div>
-<div class="app-shell">
-<?php include __DIR__ . '/includes/sidebar.php'; ?>
-<main id="main">
-<?php include __DIR__ . '/includes/nav.php'; ?>
+<!doctype html>
+<html lang="en">
 
-<section class="page-section master-page"><div class="card-ui page-head"><div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3"><div><h1 class="mb-1">Workflow Settings</h1><p class="text-muted-custom mb-0">Manage readymade and customized production workflow steps.</p></div><button class="btn btn-primary rounded-pill px-4 fw-bold" id="newStepBtn" data-bs-toggle="modal" data-bs-target="#stepModal">New Step</button></div></div>
-<?php if($message): ?><div class="alert alert-<?=e($messageType)?> rounded-4 fw-bold"><?=e($message)?></div><?php endif; ?>
-<div class="card-ui master-card"><div class="table-responsive"><table class="table-ui"><thead><tr><th>Step</th><th>Order Type</th><th>Owner</th><th>Sort</th><th>Flags</th><th>Status</th><th class="text-end">Action</th></tr></thead><tbody><?php foreach($steps as $s): ?><tr><td><strong><?=e($s['step_name'])?></strong><span class="small-muted"><?=e($s['step_key'])?></span></td><td><?=e($s['order_type'])?></td><td><?=e($s['default_owner_role_key'] ?? '-')?></td><td><?=e($s['sort_order'])?></td><td><?=((int)$s['is_customer_visible']?'Customer ':'')?><?=((int)$s['is_approval_step']?'Approval ':'')?><?=((int)$s['is_final_step']?'Final':'')?></td><td><span class="status-pill <?=(int)$s['is_active']?'active':'inactive'?>"><?=(int)$s['is_active']?'Active':'Inactive'?></span></td><td class="text-end"><button class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit" data-bs-toggle="modal" data-bs-target="#stepModal" <?php foreach(['id','order_type','step_key','step_name','default_owner_role_key','sort_order','is_customer_visible','is_approval_step','is_final_step','is_active'] as $k): ?> data-<?=str_replace('_','-',$k)?>="<?=e($s[$k] ?? '')?>"<?php endforeach; ?>>Edit</button></td></tr><?php endforeach; ?></tbody></table></div></div></section>
-</main><div id="settingsOverlay"></div><?php include __DIR__ . '/includes/rightsidebar.php'; ?></div>
-<div class="modal fade" id="stepModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered modal-lg"><form method="post" class="modal-content"><input type="hidden" name="csrf_token" value="<?=e($csrfToken)?>"><input type="hidden" name="id" id="id"><div class="modal-header"><h5 class="modal-title fw-bold" id="modalTitle">New Workflow Step</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row g-3"><div class="col-md-6"><label class="form-label fw-bold">Order Type</label><select name="order_type" id="order_type" class="form-select"><option value="readymade">readymade</option><option value="customized">customized</option></select></div><div class="col-md-6"><label class="form-label fw-bold">Step Key *</label><input name="step_key" id="step_key" class="form-control" required></div><div class="col-md-6"><label class="form-label fw-bold">Step Name *</label><input name="step_name" id="step_name" class="form-control" required></div><div class="col-md-4"><label class="form-label fw-bold">Owner Role Key</label><input name="default_owner_role_key" id="default_owner_role_key" class="form-control"></div><div class="col-md-2"><label class="form-label fw-bold">Sort</label><input type="number" name="sort_order" id="sort_order" class="form-control"></div><div class="col-12 d-flex flex-wrap gap-3"><label class="form-check"><input type="checkbox" name="is_customer_visible" id="is_customer_visible" class="form-check-input" checked><span class="form-check-label fw-bold">Customer Visible</span></label><label class="form-check"><input type="checkbox" name="is_approval_step" id="is_approval_step" class="form-check-input"><span class="form-check-label fw-bold">Approval Step</span></label><label class="form-check"><input type="checkbox" name="is_final_step" id="is_final_step" class="form-check-input"><span class="form-check-label fw-bold">Final Step</span></label><label class="form-check"><input type="checkbox" name="is_active" id="is_active" class="form-check-input" checked><span class="form-check-label fw-bold">Active</span></label></div></div></div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary rounded-pill px-4 fw-bold">Save Step</button></div></form></div></div>
-<?php include __DIR__ . '/includes/script.php'; ?><script>(function(){function set(id,v){const e=document.getElementById(id);if(!e)return;if(e.type==='checkbox')e.checked=String(v)==='1';else e.value=v||'';}document.getElementById('newStepBtn')?.addEventListener('click',()=>{['id','step_key','step_name','default_owner_role_key'].forEach(i=>set(i,''));set('order_type','readymade');set('sort_order',0);set('is_customer_visible','1');set('is_approval_step','0');set('is_final_step','0');set('is_active','1');});document.querySelectorAll('.js-edit').forEach(b=>b.addEventListener('click',()=>{['id','order_type','step_key','step_name','default_owner_role_key','sort_order','is_customer_visible','is_approval_step','is_final_step','is_active'].forEach(k=>set(k,b.dataset[k.replaceAll('_','')]||b.getAttribute('data-'+k.replaceAll('_','-'))));}));if(window.lucide)lucide.createIcons();})();</script></body></html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Workflow Settings - Subhiksha Cards</title><?php include __DIR__ . '/includes/links.php'; ?>
+    <?php include __DIR__ . '/includes/theme-loader.php'; ?>
+    <style>
+    .master-page .page-head {
+        padding: 24px 28px;
+        margin-bottom: 18px
+    }
+
+    .master-page .page-head h1 {
+        font-size: 30px;
+        font-weight: 900;
+        color: var(--text-main)
+    }
+
+    .master-stat-card {
+        padding: 18px;
+        min-height: 112px;
+        display: flex;
+        align-items: center;
+        gap: 14px
+    }
+
+    .master-stat-icon {
+        width: 52px;
+        height: 52px;
+        border-radius: 16px;
+        display: grid;
+        place-items: center;
+        color: #fff;
+        flex: 0 0 auto
+    }
+
+    .master-stat-card span {
+        display: block;
+        font-size: 12px;
+        color: var(--text-muted);
+        font-weight: 900;
+        text-transform: uppercase
+    }
+
+    .master-stat-card strong {
+        font-size: 24px;
+        font-weight: 900;
+        color: var(--text-main)
+    }
+
+    .master-card {
+        padding: 24px
+    }
+
+    .master-title {
+        font-size: 18px;
+        font-weight: 900;
+        color: var(--text-main);
+        margin-bottom: 18px
+    }
+
+    .status-pill {
+        font-size: 11px;
+        font-weight: 900;
+        border-radius: 999px;
+        padding: 5px 9px
+    }
+
+    .status-pill.active {
+        color: var(--success-color);
+        background: color-mix(in srgb, var(--success-color) 14%, transparent)
+    }
+
+    .status-pill.inactive {
+        color: var(--danger-color);
+        background: color-mix(in srgb, var(--danger-color) 14%, transparent)
+    }
+
+    .form-control,
+    .form-select {
+        border-radius: 14px;
+        min-height: 46px
+    }
+
+    .modal-content {
+        border: 0;
+        border-radius: 22px;
+        background: var(--card-bg);
+        color: var(--text-main)
+    }
+
+    .modal-header,
+    .modal-footer {
+        border-color: var(--border-soft)
+    }
+
+    .small-muted {
+        display: block;
+        margin-top: 3px;
+        color: var(--text-muted);
+        font-size: 11px;
+        font-weight: 700
+    }
+
+    @media(max-width:991px) {
+        .master-card {
+            padding: 18px
+        }
+
+        .master-page .page-head {
+            padding: 20px
+        }
+    }
+    </style>
+</head>
+
+<body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
+    <div id="mobileOverlay"></div>
+    <div class="app-shell">
+        <?php include __DIR__ . '/includes/sidebar.php'; ?>
+        <main id="main">
+            <?php include __DIR__ . '/includes/nav.php'; ?>
+
+            <section class="page-section master-page">
+                <div class="card-ui page-head">
+                    <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
+                        <div>
+                            <h1 class="mb-1">Workflow Settings</h1>
+                            <p class="text-muted-custom mb-0">Manage readymade and customized production workflow steps.
+                            </p>
+                        </div><button class="btn btn-primary rounded-pill px-4 fw-bold" id="newStepBtn"
+                            data-bs-toggle="modal" data-bs-target="#stepModal">New Step</button>
+                    </div>
+                </div>
+                <?php if($message): ?><div class="alert alert-<?=e($messageType)?> rounded-4 fw-bold"><?=e($message)?>
+                </div><?php endif; ?>
+                <div class="card-ui master-card">
+                    <div class="table-responsive">
+                        <table class="table-ui">
+                            <thead>
+                                <tr>
+                                    <th>Step</th>
+                                    <th>Order Type</th>
+                                    <th>Owner</th>
+                                    <th>Sort</th>
+                                    <th>Flags</th>
+                                    <th>Status</th>
+                                    <th class="text-end">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody><?php foreach($steps as $s): ?><tr>
+                                    <td><strong><?=e($s['step_name'])?></strong><span
+                                            class="small-muted"><?=e($s['step_key'])?></span></td>
+                                    <td><?=e($s['order_type'])?></td>
+                                    <td><?=e($s['default_owner_role_key'] ?? '-')?></td>
+                                    <td><?=e($s['sort_order'])?></td>
+                                    <td><?=((int)$s['is_customer_visible']?'Customer ':'')?><?=((int)$s['is_approval_step']?'Approval ':'')?><?=((int)$s['is_final_step']?'Final':'')?>
+                                    </td>
+                                    <td><span
+                                            class="status-pill <?=(int)$s['is_active']?'active':'inactive'?>"><?=(int)$s['is_active']?'Active':'Inactive'?></span>
+                                    </td>
+                                    <td class="text-end"><button
+                                            class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit"
+                                            data-bs-toggle="modal" data-bs-target="#stepModal"
+                                            <?php foreach(['id','order_type','step_key','step_name','default_owner_role_key','sort_order','is_customer_visible','is_approval_step','is_final_step','is_active'] as $k): ?>
+                                            data-<?=str_replace('_','-',$k)?>="<?=e($s[$k] ?? '')?>"
+                                            <?php endforeach; ?>>Edit</button></td>
+                                </tr><?php endforeach; ?></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+        <div id="settingsOverlay"></div><?php include __DIR__ . '/includes/rightsidebar.php'; ?>
+    </div>
+    <div class="modal fade" id="stepModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered modal-lg">
+            <form method="post" class="modal-content"><input type="hidden" name="csrf_token"
+                    value="<?=e($csrfToken)?>"><input type="hidden" name="id" id="id">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold" id="modalTitle">New Workflow Step</h5><button type="button"
+                        class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-6"><label class="form-label fw-bold">Order Type</label><select
+                                name="order_type" id="order_type" class="form-select">
+                                <option value="readymade">readymade</option>
+                                <option value="customized">customized</option>
+                            </select></div>
+                        <div class="col-md-6"><label class="form-label fw-bold">Step Key *</label><input name="step_key"
+                                id="step_key" class="form-control" required></div>
+                        <div class="col-md-6"><label class="form-label fw-bold">Step Name *</label><input
+                                name="step_name" id="step_name" class="form-control" required></div>
+                        <div class="col-md-4"><label class="form-label fw-bold">Owner Role Key</label><input
+                                name="default_owner_role_key" id="default_owner_role_key" class="form-control"></div>
+                        <div class="col-md-2"><label class="form-label fw-bold">Sort</label><input type="number"
+                                name="sort_order" id="sort_order" class="form-control"></div>
+                        <div class="col-12 d-flex flex-wrap gap-3"><label class="form-check"><input type="checkbox"
+                                    name="is_customer_visible" id="is_customer_visible" class="form-check-input"
+                                    checked><span class="form-check-label fw-bold">Customer Visible</span></label><label
+                                class="form-check"><input type="checkbox" name="is_approval_step" id="is_approval_step"
+                                    class="form-check-input"><span class="form-check-label fw-bold">Approval
+                                    Step</span></label><label class="form-check"><input type="checkbox"
+                                    name="is_final_step" id="is_final_step" class="form-check-input"><span
+                                    class="form-check-label fw-bold">Final Step</span></label><label
+                                class="form-check"><input type="checkbox" name="is_active" id="is_active"
+                                    class="form-check-input" checked><span
+                                    class="form-check-label fw-bold">Active</span></label></div>
+                    </div>
+                </div>
+                <div class="modal-footer"><button type="button"
+                        class="btn btn-outline-secondary rounded-pill px-4 fw-bold"
+                        data-bs-dismiss="modal">Cancel</button><button
+                        class="btn btn-primary rounded-pill px-4 fw-bold">Save Step</button></div>
+            </form>
+        </div>
+    </div>
+    <?php include __DIR__ . '/includes/script.php'; ?><script>
+    (function() {
+        function set(id, v) {
+            const e = document.getElementById(id);
+            if (!e) return;
+            if (e.type === 'checkbox') e.checked = String(v) === '1';
+            else e.value = v || '';
+        }
+        document.getElementById('newStepBtn')?.addEventListener('click', () => {
+            ['id', 'step_key', 'step_name', 'default_owner_role_key'].forEach(i => set(i, ''));
+            set('order_type', 'readymade');
+            set('sort_order', 0);
+            set('is_customer_visible', '1');
+            set('is_approval_step', '0');
+            set('is_final_step', '0');
+            set('is_active', '1');
+        });
+        document.querySelectorAll('.js-edit').forEach(b => b.addEventListener('click', () => {
+            ['id', 'order_type', 'step_key', 'step_name', 'default_owner_role_key', 'sort_order',
+                'is_customer_visible', 'is_approval_step', 'is_final_step', 'is_active'
+            ].forEach(k => set(k, b.dataset[k.replaceAll('_', '')] || b.getAttribute('data-' + k
+                .replaceAll('_', '-'))));
+        }));
+        if (window.lucide) lucide.createIcons();
+    })();
+    </script>
+</body>
+
+</html>

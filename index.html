@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subhiksha Cards - Logo Header Style</title>
+
+  <!-- Bootstrap + Icons -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="erp/assets/css/style.css">
+
+  <style>
+    /* CTA logo fix: keep logo fully inside the round badge */
+    .cta-logo{
+      width:130px;
+      height:130px;
+      border-radius:50%;
+      background:#102f66;
+      border:1.5px solid var(--gold);
+      position:absolute;
+      right:95px;
+      bottom:-15px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      overflow:hidden;
+      padding:16px;
+      box-sizing:border-box;
+    }
+    .cta-logo-img{
+      width:76px;
+      height:76px;
+      object-fit:contain;
+      display:block;
+    }
+    @media(max-width:1199px){
+      .cta-logo{right:70px;}
+      .cta-logo-img{width:70px;height:70px;}
+    }
+    @media(max-width:991px){
+      .cta-logo{display:none;}
+    }
+  </style>
+
+</head>
+<body>
+<!-- Same screenshot design recreated with layers. No full hero image used. -->
+
+<!-- HEADER -->
+<header class="site-header">
+  <nav class="navbar navbar-expand-lg">
+    <div class="container-fluid page-container">
+      <a class="navbar-brand brand-wrap brand-mark-text-wrap" href="#">
+        <img src="erp/assets/img/header-logo-mark.png" alt="Subhiksha Cards" class="header-mark-img">
+        <span class="header-brand-text">
+          <strong>subhiksha</strong>
+          <em>CARDS</em>
+        </span>
+      </a>
+
+      <button class="navbar-toggler custom-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNavbar">
+        <i class="fa-solid fa-bars"></i>
+      </button>
+
+      <div class="collapse navbar-collapse" id="mainNavbar">
+        <ul class="navbar-nav mx-auto align-items-lg-center">
+          <li class="nav-item"><a class="nav-link active" href="#">Home</a></li>
+          <li class="nav-item"><a class="nav-link" href="#about">About Us</a></li>
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle" href="#" data-bs-toggle="dropdown">Products</a>
+            <ul class="dropdown-menu">
+              <li><a class="dropdown-item" href="#collection">Wedding Cards</a></li>
+              <li><a class="dropdown-item" href="#collection">Birthday Cards</a></li>
+              <li><a class="dropdown-item" href="#collection">Business Cards</a></li>
+              <li><a class="dropdown-item" href="#collection">Brochures</a></li>
+            </ul>
+          </li>
+          <li class="nav-item"><a class="nav-link" href="#collection">Designs</a></li>
+          <li class="nav-item"><a class="nav-link" href="#services">Services</a></li>
+          <li class="nav-item"><a class="nav-link" href="#bulk">Bulk Orders</a></li>
+          <li class="nav-item"><a class="nav-link" href="#contact">Contact</a></li>
+        </ul>
+
+        <a href="#contact" class="quote-btn">
+          Get a Quote <i class="fa-solid fa-arrow-right"></i>
+        </a>
+      </div>
+    </div>
+  </nav>
+</header>
+
+<!-- HERO -->
+<section class="hero-section">
+  <div class="container-fluid page-container">
+    <div class="row align-items-center g-0">
+      <div class="col-lg-5">
+        <div class="hero-content">
+          <p class="eyebrow">PREMIUM CARDS. PERFECT IMPRESSIONS.</p>
+          <h1>
+            Crafted for Moments
+            <span>Remembered Forever</span>
+          </h1>
+          <p class="hero-desc">
+            Elegant invitations, premium cards and printing solutions designed to make your special moments truly unforgettable.
+          </p>
+
+          <div class="hero-actions">
+            <a href="#collection" class="btn-dark-pill">
+              Explore Designs <i class="fa-solid fa-arrow-right"></i>
+            </a>
+            <a href="#services" class="btn-light-pill">
+              Our Services <i class="fa-solid fa-arrow-right"></i>
+            </a>
+          </div>
+
+          <div class="hero-features">
+            <div class="feature-item">
+              <span><i class="fa-solid fa-award"></i></span>
+              <div>
+                <strong>Premium Quality</strong>
+                <small>Finest materials & perfect finishing</small>
+              </div>
+            </div>
+
+            <div class="feature-item">
+              <span><i class="fa-solid fa-clock"></i></span>
+              <div>
+                <strong>On-Time Delivery</strong>
+                <small>We value your time and commitment</small>
+              </div>
+            </div>
+
+            <div class="feature-item">
+              <span><i class="fa-solid fa-pen-nib"></i></span>
+              <div>
+                <strong>Custom Designs</strong>
+                <small>Personalized cards as you imagine</small>
+              </div>
+            </div>
+
+            <div class="feature-item">
+              <span><i class="fa-solid fa-headset"></i></span>
+              <div>
+                <strong>Dedicated Support</strong>
+                <small>We are here to help you anytime</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-7">
+        <div class="hero-art-wrap">
+          <div class="hero-art">
+
+            <!-- background layers -->
+            <div class="cream-glow glow-1"></div>
+            <div class="cream-glow glow-2"></div>
+            <div class="navy-oval"></div>
+            <div class="gold-arc arc-1"></div>
+            <div class="gold-arc arc-2"></div>
+            <div class="gold-ribbon ribbon-1"></div>
+            <div class="gold-ribbon ribbon-2"></div>
+
+            <!-- dry flower -->
+            <div class="dry-flower">
+              <span class="stem s1"></span><span class="stem s2"></span><span class="stem s3"></span>
+              <i class="bud b1"></i><i class="bud b2"></i><i class="bud b3"></i><i class="bud b4"></i>
+            </div>
+
+            <!-- dark blue invitation card -->
+            <div class="invite-card blue-invite">
+              <div class="inner-border"></div>
+              <div class="corner c-tl"></div>
+              <div class="corner c-tr"></div>
+              <div class="corner c-bl"></div>
+              <div class="corner c-br"></div>
+              <span class="small-orn">~❧~</span>
+              <h3>WEDDING<br>INVITATION</h3>
+              <p>Rahul & Priya</p>
+              <small>20.06.2024</small>
+            </div>
+
+            <!-- white invitation card -->
+            <div class="invite-card white-invite">
+              <div class="floral-lace"></div>
+              <div class="round-seal">RP</div>
+              <h4>Rahul & Priya</h4>
+              <small>20.06.2024</small>
+            </div>
+
+            <!-- cream laser cut envelope -->
+            <div class="invite-card envelope-invite">
+              <div class="laser-pattern">
+                <span></span><span></span><span></span><span></span>
+              </div>
+              <div class="envelope-flap"></div>
+              <div class="gold-band"></div>
+              <div class="pearl-lock"></div>
+            </div>
+
+            <!-- decorative dots -->
+            <i class="gold-dot d1"></i>
+            <i class="gold-dot d2"></i>
+            <i class="gold-dot d3"></i>
+            <i class="gold-dot d4"></i>
+            <i class="gold-dot d5"></i>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- COLLECTION -->
+<section class="collection-section" id="collection">
+  <div class="container-fluid page-container">
+    <div class="section-title text-center">
+      <p><span></span> OUR COLLECTION <span></span></p>
+      <h2>Cards for Every Occasion</h2>
+      <div class="ornament">— ❖ —</div>
+    </div>
+
+    
+    <div class="collection-grid">
+      <div class="collection-card">
+        <div class="card-img real-card-img">
+          <img src="erp/assets/img/wedding-card.png" alt="Wedding Cards" class="collection-real-img">
+        </div>
+        <div class="icon-badge navy"><i class="fa-solid fa-heart"></i></div>
+        <div class="card-body">
+          <h5>Wedding Cards</h5>
+          <p>Elegant &amp; traditional wedding invitations</p>
+        </div>
+      </div>
+
+      <div class="collection-card">
+        <div class="card-img real-card-img">
+          <img src="erp/assets/img/birthday-card.png" alt="Birthday Cards" class="collection-real-img">
+        </div>
+        <div class="icon-badge orange"><i class="fa-solid fa-cake-candles"></i></div>
+        <div class="card-body">
+          <h5>Birthday Cards</h5>
+          <p>Creative birthday invitations for all ages</p>
+        </div>
+      </div>
+
+      <div class="collection-card">
+        <div class="card-img real-card-img">
+          <img src="erp/assets/img/business-cards.png" alt="Business Cards" class="collection-real-img">
+        </div>
+        <div class="icon-badge navy"><i class="fa-solid fa-user"></i></div>
+        <div class="card-body">
+          <h5>Business Cards</h5>
+          <p>Professional visiting cards for your brand</p>
+        </div>
+      </div>
+
+      <div class="collection-card">
+        <div class="card-img real-card-img">
+          <img src="erp/assets/img/brochure-flyer.png" alt="Brochures and Flyers" class="collection-real-img">
+        </div>
+        <div class="icon-badge orange"><i class="fa-regular fa-file-lines"></i></div>
+        <div class="card-body">
+          <h5>Brochures &amp; Flyers</h5>
+          <p>Promote your business with style</p>
+        </div>
+      </div>
+
+      <div class="collection-card">
+        <div class="card-img real-card-img">
+          <img src="erp/assets/img/envelope-letterhead.png" alt="Envelopes and Letterheads" class="collection-real-img">
+        </div>
+        <div class="icon-badge navy"><i class="fa-regular fa-envelope"></i></div>
+        <div class="card-body">
+          <h5>Envelopes &amp; Letterheads</h5>
+          <p>Matching stationery for your needs</p>
+        </div>
+      </div>
+
+      <div class="collection-card">
+        <div class="card-img real-card-img">
+          <img src="erp/assets/img/banner-standee.png" alt="Banners and Standees" class="collection-real-img">
+        </div>
+        <div class="icon-badge orange"><i class="fa-solid fa-shop"></i></div>
+        <div class="card-body">
+          <h5>Banners &amp; Standees</h5>
+          <p>High quality prints for every event</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- WHY CHOOSE -->
+<section class="why-section" id="about">
+  <div class="container-fluid page-container">
+    <div class="row align-items-center">
+      <div class="col-lg-3">
+        <div class="why-left">
+          <p class="eyebrow">WHY CHOOSE</p>
+          <h2>SUBHIKSHA CARD?</h2>
+          <p>
+            We combine creativity, quality and technology to deliver invitations and printed products that leave a lasting impression.
+          </p>
+          <a href="#" class="outline-dark-btn">Know More About Us <i class="fa-solid fa-arrow-right"></i></a>
+        </div>
+      </div>
+
+      <div class="col-lg-5">
+        <div class="why-points">
+          <div class="why-point">
+            <span><i class="fa-regular fa-gem"></i></span>
+            <div>
+              <h5>Premium Materials</h5>
+              <p>Finest quality paper with luxurious finishing</p>
+            </div>
+          </div>
+          <div class="why-point">
+            <span><i class="fa-solid fa-print"></i></span>
+            <div>
+              <h5>Latest Printing Technology</h5>
+              <p>Sharp, vibrant and high definition prints</p>
+            </div>
+          </div>
+          <div class="why-point">
+            <span><i class="fa-regular fa-pen-to-square"></i></span>
+            <div>
+              <h5>Unique Designs</h5>
+              <p>Trendy, traditional and customized for you</p>
+            </div>
+          </div>
+          <div class="why-point">
+            <span><i class="fa-regular fa-shield"></i></span>
+            <div>
+              <h5>Satisfaction Guaranteed</h5>
+              <p>We ensure quality and happiness at every step</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-4">
+        <div class="premium-card-scene">
+          <div class="gold-plate"></div>
+          <div class="premium-invite">
+            <div class="premium-border"></div>
+            <div class="premium-mandala"></div>
+            <h4>INVITATION</h4>
+            <div class="premium-bow"></div>
+          </div>
+          <i class="blur-light l1"></i>
+          <i class="blur-light l2"></i>
+          <i class="blur-light l3"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section class="steps-section" id="services">
+  <div class="container-fluid page-container">
+    <div class="section-title text-center">
+      <p>HOW IT WORKS</p>
+      <h2>Simple Steps to Perfect Cards</h2>
+    </div>
+
+    <div class="steps-row">
+      <div class="step-item">
+        <div class="step-icon"><i class="fa-regular fa-image"></i></div>
+        <div class="step-content">
+          <span>01</span>
+          <h5>Choose Design</h5>
+          <p>Select from our wide range of beautiful designs</p>
+        </div>
+      </div>
+      <div class="step-arrow"></div>
+      <div class="step-item">
+        <div class="step-icon orange-step"><i class="fa-solid fa-pencil"></i></div>
+        <div class="step-content">
+          <span>02</span>
+          <h5>Customize</h5>
+          <p>Add your details and personalize as you want</p>
+        </div>
+      </div>
+      <div class="step-arrow"></div>
+      <div class="step-item">
+        <div class="step-icon"><i class="fa-solid fa-eye"></i></div>
+        <div class="step-content">
+          <span>03</span>
+          <h5>Preview & Approve</h5>
+          <p>Review your design and approve before printing</p>
+        </div>
+      </div>
+      <div class="step-arrow"></div>
+      <div class="step-item">
+        <div class="step-icon orange-step"><i class="fa-solid fa-print"></i></div>
+        <div class="step-content">
+          <span>04</span>
+          <h5>Print & Deliver</h5>
+          <p>We print with care and deliver on time</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA + FOOTER -->
+<footer class="footer-section" id="contact">
+  <div class="container-fluid page-container">
+    <div class="cta-box">
+      <div>
+        <h2>Ready to Create Something <span>Amazing?</span></h2>
+        <p>Contact us today for the best designs, quality printing and timely delivery.</p>
+      </div>
+      <a href="#" class="cta-btn">Contact Us Now <i class="fa-solid fa-arrow-right"></i></a>
+      <div class="cta-logo">
+        <img src="erp/assets/img/header-logo-mark.png" alt="Subhiksha logo mark" class="cta-logo-img">
+      </div>
+    </div>
+
+    <div class="footer-main">
+      <div class="footer-about">
+        <a class="brand-wrap footer-brand brand-image-wrap" href="#">
+          <img src="erp/assets/img/subhiksha-logo.png" alt="Subhiksha Cards" class="footer-logo-img">
+        </a>
+        <p>Subhiksha Cards is your trusted partner for premium quality cards and printing solutions.</p>
+        <div class="socials">
+          <a href="#"><i class="fa-brands fa-facebook-f"></i></a>
+          <a href="#"><i class="fa-brands fa-instagram"></i></a>
+          <a href="#"><i class="fa-brands fa-whatsapp"></i></a>
+          <a href="#"><i class="fa-brands fa-x-twitter"></i></a>
+        </div>
+      </div>
+
+      <div class="footer-links">
+        <h5>Quick Links</h5>
+        <a href="#">Home</a>
+        <a href="#">About Us</a>
+        <a href="#">Products</a>
+        <a href="#">Designs</a>
+        <a href="#">Bulk Orders</a>
+        <a href="#">Contact Us</a>
+      </div>
+
+      <div class="footer-links">
+        <h5>Our Services</h5>
+        <a href="#">Wedding Cards</a>
+        <a href="#">Birthday Cards</a>
+        <a href="#">Business Cards</a>
+        <a href="#">Printing Services</a>
+        <a href="#">Brochures & Flyers</a>
+        <a href="#">Banners & Standees</a>
+      </div>
+
+      <div class="footer-contact">
+        <h5>Get In Touch</h5>
+        <p><i class="fa-solid fa-phone"></i> +91 7200602020</p>
+        <p><i class="fa-solid fa-envelope"></i> info@subhikshacards.com</p>
+        <p><i class="fa-solid fa-location-dot"></i> Mani Papper Company,103,Pennagaram,East Coast Road, Dharmapuri,Tamil Nadu, India - 636701</p>
+      </div>
+    </div>
+
+    <div class="footer-bottom">
+      <p>© 2024 Subhiksha Cards. All Rights Reserved.</p>
+      <p>Designed with <i class="fa-solid fa-heart"></i> for your special moments.</p>
+    </div>
+  </div>
+</footer>
+
+<button class="back-to-top" id="backToTop"><i class="fa-solid fa-arrow-up"></i></button>
+
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="erp/assets/js/main.js"></script>
+</body>
+</html>

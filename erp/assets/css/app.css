@@ -2,165 +2,6 @@
 
 
 /* =========================================================
-   SUBHIKSHA COLLAPSED SIDEBAR FLYOUT FIX
-   Included directly inside app.css
-   ========================================================= */
-
-#sidebar {
-    overflow: visible !important;
-}
-
-#sidebar .sidebar-nav {
-    overflow-y: auto;
-    overflow-x: visible !important;
-}
-
-/* Desktop collapsed sidebar + flyout */
-@media (min-width: 1200px) {
-    body.sidebar-collapsed #sidebar {
-        width: 84px !important;
-        overflow: visible !important;
-        z-index: 1045 !important;
-    }
-
-    body.sidebar-collapsed #main {
-        margin-left: 84px !important;
-        width: calc(100% - 84px) !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-brand-text,
-    body.sidebar-collapsed #sidebar .sidebar-text,
-    body.sidebar-collapsed #sidebar .sidebar-help-text,
-    body.sidebar-collapsed #sidebar .sidebar-sub-arrow {
-        display: none !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-header {
-        justify-content: center !important;
-        padding-left: 10px !important;
-        padding-right: 10px !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-header > .d-flex {
-        justify-content: center !important;
-        width: 100% !important;
-    }
-
-    body.sidebar-collapsed #sidebar .brand-logo {
-        width: 48px !important;
-        height: 48px !important;
-        flex: 0 0 auto !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-nav {
-        padding-left: 10px !important;
-        padding-right: 10px !important;
-        overflow-y: auto !important;
-        overflow-x: visible !important;
-    }
-
-    body.sidebar-collapsed #sidebar .nav-link-custom {
-        justify-content: center !important;
-        padding-left: 0 !important;
-        padding-right: 0 !important;
-        width: 64px !important;
-        min-height: 52px !important;
-        position: relative !important;
-    }
-
-    body.sidebar-collapsed #sidebar .nav-link-custom > svg {
-        margin: 0 !important;
-        width: 22px !important;
-        height: 22px !important;
-        flex: 0 0 auto !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-submenu:not(.sidebar-flyout-open) {
-        display: none !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open {
-        display: block !important;
-        position: fixed !important;
-        width: 310px !important;
-        min-width: 310px !important;
-        max-width: 340px !important;
-        padding: 16px 14px !important;
-        border-radius: 22px !important;
-        background: #0d1b2a !important;
-        color: #ffffff !important;
-        box-shadow: 0 24px 70px rgba(15, 23, 42, .35) !important;
-        border: 1px solid rgba(255, 255, 255, .10) !important;
-        z-index: 5000 !important;
-        overflow-y: auto !important;
-        overflow-x: hidden !important;
-        transform: none !important;
-        margin: 0 !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-flyout-title {
-        display: block !important;
-        font-size: 18px !important;
-        line-height: 1.25 !important;
-        font-weight: 900 !important;
-        padding: 8px 10px 14px !important;
-        margin-bottom: 8px !important;
-        border-bottom: 1px solid rgba(255,255,255,.14) !important;
-        color: #ffffff !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-sub-link {
-        display: flex !important;
-        width: 100% !important;
-        justify-content: flex-start !important;
-        gap: 14px !important;
-        min-height: 48px !important;
-        padding: 12px 12px !important;
-        border-radius: 14px !important;
-        color: rgba(255,255,255,.92) !important;
-        margin-bottom: 6px !important;
-        font-size: 15px !important;
-        font-weight: 800 !important;
-        text-decoration: none !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-sub-link:hover,
-    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-sub-link.active {
-        background: rgba(255,255,255,.12) !important;
-        color: #ffffff !important;
-        transform: none !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-sub-link .sidebar-text {
-        display: inline !important;
-        white-space: nowrap !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-sub-link svg {
-        width: 20px !important;
-        height: 20px !important;
-        flex: 0 0 auto !important;
-    }
-
-    body.sidebar-collapsed #sidebar .sidebar-collapse-link.flyout-parent-open {
-        background: linear-gradient(135deg, var(--sidebar-active-bg-1, #f59e0b), var(--sidebar-active-bg-2, #ffb84d)) !important;
-        color: var(--sidebar-active-text, #fff) !important;
-    }
-}
-
-/* Mobile must behave like normal collapse, not flyout */
-@media (max-width: 1199.98px) {
-    #sidebar .sidebar-submenu.sidebar-flyout-open {
-        position: static !important;
-        width: auto !important;
-        min-width: 0 !important;
-        max-width: none !important;
-        box-shadow: none !important;
-    }
-}
-
-
-/* =========================================================
    SUBHIKSHA TOPBAR FINAL FIX
    Fixes oversized title, broken user dropdown border,
    topbar height/alignment and mobile responsiveness.
@@ -469,3 +310,296 @@ html[data-theme="dark"] #topbar .user-chip-text b {
         font-size: 14px !important;
     }
 }
+.select2-container--bootstrap-5 .select2-selection {
+    min-height: 46px;
+    border-radius: 14px;
+    border-color: var(--border-soft, #dbe3ef);
+    display: flex;
+    align-items: center;
+}
+
+.select2-container--bootstrap-5 .select2-selection--single .select2-selection__rendered {
+    font-weight: 700;
+    color: var(--text-main, #0f172a);
+}
+
+.select2-container--bootstrap-5 .select2-dropdown {
+    border-radius: 14px;
+    border-color: var(--border-soft, #dbe3ef);
+    overflow: hidden;
+}
+
+.select2-container--bootstrap-5 .select2-search__field {
+    border-radius: 10px !important;
+}
+
+body.dark-mode .select2-container--bootstrap-5 .select2-selection,
+body.dark .select2-container--bootstrap-5 .select2-selection {
+    background: var(--card-bg, #111827);
+    color: var(--text-main, #fff);
+}
+
+
+/* =========================================================
+   Select2 Autotype / Searchable Dropdown Common Style
+   ========================================================= */
+.select2-container {
+    width: 100% !important;
+}
+
+.select2-container--bootstrap-5 .select2-selection {
+    min-height: 46px !important;
+    border-radius: 14px !important;
+    border-color: var(--border-soft, #dbe3ef) !important;
+    background: var(--card-bg, #ffffff) !important;
+    color: var(--text-main, #0f172a) !important;
+    display: flex !important;
+    align-items: center !important;
+    box-shadow: none !important;
+}
+
+.select2-container--bootstrap-5.select2-container--focus .select2-selection,
+.select2-container--bootstrap-5.select2-container--open .select2-selection {
+    border-color: var(--brand-1, #f59e0b) !important;
+    box-shadow: 0 0 0 .20rem color-mix(in srgb, var(--brand-1, #f59e0b) 18%, transparent) !important;
+}
+
+.select2-container--bootstrap-5 .select2-selection--single .select2-selection__rendered {
+    font-weight: 700 !important;
+    color: var(--text-main, #0f172a) !important;
+    padding-left: 10px !important;
+}
+
+.select2-container--bootstrap-5 .select2-selection--single .select2-selection__placeholder {
+    color: var(--text-muted, #64748b) !important;
+}
+
+.select2-container--bootstrap-5 .select2-dropdown {
+    border-radius: 14px !important;
+    border-color: var(--border-soft, #dbe3ef) !important;
+    background: var(--card-bg, #ffffff) !important;
+    color: var(--text-main, #0f172a) !important;
+    overflow: hidden !important;
+    z-index: 9999 !important;
+}
+
+.select2-container--bootstrap-5 .select2-search__field {
+    border-radius: 10px !important;
+    min-height: 38px !important;
+    color: var(--text-main, #0f172a) !important;
+    background: var(--card-bg, #ffffff) !important;
+}
+
+.select2-container--bootstrap-5 .select2-results__option {
+    font-weight: 700 !important;
+    padding: 9px 12px !important;
+}
+
+.select2-container--bootstrap-5 .select2-results__option--highlighted {
+    background: var(--brand-1, #f59e0b) !important;
+    color: var(--brand-text, #ffffff) !important;
+}
+
+body.dark-mode .select2-container--bootstrap-5 .select2-selection,
+html[data-theme="dark"] .select2-container--bootstrap-5 .select2-selection,
+body.dark-mode .select2-container--bootstrap-5 .select2-dropdown,
+html[data-theme="dark"] .select2-container--bootstrap-5 .select2-dropdown,
+body.dark-mode .select2-container--bootstrap-5 .select2-search__field,
+html[data-theme="dark"] .select2-container--bootstrap-5 .select2-search__field {
+    background: var(--card-bg, #111827) !important;
+    color: var(--text-main, #ffffff) !important;
+    border-color: var(--border-soft, #273449) !important;
+}
+
+body.dark-mode .select2-container--bootstrap-5 .select2-selection--single .select2-selection__rendered,
+html[data-theme="dark"] .select2-container--bootstrap-5 .select2-selection--single .select2-selection__rendered {
+    color: var(--text-main, #ffffff) !important;
+}
+
+
+/* =========================================================
+   SUBHIKSHA COLLAPSED SIDEBAR FLYOUT FINAL FIX
+   IMPORTANT: keep this at the END of assets/css/app.css
+   ========================================================= */
+
+#sidebar {
+    overflow: visible !important;
+}
+
+#sidebar .sidebar-nav {
+    overflow-y: auto !important;
+    overflow-x: visible !important;
+}
+
+@media (min-width: 1200px) {
+    body.sidebar-collapsed #sidebar {
+        width: 84px !important;
+        overflow: visible !important;
+        z-index: 1045 !important;
+    }
+
+    body.sidebar-collapsed #main {
+        margin-left: 84px !important;
+        width: calc(100% - 84px) !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-brand-text,
+    body.sidebar-collapsed #sidebar .sidebar-text,
+    body.sidebar-collapsed #sidebar .sidebar-help-text,
+    body.sidebar-collapsed #sidebar .sidebar-sub-arrow {
+        display: none !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-header {
+        justify-content: center !important;
+        padding-left: 10px !important;
+        padding-right: 10px !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-header > .d-flex {
+        justify-content: center !important;
+        width: 100% !important;
+    }
+
+    body.sidebar-collapsed #sidebar .brand-logo {
+        width: 48px !important;
+        height: 48px !important;
+        flex: 0 0 auto !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-nav {
+        padding-left: 10px !important;
+        padding-right: 10px !important;
+        overflow-y: auto !important;
+        overflow-x: visible !important;
+    }
+
+    body.sidebar-collapsed #sidebar .nav-link-custom {
+        justify-content: center !important;
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+        width: 64px !important;
+        min-height: 52px !important;
+        position: relative !important;
+    }
+
+    body.sidebar-collapsed #sidebar .nav-link-custom > svg {
+        margin: 0 !important;
+        width: 22px !important;
+        height: 22px !important;
+        flex: 0 0 auto !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu:not(.sidebar-flyout-open) {
+        display: none !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open {
+        display: block !important;
+        position: fixed !important;
+        width: 390px !important;
+        min-width: 360px !important;
+        max-width: calc(100vw - 140px) !important;
+        max-height: calc(100vh - 24px) !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        overscroll-behavior: contain !important;
+        scrollbar-gutter: stable !important;
+        padding: 18px 16px !important;
+        border-radius: 24px !important;
+        background: #0d1b2a !important;
+        color: #ffffff !important;
+        box-shadow: 0 24px 70px rgba(15, 23, 42, .38) !important;
+        border: 1px solid rgba(255, 255, 255, .12) !important;
+        z-index: 5000 !important;
+        transform: none !important;
+        margin: 0 !important;
+        pointer-events: auto !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open::-webkit-scrollbar {
+        width: 10px !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, .08) !important;
+        border-radius: 999px !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, .48) !important;
+        border-radius: 999px !important;
+        border: 2px solid #0d1b2a !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open {
+        scrollbar-width: thin !important;
+        scrollbar-color: rgba(255,255,255,.48) rgba(255,255,255,.08) !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-flyout-title {
+        display: block !important;
+        position: sticky !important;
+        top: -18px !important;
+        z-index: 2 !important;
+        background: #0d1b2a !important;
+        font-size: 22px !important;
+        line-height: 1.2 !important;
+        font-weight: 900 !important;
+        padding: 10px 12px 16px !important;
+        margin: 0 0 10px !important;
+        border-bottom: 1px solid rgba(255,255,255,.14) !important;
+        color: #ffffff !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-sub-link {
+        display: flex !important;
+        width: 100% !important;
+        justify-content: flex-start !important;
+        gap: 14px !important;
+        min-height: 48px !important;
+        padding: 12px 12px !important;
+        border-radius: 14px !important;
+        color: rgba(255,255,255,.92) !important;
+        margin-bottom: 6px !important;
+        font-size: 15px !important;
+        font-weight: 800 !important;
+        text-decoration: none !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-sub-link:hover,
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-sub-link.active {
+        background: rgba(255,255,255,.12) !important;
+        color: #ffffff !important;
+        transform: none !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-sub-link .sidebar-text {
+        display: inline !important;
+        white-space: nowrap !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-sub-link svg {
+        width: 20px !important;
+        height: 20px !important;
+        flex: 0 0 auto !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-collapse-link.flyout-parent-open {
+        background: linear-gradient(135deg, var(--sidebar-active-bg-1, #f59e0b), var(--sidebar-active-bg-2, #ffb84d)) !important;
+        color: var(--sidebar-active-text, #fff) !important;
+    }
+}
+
+@media (max-width: 1199.98px) {
+    #sidebar .sidebar-submenu.sidebar-flyout-open {
+        position: static !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        max-height: none !important;
+        overflow: visible !important;
+        box-shadow: none !important;
+    }
+}
+
