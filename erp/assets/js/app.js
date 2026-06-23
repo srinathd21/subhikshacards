@@ -2,13 +2,14 @@ document.addEventListener('DOMContentLoaded',function(){if(window.lucide&&typeof
 
 
 /* =========================================================
-   SUBHIKSHA COLLAPSED SIDEBAR FLYOUT FIX
-   Included directly inside app.js
+   SUBHIKSHA COLLAPSED SIDEBAR FLYOUT FINAL FIX
+   IMPORTANT: Replaces old flyout JS. Do not keep old flyout blocks.
+   Fix: Master Controls flyout stays open while scrolling.
    ========================================================= */
 (function () {
     'use strict';
 
-    function ready(callback) {
+    function onReady(callback) {
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', callback);
         } else {
@@ -16,165 +17,158 @@ document.addEventListener('DOMContentLoaded',function(){if(window.lucide&&typeof
         }
     }
 
-    ready(function () {
+    onReady(function () {
         const body = document.body;
         const sidebar = document.getElementById('sidebar');
 
-        if (!sidebar) {
-            return;
-        }
+        if (!sidebar) return;
 
         function isCollapsedDesktop() {
             return window.innerWidth >= 1200 && body.classList.contains('sidebar-collapsed');
         }
 
-        function closeAllFlyouts() {
-            document.querySelectorAll('#sidebar .sidebar-submenu.sidebar-flyout-open').forEach(function (submenu) {
-                submenu.classList.remove('sidebar-flyout-open', 'sidebar-flyout-measuring');
-                submenu.style.removeProperty('left');
-                submenu.style.removeProperty('top');
-                submenu.style.removeProperty('max-height');
-            });
-
-            document.querySelectorAll('#sidebar .sidebar-collapse-link.flyout-parent-open').forEach(function (link) {
-                link.classList.remove('flyout-parent-open');
-            });
-        }
-
-        function getSubmenuFromLink(link) {
+        function getSubmenu(link) {
             const href = link.getAttribute('href') || '';
             const target = link.getAttribute('data-bs-target') || '';
-            let selector = '';
-
-            if (href.startsWith('#')) {
-                selector = href;
-            } else if (target.startsWith('#')) {
-                selector = target;
-            }
+            const selector = href.startsWith('#') ? href : (target.startsWith('#') ? target : '');
 
             if (selector) {
                 try {
-                    const found = document.querySelector(selector);
-                    if (found && found.classList.contains('sidebar-submenu')) {
-                        return found;
-                    }
-                } catch (error) {}
+                    const menu = document.querySelector(selector);
+                    if (menu && menu.classList.contains('sidebar-submenu')) return menu;
+                } catch (e) {}
             }
 
             const next = link.nextElementSibling;
-            if (next && next.classList.contains('sidebar-submenu')) {
-                return next;
-            }
+            if (next && next.classList.contains('sidebar-submenu')) return next;
 
             return null;
         }
 
-        function placeFlyout(link, submenu) {
-            const sidebarRect = sidebar.getBoundingClientRect();
-            const linkRect = link.getBoundingClientRect();
-            const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-            const gap = 12;
-            const leftGap = 14;
+        function closeAllFlyouts() {
+            sidebar.querySelectorAll('.sidebar-submenu.sidebar-flyout-open').forEach(function (menu) {
+                menu.classList.remove('sidebar-flyout-open');
+                menu.classList.remove('show');
+                menu.style.removeProperty('left');
+                menu.style.removeProperty('top');
+                menu.style.removeProperty('max-height');
+            });
 
-            submenu.classList.add('sidebar-flyout-open', 'sidebar-flyout-measuring');
-            submenu.style.left = Math.round(sidebarRect.right + leftGap) + 'px';
-            submenu.style.top = gap + 'px';
-            submenu.style.maxHeight = Math.max(220, viewportHeight - (gap * 2)) + 'px';
-
-            const flyoutHeight = Math.min(
-                submenu.scrollHeight || submenu.offsetHeight || 300,
-                viewportHeight - (gap * 2)
-            );
-
-            let top = linkRect.top - 18;
-
-            if (top + flyoutHeight + gap > viewportHeight) {
-                top = viewportHeight - flyoutHeight - gap;
-            }
-
-            if (top < gap) {
-                top = gap;
-            }
-
-            submenu.style.left = Math.round(sidebarRect.right + leftGap) + 'px';
-            submenu.style.top = Math.round(top) + 'px';
-            submenu.style.maxHeight = Math.round(viewportHeight - top - gap) + 'px';
-
-            submenu.classList.remove('sidebar-flyout-measuring');
+            sidebar.querySelectorAll('.sidebar-collapse-link.flyout-parent-open').forEach(function (link) {
+                link.classList.remove('flyout-parent-open');
+                link.setAttribute('aria-expanded', 'false');
+            });
         }
 
-        document.querySelectorAll('#sidebar .sidebar-collapse-link, #sidebar [data-bs-toggle="collapse"]').forEach(function (link) {
-            link.addEventListener('click', function (event) {
-                if (!isCollapsedDesktop()) {
-                    return;
-                }
+        function openFlyout(link, menu) {
+            closeAllFlyouts();
 
-                const submenu = getSubmenuFromLink(link);
+            const sidebarRect = sidebar.getBoundingClientRect();
+            const linkRect = link.getBoundingClientRect();
+            const gap = 12;
+            const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
 
-                if (!submenu) {
-                    return;
-                }
+            link.classList.add('flyout-parent-open');
+            link.setAttribute('aria-expanded', 'true');
 
+            menu.classList.add('sidebar-flyout-open');
+            menu.classList.add('show');
+
+            const maxHeight = Math.max(240, viewportHeight - (gap * 2));
+            menu.style.left = Math.round(sidebarRect.right + 18) + 'px';
+            menu.style.maxHeight = maxHeight + 'px';
+
+            const menuHeight = Math.min(menu.scrollHeight || 300, maxHeight);
+            let top = linkRect.top - 18;
+
+            if (top + menuHeight + gap > viewportHeight) {
+                top = viewportHeight - menuHeight - gap;
+            }
+
+            if (top < gap) top = gap;
+
+            menu.style.top = Math.round(top) + 'px';
+        }
+
+        function toggleFlyout(link) {
+            const menu = getSubmenu(link);
+            if (!menu) return;
+
+            if (menu.classList.contains('sidebar-flyout-open')) {
+                closeAllFlyouts();
+            } else {
+                openFlyout(link, menu);
+            }
+        }
+
+        // Click to open/close in collapsed mode. Disable Bootstrap collapse behavior only in collapsed mode.
+        sidebar.addEventListener('click', function (event) {
+            const link = event.target.closest('.sidebar-collapse-link');
+
+            if (!link || !sidebar.contains(link)) return;
+            if (!isCollapsedDesktop()) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+
+            toggleFlyout(link);
+        }, true);
+
+        // No mouseleave close. This was the actual reason it disappeared while scrolling.
+        // Keep flyout open until click outside / ESC / resize / expand sidebar.
+
+        // Stop scrolling inside flyout from reaching window/sidebar.
+        sidebar.addEventListener('wheel', function (event) {
+            const menu = event.target.closest('.sidebar-submenu.sidebar-flyout-open');
+
+            if (!menu || !isCollapsedDesktop()) return;
+
+            const delta = event.deltaY;
+            const atTop = menu.scrollTop <= 0;
+            const atBottom = Math.ceil(menu.scrollTop + menu.clientHeight) >= menu.scrollHeight;
+
+            if ((delta < 0 && atTop) || (delta > 0 && atBottom)) {
                 event.preventDefault();
+            }
+
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+        }, { passive: false, capture: true });
+
+        sidebar.addEventListener('touchmove', function (event) {
+            const menu = event.target.closest('.sidebar-submenu.sidebar-flyout-open');
+            if (!menu || !isCollapsedDesktop()) return;
+            event.stopPropagation();
+        }, { passive: true, capture: true });
+
+        // Prevent old/global scroll handlers from closing flyout when the scroll target is the flyout.
+        document.addEventListener('scroll', function (event) {
+            const target = event.target;
+            if (target && target.closest && target.closest('#sidebar .sidebar-submenu.sidebar-flyout-open')) {
                 event.stopPropagation();
                 event.stopImmediatePropagation();
-
-                const wasOpen = submenu.classList.contains('sidebar-flyout-open');
-                closeAllFlyouts();
-
-                if (!wasOpen) {
-                    link.classList.add('flyout-parent-open');
-                    placeFlyout(link, submenu);
-                }
-            }, true);
-
-            link.addEventListener('mouseenter', function () {
-                if (!isCollapsedDesktop()) {
-                    return;
-                }
-
-                const submenu = getSubmenuFromLink(link);
-                if (!submenu) {
-                    return;
-                }
-
-                closeAllFlyouts();
-                link.classList.add('flyout-parent-open');
-                placeFlyout(link, submenu);
-            });
-        });
-
-        sidebar.addEventListener('mouseleave', function (event) {
-            if (!isCollapsedDesktop()) {
-                return;
-            }
-
-            const related = event.relatedTarget;
-            if (related && related.closest && related.closest('#sidebar .sidebar-submenu.sidebar-flyout-open')) {
-                return;
-            }
-
-            setTimeout(function () {
-                if (!document.querySelector('#sidebar:hover')) {
-                    closeAllFlyouts();
-                }
-            }, 150);
-        });
-
-        document.addEventListener('click', function (event) {
-            if (!event.target.closest('#sidebar')) {
-                closeAllFlyouts();
             }
         }, true);
 
-        window.addEventListener('resize', closeAllFlyouts);
-        window.addEventListener('scroll', closeAllFlyouts, true);
+        document.addEventListener('click', function (event) {
+            if (!isCollapsedDesktop()) return;
+
+            if (
+                event.target.closest('#sidebar .sidebar-submenu.sidebar-flyout-open') ||
+                event.target.closest('#sidebar .sidebar-collapse-link.flyout-parent-open')
+            ) {
+                return;
+            }
+
+            closeAllFlyouts();
+        }, true);
 
         document.addEventListener('keydown', function (event) {
-            if (event.key === 'Escape') {
-                closeAllFlyouts();
-            }
+            if (event.key === 'Escape') closeAllFlyouts();
         });
+
+        window.addEventListener('resize', closeAllFlyouts);
 
         const observer = new MutationObserver(function () {
             if (!body.classList.contains('sidebar-collapsed')) {
@@ -188,3 +182,4 @@ document.addEventListener('DOMContentLoaded',function(){if(window.lucide&&typeof
         });
     });
 })();
+
