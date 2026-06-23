@@ -10,10 +10,10 @@ require_once __DIR__ . '/db.php';
  | So this file creates $conn also.
  */
 if (!isset($conn) || !($conn instanceof mysqli)) {
-    $DB_HOST = 'localhost';
-    $DB_NAME = 'subhiksha_local';
-    $DB_USER = 'root';
-    $DB_PASS = '';
+    $DB_HOST = 'srv1740.hstgr.io';
+    $DB_NAME = 'u966043993_subhiksha';
+    $DB_USER = 'u966043993_subhiksha';
+    $DB_PASS = 'C^Iy3jgM!8';
 
     mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
