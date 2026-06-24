@@ -21,6 +21,7 @@ if (empty($_SESSION['followups_csrf'])) {
 $csrfToken = $_SESSION['followups_csrf'];
 $message = '';
 $messageType = 'success';
+$toastTitle = 'Info';
 
 function fuTableExists(mysqli $conn, string $table): bool
 {
@@ -105,6 +106,9 @@ function fuStatusIdByKey(mysqli $conn, string $statusKey): ?int
         return null;
     }
 }
+
+
+
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     fuCsrf();
@@ -260,6 +264,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             fuRedirect('msg=created');
         }
 
+
         if ($action === 'delete_record') {
             $id = fuInt($_POST['id'] ?? 0);
             if ($id <= 0) {
@@ -276,16 +281,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } catch (Throwable $e) {
         $message = $e->getMessage();
         $messageType = 'danger';
+        $toastTitle = 'Failed';
     }
 }
 
 $msg = (string)($_GET['msg'] ?? '');
 if ($msg === 'created') {
     $message = 'Follow-up added successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
 } elseif ($msg === 'updated') {
     $message = 'Follow-up updated successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
 } elseif ($msg === 'deleted') {
     $message = 'Follow-up deleted successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
+} elseif ($msg === 'failed') {
+    $message = 'Action failed. Please try again.';
+    $messageType = 'danger';
+    $toastTitle = 'Failed';
+}
+
+if (isset($_GET['err']) && trim((string)$_GET['err']) !== '') {
+    $errText = trim((string)$_GET['err']);
+    $message .= ($message !== '' ? ' ' : '') . 'Error: ' . $errText;
 }
 
 $enquiries = [];
@@ -375,11 +396,13 @@ if (fuTableExists($conn, 'enquiry_followups')) {
     } catch (Throwable $e) {
         $message = 'List query error: ' . $e->getMessage();
         $messageType = 'danger';
+        $toastTitle = 'Failed';
         $rows = [];
     }
 } else {
     $message = 'enquiry_followups table is missing. Run the support SQL file first.';
     $messageType = 'danger';
+    $toastTitle = 'Failed';
 }
 
 $totalRows = count($rows);
@@ -415,6 +438,69 @@ $nowLocal = date('Y-m-d\TH:i');
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
 
     <style>
+    .toast-ui {
+        border: 0;
+        border-radius: 18px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
+        overflow: hidden;
+        min-width: 320px;
+        max-width: 420px;
+    }
+
+    .toast-ui.success {
+        background: #dcfce7;
+        color: #14532d;
+    }
+
+    .toast-ui.danger {
+        background: #fee2e2;
+        color: #7f1d1d;
+    }
+
+    .toast-ui.warning {
+        background: #fef3c7;
+        color: #78350f;
+    }
+
+    .toast-ui .toast-title {
+        font-size: 14px;
+        font-weight: 900;
+        margin-bottom: 2px;
+    }
+
+    .toast-ui .toast-message {
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.45;
+    }
+
+    .view-info-card {
+        border: 1px solid var(--border-soft);
+        border-radius: 16px;
+        padding: 14px 16px;
+        background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg));
+        height: 100%;
+    }
+
+    .view-info-card small {
+        display: block;
+        color: var(--text-muted);
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+        margin-bottom: 4px;
+    }
+
+    .view-info-card strong,
+    .view-info-card span {
+        display: block;
+        color: var(--text-main);
+        font-weight: 900;
+        word-break: break-word;
+        white-space: pre-wrap;
+    }
+
+
     .module-page .page-head {
         padding: 24px 28px;
         margin-bottom: 18px;
@@ -544,7 +630,6 @@ $nowLocal = date('Y-m-d\TH:i');
         margin-top: 12px;
     }
 
-
     .select2-container {
         width: 100% !important;
     }
@@ -642,8 +727,18 @@ $nowLocal = date('Y-m-d\TH:i');
                 </div>
 
                 <?php if ($message !== ''): ?>
-                <div class="alert alert-<?= e($messageType) ?> rounded-4 fw-bold">
-                    <?= e($message) ?>
+                <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 12000">
+                    <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive"
+                        aria-atomic="true" data-bs-delay="4200">
+                        <div class="d-flex">
+                            <div class="toast-body">
+                                <div class="toast-title"><?= e($toastTitle) ?></div>
+                                <div class="toast-message"><?= e($message) ?></div>
+                            </div>
+                            <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
+                                aria-label="Close"></button>
+                        </div>
+                    </div>
                 </div>
                 <?php endif; ?>
 
@@ -742,6 +837,22 @@ $nowLocal = date('Y-m-d\TH:i');
                                     </td>
                                     <td class="text-end">
                                         <button type="button"
+                                            class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
+                                            data-bs-toggle="modal" data-bs-target="#viewModal"
+                                            data-enquiry-no="<?= e($row['enquiry_no']) ?>"
+                                            data-customer-name="<?= e($row['customer_name']) ?>"
+                                            data-mobile="<?= e($row['mobile']) ?>"
+                                            data-function-name="<?= e($row['function_name'] ?? '-') ?>"
+                                            data-followup-time="<?= e(fuDateTime($row['followup_at'])) ?>"
+                                            data-call-remarks="<?= e($row['call_remarks']) ?>"
+                                            data-customer-response="<?= e($row['customer_response'] ?? '-') ?>"
+                                            data-next-callback="<?= e(fuDateTime($row['next_callback_at'] ?? null)) ?>"
+                                            data-followup-status="<?= e($row['followup_status'] ?: 'Follow-up') ?>"
+                                            data-created-by="<?= e($row['created_by_name'] ?? '-') ?>">
+                                            View
+                                        </button>
+
+                                        <button type="button"
                                             class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
                                             data-bs-toggle="modal" data-bs-target="#recordModal"
                                             data-id="<?= e($row['id']) ?>"
@@ -755,7 +866,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                         </button>
 
                                         <form method="post" class="d-inline"
-                                            onsubmit="return confirm('Delete this follow-up?')">
+                                            onsubmit="const ok = confirm('Delete this follow-up?'); if (ok) { showToast('Deleting follow-up, please wait...', 'warning', 'Processing'); } return ok;">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                             <input type="hidden" name="action" value="delete_record">
                                             <input type="hidden" name="id" value="<?= e($row['id']) ?>">
@@ -795,6 +906,22 @@ $nowLocal = date('Y-m-d\TH:i');
 
                             <div class="mobile-card-actions">
                                 <button type="button"
+                                    class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
+                                    data-bs-toggle="modal" data-bs-target="#viewModal"
+                                    data-enquiry-no="<?= e($row['enquiry_no']) ?>"
+                                    data-customer-name="<?= e($row['customer_name']) ?>"
+                                    data-mobile="<?= e($row['mobile']) ?>"
+                                    data-function-name="<?= e($row['function_name'] ?? '-') ?>"
+                                    data-followup-time="<?= e(fuDateTime($row['followup_at'])) ?>"
+                                    data-call-remarks="<?= e($row['call_remarks']) ?>"
+                                    data-customer-response="<?= e($row['customer_response'] ?? '-') ?>"
+                                    data-next-callback="<?= e(fuDateTime($row['next_callback_at'] ?? null)) ?>"
+                                    data-followup-status="<?= e($row['followup_status'] ?: 'Follow-up') ?>"
+                                    data-created-by="<?= e($row['created_by_name'] ?? '-') ?>">
+                                    View
+                                </button>
+
+                                <button type="button"
                                     class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
                                     data-bs-toggle="modal" data-bs-target="#recordModal" data-id="<?= e($row['id']) ?>"
                                     data-enquiry-id="<?= e($row['enquiry_id']) ?>"
@@ -807,7 +934,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                 </button>
 
                                 <form method="post" class="d-inline"
-                                    onsubmit="return confirm('Delete this follow-up?')">
+                                    onsubmit="const ok = confirm('Delete this follow-up?'); if (ok) { showToast('Deleting follow-up, please wait...', 'warning', 'Processing'); } return ok;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="delete_record">
                                     <input type="hidden" name="id" value="<?= e($row['id']) ?>">
@@ -906,6 +1033,96 @@ $nowLocal = date('Y-m-d\TH:i');
         </div>
     </div>
 
+
+
+    <div class="modal fade" id="viewModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div>
+                        <h5 class="modal-title fw-bold">View Follow-up</h5>
+                        <small class="text-muted-custom" id="viewEnquiryNo"></small>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <div class="view-info-card">
+                                <small>Customer</small>
+                                <strong id="viewCustomerName">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-3">
+                            <div class="view-info-card">
+                                <small>Mobile</small>
+                                <strong id="viewMobile">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-3">
+                            <div class="view-info-card">
+                                <small>Function Type</small>
+                                <strong id="viewFunctionName">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-3">
+                            <div class="view-info-card">
+                                <small>Status</small>
+                                <strong id="viewFollowupStatus">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Follow-up Time</small>
+                                <strong id="viewFollowupTime">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Next Callback</small>
+                                <strong id="viewNextCallback">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Created By</small>
+                                <strong id="viewCreatedBy">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="view-info-card">
+                                <small>Call Remarks</small>
+                                <span id="viewCallRemarks">-</span>
+                            </div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="view-info-card">
+                                <small>Customer Response</small>
+                                <span id="viewCustomerResponse">-</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold"
+                        data-bs-dismiss="modal">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <?php include __DIR__ . '/includes/script.php'; ?>
 
     <script>
@@ -914,6 +1131,68 @@ $nowLocal = date('Y-m-d\TH:i');
         const submit = document.getElementById('recordSubmitBtn');
         const nowLocal = '<?= e($nowLocal) ?>';
 
+        function showToast(message, type = 'success', titleText = '') {
+            if (!message) return;
+
+            const oldToastWrap = document.getElementById('dynamicActionToastWrap');
+            if (oldToastWrap) {
+                oldToastWrap.remove();
+            }
+
+            const toastTitle = titleText || (type === 'danger' ? 'Failed' : (type === 'warning' ? 'Warning' :
+                'Success'));
+            const wrap = document.createElement('div');
+            wrap.id = 'dynamicActionToastWrap';
+            wrap.className = 'toast-container position-fixed top-0 end-0 p-3';
+            wrap.style.zIndex = '12000';
+
+            wrap.innerHTML = `
+                <div id="dynamicActionToast" class="toast toast-ui ${type}" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="4200">
+                    <div class="d-flex">
+                        <div class="toast-body">
+                            <div class="toast-title">${toastTitle}</div>
+                            <div class="toast-message">${message}</div>
+                        </div>
+                        <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                    </div>
+                </div>
+            `;
+
+            document.body.appendChild(wrap);
+
+            const toastEl = document.getElementById('dynamicActionToast');
+            if (window.bootstrap && bootstrap.Toast && toastEl) {
+                bootstrap.Toast.getOrCreateInstance(toastEl).show();
+            }
+        }
+
+        const pageToastEl = document.getElementById('pageToast');
+        if (pageToastEl && window.bootstrap && bootstrap.Toast) {
+            bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
+        }
+
+        function setText(id, value) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const clean = (value == null || String(value).trim() === '') ? '-' : String(value);
+            el.textContent = clean;
+        }
+
+        document.querySelectorAll('.js-view-record').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                setText('viewEnquiryNo', btn.dataset.enquiryNo || '-');
+                setText('viewCustomerName', btn.dataset.customerName || '-');
+                setText('viewMobile', btn.dataset.mobile || '-');
+                setText('viewFunctionName', btn.dataset.functionName || '-');
+                setText('viewFollowupStatus', btn.dataset.followupStatus || '-');
+                setText('viewFollowupTime', btn.dataset.followupTime || '-');
+                setText('viewNextCallback', btn.dataset.nextCallback || '-');
+                setText('viewCreatedBy', btn.dataset.createdBy || '-');
+                setText('viewCallRemarks', btn.dataset.callRemarks || '-');
+                setText('viewCustomerResponse', btn.dataset.customerResponse || '-');
+                showToast('Follow-up details opened.', 'success', 'Success');
+            });
+        });
 
         function initPageSelect2(context) {
             if (window.initSelect2AutoType) {
@@ -992,6 +1271,12 @@ $nowLocal = date('Y-m-d\TH:i');
                 refreshSelect2('followup_status');
             });
         });
+
+
+        document.querySelector('#recordModal form')?.addEventListener('submit', function() {
+            showToast('Saving follow-up, please wait...', 'success', 'Processing');
+        });
+
 
         document.getElementById('tableSearch')?.addEventListener('input', function() {
             const value = this.value.toLowerCase().trim();

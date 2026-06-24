@@ -30,6 +30,7 @@ if (empty($_SESSION['proforma_csrf'])) {
 $csrfToken = $_SESSION['proforma_csrf'];
 $message = '';
 $messageType = 'success';
+$toastTitle = 'Info';
 
 function pb_table_exists(mysqli $conn, string $table): bool
 {
@@ -900,6 +901,382 @@ function pb_create_job_card(mysqli $conn, int $proformaId): int
     return $jobCardId;
 }
 
+function pb_offset_printing_type_id(mysqli $conn): ?int
+{
+    try {
+        if (!pb_table_exists($conn, 'printing_types')) {
+            return null;
+        }
+
+        $likeOffset = '%offset%';
+        $stmt = $conn->prepare("
+            SELECT id
+            FROM printing_types
+            WHERE is_active = 1
+              AND (
+                    LOWER(printing_name) LIKE ?
+                 OR LOWER(printing_key) LIKE ?
+              )
+            ORDER BY sort_order ASC, id ASC
+            LIMIT 1
+        ");
+        $stmt->bind_param('ss', $likeOffset, $likeOffset);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ? (int)$row['id'] : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function pb_printing_type_allowed_for_readymade(mysqli $conn, ?int $printingTypeId): bool
+{
+    if (!$printingTypeId || !pb_table_exists($conn, 'printing_types')) {
+        return false;
+    }
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT printing_name, printing_key
+            FROM printing_types
+            WHERE id = ? AND is_active = 1
+            LIMIT 1
+        ");
+        $stmt->bind_param('i', $printingTypeId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$row) {
+            return false;
+        }
+
+        $text = strtolower((string)($row['printing_name'] ?? '') . ' ' . (string)($row['printing_key'] ?? ''));
+
+        return str_contains($text, 'offset')
+            || str_contains($text, 'screen')
+            || str_contains($text, 'digital');
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function pb_setting_value(mysqli $conn, string $key, string $default = ''): string
+{
+    try {
+        if (!pb_table_exists($conn, 'system_settings')) {
+            return $default;
+        }
+
+        $stmt = $conn->prepare("SELECT setting_value FROM system_settings WHERE setting_key = ? LIMIT 1");
+        $stmt->bind_param('s', $key);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ? trim((string)$row['setting_value']) : $default;
+    } catch (Throwable $e) {
+        return $default;
+    }
+}
+
+function pb_whatsapp_api_ready(mysqli $conn): bool
+{
+    $enabled = pb_setting_value($conn, 'whatsapp_enabled', '0');
+    $apiUrl = pb_setting_value($conn, 'watzup_api_url', '');
+    $apiToken = pb_setting_value($conn, 'watzup_api_token', '');
+    $senderId = pb_setting_value($conn, 'watzup_sender_id', '');
+
+    if ($enabled !== '1') {
+        return false;
+    }
+
+    $dummyValues = [
+        '',
+        'https://your-whatsapp-provider-url/send-message',
+        'PASTE_YOUR_SECRET_KEY_HERE',
+        'PASTE_YOUR_UNIQUE_ID_HERE',
+        'YOUR_REAL_API_URL',
+        'YOUR_REAL_SECRET_KEY',
+        'YOUR_REAL_UNIQUE_ID_OR_ACCOUNT_ID'
+    ];
+
+    if (in_array($apiUrl, $dummyValues, true) || in_array($apiToken, $dummyValues, true) || in_array($senderId, $dummyValues, true)) {
+        return false;
+    }
+
+    return filter_var($apiUrl, FILTER_VALIDATE_URL) !== false;
+}
+
+function pb_whatsapp_mobile($mobile): string
+{
+    $mobile = preg_replace('/\D+/', '', (string)$mobile);
+
+    if ($mobile === '') {
+        return '';
+    }
+
+    if (strlen($mobile) === 10) {
+        return '91' . $mobile;
+    }
+
+    return $mobile;
+}
+
+function pb_get_whatsapp_row(mysqli $conn, int $id): ?array
+{
+    if ($id <= 0 || !pb_table_exists($conn, 'proforma_bills')) {
+        return null;
+    }
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT
+                pb.*,
+                ft.function_name,
+                ps.status_name,
+                pbi.item_name,
+                pbi.description,
+                pbi.qty,
+                pbi.rate,
+                pbi.amount,
+                pbi.printing_type_id,
+                pbi.printing_sub_type_id,
+                pbi.finishing_required,
+                pbi.size_text,
+                pbi.gsm_thickness,
+                pbi.lamination_required,
+                pbi.lamination_type,
+                pbi.printing_side,
+                pbi.screening_type,
+                pt.printing_name,
+                pst.sub_type_name
+            FROM proforma_bills pb
+            LEFT JOIN function_types ft ON ft.id = pb.function_type_id
+            LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
+            LEFT JOIN proforma_bill_items pbi ON pbi.proforma_bill_id = pb.id
+            LEFT JOIN printing_types pt ON pt.id = pbi.printing_type_id
+            LEFT JOIN printing_sub_types pst ON pst.id = pbi.printing_sub_type_id
+            WHERE pb.id = ?
+            ORDER BY pbi.sort_order ASC, pbi.id ASC
+            LIMIT 1
+        ");
+        $stmt->bind_param('i', $id);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function pb_whatsapp_message(array $row): string
+{
+    $customerName = trim((string)($row['customer_name'] ?? 'Customer'));
+    $proformaNo = trim((string)($row['proforma_no'] ?? '-'));
+    $orderType = ucfirst((string)($row['order_type'] ?? '-'));
+    $productName = trim((string)($row['item_name'] ?? '-'));
+    $qty = number_format((float)($row['total_qty'] ?? 0), 0);
+    $finalAmount = '₹' . number_format((float)($row['final_amount'] ?? 0), 2);
+    $advance = '₹' . number_format((float)($row['advance_amount'] ?? 0), 2);
+    $balance = '₹' . number_format((float)($row['balance_amount'] ?? 0), 2);
+    $delivery = !empty($row['delivery_date']) ? date('d-m-Y', strtotime($row['delivery_date'])) : '-';
+
+    return "Hi {$customerName},\n\n"
+        . "Greetings from Subhiksha Cards.\n\n"
+        . "Your proforma bill / sales order has been created successfully.\n\n"
+        . "Proforma No: {$proformaNo}\n"
+        . "Order Type: {$orderType}\n"
+        . "Product: {$productName}\n"
+        . "Quantity: {$qty}\n"
+        . "Final Amount: {$finalAmount}\n"
+        . "Advance Paid: {$advance}\n"
+        . "Balance Amount: {$balance}\n"
+        . "Delivery Date: {$delivery}\n\n"
+        . "Our team will proceed with the next process and keep you updated.\n\n"
+        . "Thank you,\n"
+        . "Subhiksha Cards Team";
+}
+
+function pb_whatsapp_url(array $row): string
+{
+    $mobile = pb_whatsapp_mobile($row['mobile'] ?? '');
+
+    if ($mobile === '') {
+        return '#';
+    }
+
+    return 'https://wa.me/' . $mobile . '?text=' . rawurlencode(pb_whatsapp_message($row));
+}
+
+function pb_whatsapp_template_id(mysqli $conn, string $templateKey): ?int
+{
+    try {
+        if (!pb_table_exists($conn, 'whatsapp_templates')) {
+            return null;
+        }
+
+        $stmt = $conn->prepare("SELECT id FROM whatsapp_templates WHERE template_key = ? LIMIT 1");
+        $stmt->bind_param('s', $templateKey);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ? (int)$row['id'] : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function pb_whatsapp_log_manual(mysqli $conn, int $id): array
+{
+    $row = pb_get_whatsapp_row($conn, $id);
+
+    if (!$row) {
+        return ['success' => false, 'message' => 'Proforma bill not found.'];
+    }
+
+    $mobile = pb_whatsapp_mobile($row['mobile'] ?? '');
+
+    if ($mobile === '') {
+        return ['success' => false, 'message' => 'Customer mobile number is missing.'];
+    }
+
+    if (!pb_table_exists($conn, 'whatsapp_logs')) {
+        return ['success' => true, 'message' => 'Manual WhatsApp opened. whatsapp_logs table missing, so log not saved.'];
+    }
+
+    try {
+        $templateId = pb_whatsapp_template_id($conn, 'proforma_created');
+        $relatedModule = 'Proforma Bills';
+        $relatedId = $id;
+        $customerId = !empty($row['customer_id']) ? (int)$row['customer_id'] : null;
+        $jobCardId = null;
+        $messageBody = pb_whatsapp_message($row);
+        $status = 'sent';
+        $providerResponse = json_encode([
+            'mode' => 'manual',
+            'status' => 'opened',
+            'message' => 'Manual WhatsApp Web/App opened by user.'
+        ]);
+        $sentBy = (int)($_SESSION['user_id'] ?? 0);
+        $sentAt = date('Y-m-d H:i:s');
+
+        $stmt = $conn->prepare("
+            INSERT INTO whatsapp_logs
+                (
+                    template_id,
+                    related_module,
+                    related_id,
+                    customer_id,
+                    job_card_id,
+                    mobile,
+                    message_body,
+                    status,
+                    provider_response,
+                    sent_by,
+                    sent_at,
+                    created_at
+                )
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ");
+        $stmt->bind_param(
+            'isiiissssis',
+            $templateId,
+            $relatedModule,
+            $relatedId,
+            $customerId,
+            $jobCardId,
+            $mobile,
+            $messageBody,
+            $status,
+            $providerResponse,
+            $sentBy,
+            $sentAt
+        );
+        $stmt->execute();
+        $logId = (int)$stmt->insert_id;
+        $stmt->close();
+
+        return ['success' => true, 'message' => 'Manual WhatsApp logged.', 'log_id' => $logId];
+    } catch (Throwable $e) {
+        return ['success' => false, 'message' => $e->getMessage()];
+    }
+}
+
+function pb_send_whatsapp_by_api(mysqli $conn, int $id): array
+{
+    $apiFile = __DIR__ . '/includes/whatsapp-api.php';
+
+    if (!file_exists($apiFile)) {
+        return ['success' => false, 'message' => 'WhatsApp API file missing.'];
+    }
+
+    require_once $apiFile;
+
+    if (!function_exists('subhiksha_send_whatsapp')) {
+        return ['success' => false, 'message' => 'WhatsApp API function missing.'];
+    }
+
+    $row = pb_get_whatsapp_row($conn, $id);
+
+    if (!$row) {
+        return ['success' => false, 'message' => 'Proforma bill not found.'];
+    }
+
+    return subhiksha_send_whatsapp($conn, [
+        'mobile' => (string)($row['mobile'] ?? ''),
+        'template_key' => 'proforma_created',
+        'variables' => [
+            'customer_name' => (string)($row['customer_name'] ?? 'Customer'),
+            'proforma_no' => (string)($row['proforma_no'] ?? '-'),
+            'order_type' => ucfirst((string)($row['order_type'] ?? '-')),
+            'product_name' => (string)($row['item_name'] ?? '-'),
+            'quantity' => number_format((float)($row['total_qty'] ?? 0), 0),
+            'final_amount' => '₹' . number_format((float)($row['final_amount'] ?? 0), 2),
+            'advance_amount' => '₹' . number_format((float)($row['advance_amount'] ?? 0), 2),
+            'balance_amount' => '₹' . number_format((float)($row['balance_amount'] ?? 0), 2),
+            'delivery_date' => !empty($row['delivery_date']) ? date('d-m-Y', strtotime($row['delivery_date'])) : '-'
+        ],
+        'related_module' => 'Proforma Bills',
+        'related_id' => $id,
+        'customer_id' => $row['customer_id'] ?? null
+    ]);
+}
+
+function pb_whatsapp_svg(): string
+{
+    return '<svg viewBox="0 0 32 32" width="17" height="17" aria-hidden="true" focusable="false"><path fill="currentColor" d="M16.04 3C8.85 3 3 8.73 3 15.78c0 2.26.61 4.47 1.77 6.41L3 29l7.02-1.8a13.3 13.3 0 0 0 6.02 1.43C23.23 28.63 29 22.9 29 15.85S23.23 3 16.04 3Zm0 23.45c-1.9 0-3.76-.5-5.39-1.45l-.39-.23-4.16 1.07 1.11-4.01-.26-.41a11.05 11.05 0 0 1-1.73-5.64c0-5.84 4.85-10.6 10.82-10.6 5.96 0 10.81 4.76 10.81 10.67 0 5.84-4.85 10.6-10.81 10.6Zm5.93-7.95c-.32-.16-1.9-.92-2.2-1.03-.3-.11-.52-.16-.74.16-.22.32-.85 1.03-1.04 1.24-.19.22-.38.24-.7.08-.32-.16-1.36-.49-2.59-1.55-.96-.84-1.61-1.88-1.8-2.2-.19-.32-.02-.49.14-.65.14-.14.32-.38.49-.57.16-.19.22-.32.32-.54.11-.22.05-.41-.03-.57-.08-.16-.74-1.76-1.01-2.41-.27-.65-.54-.54-.74-.55h-.63c-.22 0-.57.08-.87.41-.3.32-1.14 1.09-1.14 2.68s1.17 3.12 1.33 3.34c.16.22 2.3 3.46 5.58 4.85.78.33 1.39.53 1.86.68.78.24 1.49.21 2.05.13.63-.09 1.9-.76 2.17-1.49.27-.73.27-1.36.19-1.49-.08-.13-.3-.21-.62-.37Z"/></svg>';
+}
+
+function pb_whatsapp_button(array $row): string
+{
+    $waRow = pb_get_whatsapp_row($GLOBALS['conn'], (int)($row['id'] ?? 0));
+
+    if (!$waRow) {
+        $waRow = $row;
+    }
+
+    return '
+        <button type="button"
+            class="btn btn-sm btn-whatsapp-icon rounded-circle js-whatsapp-preview"
+            title="Preview WhatsApp message"
+            data-id="' . e($row['id'] ?? '') . '"
+            data-customer-name="' . e($row['customer_name'] ?? '') . '"
+            data-mobile="' . e($row['mobile'] ?? '') . '"
+            data-wa-url="' . e(pb_whatsapp_url($waRow)) . '"
+            data-message="' . e(pb_whatsapp_message($waRow)) . '">
+            ' . pb_whatsapp_svg() . '
+        </button>
+    ';
+}
+
+
 $products = [];
 $printingTypes = [];
 $printingSubTypes = [];
@@ -1028,12 +1405,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $printingSubTypeId = pb_int($_POST['printing_sub_type_id'] ?? 0) ?: null;
 
             if ($orderType === 'customized') {
-                $multiColorPrintingTypeId = pb_multicolor_printing_type_id($conn);
-                if (!$multiColorPrintingTypeId) {
-                    throw new RuntimeException('Multicolor Offset Printing type is missing. Please add it in Printing Types master.');
+                $offsetPrintingTypeId = pb_offset_printing_type_id($conn);
+                if (!$offsetPrintingTypeId) {
+                    throw new RuntimeException('Offset Print type is missing. Please add it in Printing Types master.');
                 }
 
-                $printingTypeId = $multiColorPrintingTypeId;
+                $printingTypeId = $offsetPrintingTypeId;
                 $printingSubTypeId = null;
             }
             $finishingRequired = pb_int($_POST['finishing_required'] ?? 0) === 1 ? 1 : 0;
@@ -1041,6 +1418,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $gsmThickness = pb_post('gsm_thickness');
             $laminationRequired = pb_int($_POST['lamination_required'] ?? 0) === 1 ? 1 : 0;
             $laminationType = pb_post('lamination_type') ?: null;
+            if ($laminationRequired !== 1) {
+                $laminationType = null;
+            }
             $printingSide = pb_post('printing_side') ?: null;
             $screeningType = pb_post('screening_type') ?: null;
 
@@ -1090,6 +1470,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($orderType === 'readymade') {
                 if (!$printingTypeId) {
                     throw new RuntimeException('Please select printing type for readymade order.');
+                }
+
+                if (!pb_printing_type_allowed_for_readymade($conn, $printingTypeId)) {
+                    throw new RuntimeException('Readymade order allows only Offset Print, Screen Print, or Digital Print.');
                 }
 
                 if (pb_is_screen_printing_type($conn, $printingTypeId) && !$printingSubTypeId) {
@@ -1427,6 +1811,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             pb_redirect($id > 0 ? 'msg=updated' : 'msg=created');
         }
 
+
+        if ($action === 'log_manual_whatsapp') {
+            $id = pb_int($_POST['id'] ?? 0);
+
+            header('Content-Type: application/json');
+
+            if ($id <= 0) {
+                echo json_encode(['success' => false, 'message' => 'Invalid proforma bill.']);
+                exit;
+            }
+
+            echo json_encode(pb_whatsapp_log_manual($conn, $id));
+            exit;
+        }
+
+        if ($action === 'send_whatsapp_api') {
+            $id = pb_int($_POST['id'] ?? 0);
+
+            if ($id <= 0) {
+                throw new RuntimeException('Invalid proforma bill.');
+            }
+
+            if (!pb_whatsapp_api_ready($conn)) {
+                pb_redirect('msg=whatsapp_manual');
+            }
+
+            $waResult = pb_send_whatsapp_by_api($conn, $id);
+
+            if (!($waResult['success'] ?? false)) {
+                $error = urlencode((string)($waResult['response'] ?? $waResult['message'] ?? 'WhatsApp failed.'));
+                pb_redirect('msg=whatsapp_failed&err=' . $error);
+            }
+
+            pb_redirect('msg=whatsapp_sent');
+        }
+
         if ($action === 'create_job_card') {
             $proformaId = pb_int($_POST['proforma_id'] ?? 0);
 
@@ -1446,16 +1866,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $message = $e->getMessage();
         $messageType = 'danger';
+        $toastTitle = 'Failed';
     }
 }
 
 $msg = (string)($_GET['msg'] ?? '');
 if ($msg === 'created') {
     $message = 'Proforma bill created successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
 } elseif ($msg === 'updated') {
     $message = 'Proforma bill updated successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
 } elseif ($msg === 'job_created') {
     $message = 'Job card created successfully with tracking stages.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
+} elseif ($msg === 'whatsapp_sent') {
+    $message = 'WhatsApp message sent successfully using API.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
+} elseif ($msg === 'whatsapp_failed') {
+    $message = 'WhatsApp message sending failed.';
+    $messageType = 'danger';
+    $toastTitle = 'Failed';
+} elseif ($msg === 'whatsapp_manual') {
+    $message = 'WhatsApp API is not ready. Manual WhatsApp mode is active.';
+    $messageType = 'warning';
+    $toastTitle = 'Warning';
+}
+
+if (isset($_GET['err']) && trim((string)$_GET['err']) !== '') {
+    $errText = trim((string)$_GET['err']);
+    $message .= ($message !== '' ? ' ' : '') . 'Error: ' . $errText;
 }
 
 $rows = [];
@@ -1503,6 +1947,7 @@ if (!empty($_GET['edit'])) {
     }
 }
 
+$whatsappApiReady = pb_whatsapp_api_ready($conn);
 function pb_form_value(?array $data, string $key, string $default = ''): string
 {
     return e($data[$key] ?? $default);
@@ -1519,6 +1964,101 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
 
     <style>
+    .toast-ui {
+        border: 0;
+        border-radius: 18px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
+        overflow: hidden;
+        min-width: 320px;
+        max-width: 420px;
+    }
+
+    .toast-ui.success {
+        background: #dcfce7;
+        color: #14532d;
+    }
+
+    .toast-ui.danger {
+        background: #fee2e2;
+        color: #7f1d1d;
+    }
+
+    .toast-ui.warning {
+        background: #fef3c7;
+        color: #78350f;
+    }
+
+    .toast-ui .toast-title {
+        font-size: 14px;
+        font-weight: 900;
+        margin-bottom: 2px;
+    }
+
+    .toast-ui .toast-message {
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.45;
+    }
+
+    .btn-whatsapp-icon {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        color: #fff !important;
+        background: #22c55e;
+        border-color: #22c55e;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .btn-whatsapp-icon:hover {
+        color: #fff !important;
+        background: #16a34a;
+        border-color: #16a34a;
+    }
+
+    .order-type-info {
+        border: 1px solid var(--border-soft);
+        border-radius: 16px;
+        padding: 14px 16px;
+        background: color-mix(in srgb, var(--info-color) 7%, var(--card-bg));
+        color: var(--text-main);
+        font-weight: 700;
+    }
+
+    .customized-options-box {
+        border: 1px solid var(--border-soft);
+        border-radius: 16px;
+        padding: 14px 16px;
+        background: color-mix(in srgb, var(--success-color) 7%, var(--card-bg));
+    }
+
+    .customized-options-box strong,
+    .customized-options-box span {
+        display: block;
+    }
+
+    #whatsappPreviewModal .modal-dialog {
+        max-width: 760px;
+    }
+
+    #whatsappPreviewModal .modal-body {
+        padding: 22px 28px;
+    }
+
+    #whatsappPreviewModal .whatsapp-preview-box {
+        min-height: 330px;
+        max-height: 430px;
+        white-space: pre-wrap;
+        resize: vertical;
+        font-weight: 700;
+        line-height: 1.6;
+        padding: 18px;
+        font-size: 15px;
+    }
+
+
     .proforma-page .page-head {
         padding: 24px 28px;
         margin-bottom: 18px;
@@ -1611,6 +2151,13 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
         border-color: color-mix(in srgb, var(--success-color, #16a34a) 45%, var(--border-soft)) !important;
     }
 
+
+
+
+    .lamination-type-only {
+        display: none;
+    }
+
     @media(max-width:767.98px) {
         .proforma-page .page-head {
             padding: 18px;
@@ -1666,8 +2213,18 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                 </div>
 
                 <?php if ($message !== ''): ?>
-                <div class="alert alert-<?= e($messageType) ?> rounded-4 fw-bold">
-                    <?= e($message) ?>
+                <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 12000">
+                    <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive"
+                        aria-atomic="true" data-bs-delay="4200">
+                        <div class="d-flex">
+                            <div class="toast-body">
+                                <div class="toast-title"><?= e($toastTitle) ?></div>
+                                <div class="toast-message"><?= e($message) ?></div>
+                            </div>
+                            <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
+                                aria-label="Close"></button>
+                        </div>
+                    </div>
                 </div>
                 <?php endif; ?>
 
@@ -1701,6 +2258,9 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                                     data-sub-total="<?= e($quotation['sub_total'] ?? '') ?>"
                                     data-discount-amount="<?= e($quotation['discount_amount'] ?? '') ?>"
                                     data-final-amount="<?= e($quotation['final_amount'] ?? '') ?>"
+                                    data-unit-rate="<?= e(((float)($quotation['total_qty'] ?? 0) > 0) ? ((float)($quotation['sub_total'] / (float)$quotation['total_qty'])) : (float)($quotation['sub_total'] ?? 0)) ?>"
+                                    data-delivery-date="<?= e($quotation['delivery_date'] ?? '') ?>"
+                                    data-remarks="<?= e($quotation['remarks'] ?? '') ?>"
                                     <?= ((int)($editData['quotation_id'] ?? 0) === (int)$quotation['id']) ? 'selected' : '' ?>>
                                     <?= e($quotation['quotation_no']) ?> - <?= e($quotation['customer_name']) ?> -
                                     ₹<?= number_format((float)$quotation['final_amount'], 2) ?>
@@ -1730,7 +2290,8 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                         <div class="col-md-4">
                             <label class="form-label fw-bold">Order Type *</label>
                             <select name="order_type" id="order_type" class="form-select select2-autotype" required
-                                data-placeholder="Search order type">
+                                data-placeholder="Search order type"
+                                onchange="window.subhikshaToggleLaminationType && window.subhikshaToggleLaminationType()">
                                 <option value="readymade"
                                     <?= (($editData['order_type'] ?? '') === 'readymade') ? 'selected' : '' ?>>Readymade
                                 </option>
@@ -1869,7 +2430,7 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                         </div>
 
                         <div class="col-md-4">
-                            <label class="form-label fw-bold">Product / Item Name *</label>
+                            <label class="form-label fw-bold">Product / New Product Name *</label>
                             <input name="item_name" id="item_name" class="form-control"
                                 value="<?= pb_form_value($editItem, 'item_name') ?>">
                         </div>
@@ -1885,6 +2446,7 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                                     data-printing-key="<?= e($type['printing_key'] ?? '') ?>"
                                     data-normalized-key="<?= e($type['normalized_key'] ?? '') ?>"
                                     data-printing-name="<?= e($type['printing_name'] ?? '') ?>"
+                                    data-allowed-printing="<?= (str_contains(strtolower(($type['printing_name'] ?? '') . ' ' . ($type['printing_key'] ?? '')), 'offset') || str_contains(strtolower(($type['printing_name'] ?? '') . ' ' . ($type['printing_key'] ?? '')), 'screen') || str_contains(strtolower(($type['printing_name'] ?? '') . ' ' . ($type['printing_key'] ?? '')), 'digital')) ? '1' : '0' ?>"
                                     <?= ((int)($editItem['printing_type_id'] ?? 0) === (int)$type['id']) ? 'selected' : '' ?>>
                                     <?= e($type['printing_name']) ?>
                                 </option>
@@ -1921,7 +2483,7 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                         </div>
 
                         <div class="col-md-2">
-                            <label class="form-label fw-bold">Rate</label>
+                            <label class="form-label fw-bold">Final Amount / Rate</label>
                             <input type="number" step="0.01" min="0" name="rate" id="rate" class="form-control"
                                 value="<?= pb_form_value($editItem, 'rate', '0') ?>">
                         </div>
@@ -1992,7 +2554,8 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                         <div class="col-md-4 customized-only">
                             <label class="form-label fw-bold">Lamination Required?</label>
                             <select name="lamination_required" id="lamination_required"
-                                class="form-select select2-autotype" data-placeholder="Select lamination option">
+                                class="form-select select2-autotype" data-placeholder="Select lamination option"
+                                onchange="window.subhikshaToggleLaminationType && window.subhikshaToggleLaminationType()">
                                 <option value="0"
                                     <?= ((int)($editItem['lamination_required'] ?? 0) === 0) ? 'selected' : '' ?>>No
                                     Lamination</option>
@@ -2002,9 +2565,10 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                             </select>
                         </div>
 
-                        <div class="col-md-4 customized-only">
-                            <label class="form-label fw-bold">Lamination Type</label>
-                            <select name="lamination_type" class="form-select select2-autotype"
+                        <div class="col-md-4 lamination-type-only" id="laminationTypeWrap"
+                            style="display:none !important;">
+                            <label class="form-label fw-bold">Lamination Type <span class="text-danger">*</span></label>
+                            <select name="lamination_type" id="lamination_type" class="form-select select2-autotype"
                                 data-placeholder="Search lamination type">
                                 <option value="">Select</option>
                                 <option value="glossy"
@@ -2178,6 +2742,8 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                                             Edit
                                         </a>
 
+                                        <?= pb_whatsapp_button($row) ?>
+
                                         <?php if (empty($row['job_card_no'])): ?>
                                         <form method="post" class="d-inline"
                                             onsubmit="return confirm('Create job card for this proforma bill?')">
@@ -2219,8 +2785,11 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                             <div class="mt-3 d-flex gap-2 flex-wrap">
                                 <a href="proforma_bills.php?edit=<?= e($row['id']) ?>"
                                     class="btn btn-sm btn-outline-primary rounded-pill fw-bold">Edit</a>
+
+                                <?= pb_whatsapp_button($row) ?>
                                 <?php if (empty($row['job_card_no'])): ?>
-                                <form method="post" onsubmit="return confirm('Create job card?')">
+                                <form method="post"
+                                    onsubmit="const ok = confirm('Create job card?'); if (ok) { showToast('Creating job card, please wait...', 'success', 'Processing'); } return ok">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="create_job_card">
                                     <input type="hidden" name="proforma_id" value="<?= e($row['id']) ?>">
@@ -2241,10 +2810,95 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
         <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
     </div>
 
+
+    <div class="modal fade" id="whatsappPreviewModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-lg">
+            <div class="modal-content">
+                <form method="post" id="whatsappApiForm">
+                    <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                    <input type="hidden" name="action" value="send_whatsapp_api">
+                    <input type="hidden" name="id" id="wa_proforma_id" value="">
+
+                    <div class="modal-header">
+                        <div>
+                            <h5 class="modal-title fw-bold">WhatsApp Preview</h5>
+                            <small class="text-muted-custom" id="waCustomerInfo"></small>
+                        </div>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+
+                    <div class="modal-body">
+                        <label class="form-label fw-bold">Message Preview</label>
+                        <textarea class="form-control whatsapp-preview-box" id="waMessagePreview" rows="12"
+                            readonly></textarea>
+
+                        <div class="alert alert-info rounded-4 mt-3 mb-0 fw-bold" id="waModeInfo"></div>
+                    </div>
+
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold"
+                            data-bs-dismiss="modal">
+                            Cancel
+                        </button>
+                        <button type="button" class="btn btn-whatsapp-icon rounded-circle" id="waSendBtn"
+                            title="Send WhatsApp">
+                            <?= pb_whatsapp_svg() ?>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <?php include __DIR__ . '/includes/script.php'; ?>
 
     <script>
     (function() {
+
+        const whatsappApiReady = <?= $whatsappApiReady ? 'true' : 'false' ?>;
+        let currentManualWhatsappUrl = '#';
+        let whatsappPreviewModal = null;
+
+        function showToast(message, type = 'success', titleText = '') {
+            if (!message) return;
+
+            const oldToastWrap = document.getElementById('dynamicActionToastWrap');
+            if (oldToastWrap) {
+                oldToastWrap.remove();
+            }
+
+            const toastTitle = titleText || (type === 'danger' ? 'Failed' : (type === 'warning' ? 'Warning' :
+                'Success'));
+            const wrap = document.createElement('div');
+            wrap.id = 'dynamicActionToastWrap';
+            wrap.className = 'toast-container position-fixed top-0 end-0 p-3';
+            wrap.style.zIndex = '12000';
+
+            wrap.innerHTML = `
+                <div id="dynamicActionToast" class="toast toast-ui ${type}" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="4200">
+                    <div class="d-flex">
+                        <div class="toast-body">
+                            <div class="toast-title">${toastTitle}</div>
+                            <div class="toast-message">${message}</div>
+                        </div>
+                        <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                    </div>
+                </div>
+            `;
+
+            document.body.appendChild(wrap);
+
+            const toastEl = document.getElementById('dynamicActionToast');
+            if (window.bootstrap && bootstrap.Toast && toastEl) {
+                bootstrap.Toast.getOrCreateInstance(toastEl).show();
+            }
+        }
+
+        const pageToastEl = document.getElementById('pageToast');
+        if (pageToastEl && window.bootstrap && bootstrap.Toast) {
+            bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
+        }
+
         const functionType = document.getElementById('function_type_id');
         const orderType = document.getElementById('order_type');
         const product = document.getElementById('product_id');
@@ -2543,7 +3197,13 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
             const customized = orderType.value === 'customized';
             const showType = customized && String(laminationRequired.value) === '1';
 
-            laminationTypeWrap.style.display = showType ? '' : 'none';
+            if (showType) {
+                laminationTypeWrap.classList.remove('lamination-type-only');
+                laminationTypeWrap.style.setProperty('display', 'block', 'important');
+            } else {
+                laminationTypeWrap.classList.add('lamination-type-only');
+                laminationTypeWrap.style.setProperty('display', 'none', 'important');
+            }
 
             if (!showType && laminationType) {
                 laminationType.value = '';
@@ -2598,9 +3258,13 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
         }
 
 
-        document.querySelector('[name="quotation_id"]')?.addEventListener('change', function() {
-            const opt = this.options[this.selectedIndex];
-            if (!opt || !opt.value) return;
+        function applyQuotationReference() {
+            const quotationSelect = document.querySelector('[name="quotation_id"]');
+            const opt = quotationSelect?.options[quotationSelect.selectedIndex];
+
+            if (!opt || !opt.value) {
+                return;
+            }
 
             setFieldByName('customer_name', opt.dataset.customerName || '');
             setFieldByName('mobile', opt.dataset.mobile || '');
@@ -2614,18 +3278,63 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
             setFieldByName('function_date', opt.dataset.functionDate || '');
             setFieldByName('function_time', opt.dataset.functionTime || '');
 
-            if (opt.dataset.totalQty) qty.value = opt.dataset.totalQty;
-            if (opt.dataset.subTotal && parseFloat(rate.value || 0) <= 0 && parseFloat(qty.value || 0) >
-                0) {
-                rate.value = (parseFloat(opt.dataset.subTotal) / parseFloat(qty.value || 1)).toFixed(2);
+            if (opt.dataset.deliveryDate) {
+                setFieldByName('delivery_date', opt.dataset.deliveryDate || '');
             }
-            if (opt.dataset.discountAmount) discount.value = opt.dataset.discountAmount;
+
+            if (opt.dataset.remarks) {
+                setFieldByName('remarks', opt.dataset.remarks || '');
+            }
+
+            if (qty && opt.dataset.totalQty) {
+                qty.value = opt.dataset.totalQty;
+            }
+
+            if (rate) {
+                if (opt.dataset.unitRate && parseFloat(opt.dataset.unitRate || 0) > 0) {
+                    rate.value = parseFloat(opt.dataset.unitRate || 0).toFixed(2);
+                } else if (opt.dataset.subTotal && parseFloat(qty?.value || 0) > 0) {
+                    rate.value = (parseFloat(opt.dataset.subTotal || 0) / parseFloat(qty.value || 1)).toFixed(2);
+                }
+            }
+
+            if (discount && opt.dataset.discountAmount) {
+                discount.value = parseFloat(opt.dataset.discountAmount || 0).toFixed(2);
+            }
+
+            if (advance) {
+                advance.value = '0.00';
+            }
 
             refreshSelect2('function_type_id');
-            toggleFunctionFields();
-            calculate();
-        });
+            refreshSelect2('quotation_id');
 
+            toggleFunctionFields();
+            toggleOrderFields();
+            if (typeof forceCorrectOrderTypeFields === 'function') {
+                forceCorrectOrderTypeFields();
+            }
+            if (window.subhikshaApplyStrictOrderTypeRequirements) {
+                window.subhikshaApplyStrictOrderTypeRequirements();
+            }
+            if (window.subhikshaToggleLaminationType) {
+                window.subhikshaToggleLaminationType();
+            }
+
+            calculate();
+
+            if (typeof showToast === 'function') {
+                showToast('Quotation details auto-filled successfully.', 'success', 'Success');
+            }
+        }
+
+        document.querySelector('[name="quotation_id"]')?.addEventListener('change', applyQuotationReference);
+
+        if (window.jQuery) {
+            window.jQuery('[name="quotation_id"]').on('select2:select change', function() {
+                setTimeout(applyQuotationReference, 50);
+            });
+        }
 
         product?.addEventListener('change', function() {
             const opt = product.options[product.selectedIndex];
@@ -2689,6 +3398,88 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
         laminationRequired?.addEventListener('change', toggleLaminationOptions);
 
 
+
+        function openWhatsappPreview(btn) {
+            const modalEl = document.getElementById('whatsappPreviewModal');
+            if (!modalEl) return;
+
+            setFieldByName('id', btn.dataset.id || '');
+            const hiddenId = document.getElementById('wa_proforma_id');
+            if (hiddenId) {
+                hiddenId.value = btn.dataset.id || '';
+            }
+
+            currentManualWhatsappUrl = btn.dataset.waUrl || '#';
+
+            const messageBox = document.getElementById('waMessagePreview');
+            const infoBox = document.getElementById('waModeInfo');
+            const customerInfo = document.getElementById('waCustomerInfo');
+
+            if (messageBox) {
+                messageBox.value = btn.dataset.message || '';
+            }
+
+            if (customerInfo) {
+                customerInfo.textContent = (btn.dataset.customerName || 'Customer') + ' | ' + (btn.dataset.mobile ||
+                    '');
+            }
+
+            if (infoBox) {
+                infoBox.textContent = whatsappApiReady ?
+                    'API mode: message will be sent directly using WhatsApp API.' :
+                    'Manual mode: WhatsApp Web/App will open and this action will be saved in WhatsApp Logs.';
+            }
+
+            whatsappPreviewModal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            whatsappPreviewModal.show();
+        }
+
+        document.querySelectorAll('.js-whatsapp-preview').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                openWhatsappPreview(btn);
+            });
+        });
+
+        document.getElementById('waSendBtn')?.addEventListener('click', function() {
+            if (whatsappApiReady) {
+                showToast('Sending WhatsApp message through API...', 'success', 'Processing');
+                document.getElementById('whatsappApiForm')?.submit();
+                return;
+            }
+
+            if (currentManualWhatsappUrl && currentManualWhatsappUrl !== '#') {
+                const form = document.getElementById('whatsappApiForm');
+                const formData = new FormData(form);
+                formData.set('action', 'log_manual_whatsapp');
+
+                showToast('Opening WhatsApp manual mode...', 'success', 'Success');
+
+                fetch(window.location.href.split('?')[0], {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin'
+                }).catch(function() {
+                    showToast('WhatsApp log failed, but manual WhatsApp will open.', 'warning',
+                        'Warning');
+                }).finally(function() {
+                    window.location.href = currentManualWhatsappUrl;
+
+                    if (whatsappPreviewModal) {
+                        whatsappPreviewModal.hide();
+                    }
+                });
+            } else {
+                showToast('Customer mobile number is missing.', 'danger', 'Failed');
+            }
+        });
+
+
+
+        document.getElementById('proformaForm')?.addEventListener('submit', function() {
+            showToast('Saving proforma bill, please wait...', 'success', 'Processing');
+        });
+
+
         document.getElementById('tableSearch')?.addEventListener('input', function() {
             const value = this.value.toLowerCase().trim();
             document.querySelectorAll('#proformaTable tbody tr').forEach(function(row) {
@@ -2700,6 +3491,10 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
         });
 
         initPageSelect2(document);
+
+        if (document.querySelector('[name="quotation_id"]')?.value) {
+            setTimeout(applyQuotationReference, 100);
+        }
 
         toggleFunctionFields();
         toggleOrderFields();
@@ -2838,9 +3633,11 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
 
                 if (laminationTypeWrap) {
                     if (laminationRequired && laminationRequired.value === '1') {
-                        show(laminationTypeWrap);
+                        laminationTypeWrap.classList.remove('lamination-type-only');
+                        laminationTypeWrap.style.setProperty('display', 'block', 'important');
                     } else {
-                        hide(laminationTypeWrap);
+                        laminationTypeWrap.classList.add('lamination-type-only');
+                        laminationTypeWrap.style.setProperty('display', 'none', 'important');
                     }
                 }
             } else {
@@ -3024,6 +3821,293 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
         } else {
             bindCustomizedPrinting();
         }
+    })();
+    </script>
+
+
+
+
+
+    <script>
+    (function() {
+        function getEl(id) {
+            return document.getElementById(id);
+        }
+
+        function getVal(id) {
+            var el = getEl(id);
+            return el ? String(el.value || '') : '';
+        }
+
+        function clearSelect2Value(el) {
+            if (!el) return;
+            el.value = '';
+            if (window.jQuery && window.jQuery.fn && window.jQuery.fn.select2) {
+                window.jQuery(el).val('').trigger('change.select2');
+            }
+        }
+
+        window.subhikshaToggleLaminationType = function() {
+            var orderType = getVal('order_type');
+            var laminationRequired = getVal('lamination_required');
+            var wrap = getEl('laminationTypeWrap');
+            var typeSelect = getEl('lamination_type');
+
+            if (!wrap) return;
+
+            if (orderType === 'customized' && laminationRequired === '1') {
+                wrap.style.cssText = 'display:block !important;';
+                wrap.classList.remove('d-none');
+            } else {
+                wrap.style.cssText = 'display:none !important;';
+                wrap.classList.add('d-none');
+                clearSelect2Value(typeSelect);
+            }
+        };
+
+        function bindLamination() {
+            ['order_type', 'lamination_required'].forEach(function(id) {
+                var el = getEl(id);
+                if (!el) return;
+
+                el.addEventListener('change', function() {
+                    setTimeout(window.subhikshaToggleLaminationType, 10);
+                });
+
+                if (window.jQuery) {
+                    window.jQuery(el).on('change select2:select', function() {
+                        setTimeout(window.subhikshaToggleLaminationType, 10);
+                    });
+                }
+            });
+
+            window.subhikshaToggleLaminationType();
+            setTimeout(window.subhikshaToggleLaminationType, 200);
+            setTimeout(window.subhikshaToggleLaminationType, 800);
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', bindLamination);
+        } else {
+            bindLamination();
+        }
+    })();
+    </script>
+
+
+    <script>
+    (function() {
+        function byId(id) {
+            return document.getElementById(id);
+        }
+
+        function refreshSelect(el) {
+            if (!el) return;
+            if (window.jQuery && window.jQuery.fn && window.jQuery.fn.select2) {
+                window.jQuery(el).trigger('change.select2');
+            }
+        }
+
+        function optionText(opt) {
+            if (!opt) return '';
+            return (
+                (opt.getAttribute('data-printing-key') || '') + ' ' +
+                (opt.getAttribute('data-normalized-key') || '') + ' ' +
+                (opt.getAttribute('data-printing-name') || '') + ' ' +
+                (opt.textContent || '')
+            ).toLowerCase();
+        }
+
+        function isAllowedReadymadePrinting(opt) {
+            const text = optionText(opt);
+            return text.includes('offset') || text.includes('screen') || text.includes('digital') || !opt.value;
+        }
+
+        function isOffsetPrint(opt) {
+            return optionText(opt).includes('offset');
+        }
+
+        function isScreenPrint(opt) {
+            return optionText(opt).includes('screen');
+        }
+
+        function filterReadymadePrintingOptions() {
+            const orderType = byId('order_type');
+            const printingType = byId('printing_type_id');
+            if (!orderType || !printingType) return;
+
+            const customized = orderType.value === 'customized';
+
+            Array.from(printingType.options).forEach(function(opt) {
+                if (!opt.value) {
+                    opt.hidden = false;
+                    opt.disabled = false;
+                    return;
+                }
+
+                const allowed = customized ? isOffsetPrint(opt) : isAllowedReadymadePrinting(opt);
+                opt.hidden = !allowed;
+                opt.disabled = !allowed;
+            });
+
+            const selected = printingType.options[printingType.selectedIndex];
+            if (selected && (selected.hidden || selected.disabled || (customized && !isOffsetPrint(selected)))) {
+                const replacement = Array.from(printingType.options).find(function(opt) {
+                    return opt.value && !opt.disabled && !opt.hidden && (customized ? isOffsetPrint(opt) :
+                        isAllowedReadymadePrinting(opt));
+                });
+
+                printingType.value = replacement ? replacement.value : '';
+                refreshSelect(printingType);
+            }
+        }
+
+        function applyStrictOrderTypeRequirements() {
+            const orderType = byId('order_type');
+            const printingType = byId('printing_type_id');
+            const printingSubType = byId('printing_sub_type_id');
+            const screenSubTypeWrap = byId('screenSubTypeWrap') || (printingSubType ? printingSubType.closest(
+                '.col-md-4') : null);
+            const laminationRequired = byId('lamination_required');
+            const laminationTypeWrap = byId('laminationTypeWrap');
+            const customizedPrintingHelp = byId('customizedPrintingHelp');
+            const customized = orderType && orderType.value === 'customized';
+
+            document.querySelectorAll('.customized-only').forEach(function(el) {
+                el.style.setProperty('display', customized ? '' : 'none', 'important');
+            });
+
+            document.querySelectorAll('.readymade-only').forEach(function(el) {
+                el.style.setProperty('display', customized ? 'none' : '', 'important');
+            });
+
+            filterReadymadePrintingOptions();
+
+            if (customized) {
+                if (customizedPrintingHelp) {
+                    customizedPrintingHelp.classList.remove('d-none');
+                    customizedPrintingHelp.textContent = 'Customized order automatically uses Offset Print.';
+                }
+
+                if (screenSubTypeWrap) {
+                    screenSubTypeWrap.style.setProperty('display', 'none', 'important');
+                }
+
+                if (printingSubType) {
+                    printingSubType.value = '';
+                    refreshSelect(printingSubType);
+                }
+
+                if (laminationTypeWrap) {
+                    const showLamination = laminationRequired && laminationRequired.value === '1';
+                    if (showLamination) {
+                        laminationTypeWrap.classList.remove('lamination-type-only');
+                        laminationTypeWrap.style.setProperty('display', 'block', 'important');
+                    } else {
+                        laminationTypeWrap.classList.add('lamination-type-only');
+                        laminationTypeWrap.style.setProperty('display', 'none', 'important');
+                    }
+                }
+            } else {
+                if (customizedPrintingHelp) {
+                    customizedPrintingHelp.classList.add('d-none');
+                }
+
+                const selectedPrint = printingType ? printingType.options[printingType.selectedIndex] : null;
+                const showScreenSubType = isScreenPrint(selectedPrint);
+
+                if (screenSubTypeWrap) {
+                    screenSubTypeWrap.style.setProperty('display', showScreenSubType ? '' : 'none', 'important');
+                }
+
+                if (laminationTypeWrap) {
+                    laminationTypeWrap.style.setProperty('display', 'none', 'important');
+                }
+            }
+
+            if (laminationTypeWrap && (!laminationRequired || laminationRequired.value !== '1')) {
+                const laminationType = byId('lamination_type');
+                if (laminationType) {
+                    laminationType.value = '';
+                    refreshSelect(laminationType);
+                }
+            }
+        }
+
+        ['order_type', 'printing_type_id', 'lamination_required'].forEach(function(id) {
+            const el = byId(id);
+            if (!el) return;
+
+            el.addEventListener('change', applyStrictOrderTypeRequirements);
+
+            if (window.jQuery) {
+                window.jQuery(el).on('change select2:select select2:clear',
+                    applyStrictOrderTypeRequirements);
+            }
+        });
+
+        window.subhikshaApplyStrictOrderTypeRequirements = applyStrictOrderTypeRequirements;
+
+        window.addEventListener('load', function() {
+            setTimeout(applyStrictOrderTypeRequirements, 250);
+        });
+
+        applyStrictOrderTypeRequirements();
+    })();
+    </script>
+
+
+    <script>
+    (function() {
+        function refreshSelect(el) {
+            if (!el) return;
+            if (window.jQuery && window.jQuery.fn && window.jQuery.fn.select2) {
+                window.jQuery(el).trigger('change.select2');
+            }
+        }
+
+        function fixLaminationTypeVisibility() {
+            var orderType = document.getElementById('order_type');
+            var laminationRequired = document.getElementById('lamination_required');
+            var laminationTypeWrap = document.getElementById('laminationTypeWrap');
+            var laminationType = document.getElementById('lamination_type');
+
+            if (!orderType || !laminationRequired || !laminationTypeWrap) return;
+
+            var shouldShow = orderType.value === 'customized' && String(laminationRequired.value) === '1';
+
+            if (shouldShow) {
+                laminationTypeWrap.classList.remove('lamination-type-only', 'd-none');
+                laminationTypeWrap.style.setProperty('display', 'block', 'important');
+            } else {
+                laminationTypeWrap.classList.add('lamination-type-only');
+                laminationTypeWrap.style.setProperty('display', 'none', 'important');
+
+                if (laminationType) {
+                    laminationType.value = '';
+                    refreshSelect(laminationType);
+                }
+            }
+        }
+
+        ['order_type', 'lamination_required'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (!el) return;
+
+            el.addEventListener('change', fixLaminationTypeVisibility);
+
+            if (window.jQuery) {
+                window.jQuery(el).on('change select2:select select2:clear', fixLaminationTypeVisibility);
+            }
+        });
+
+        window.subhikshaToggleLaminationType = fixLaminationTypeVisibility;
+
+        window.addEventListener('load', function() {
+            setTimeout(fixLaminationTypeVisibility, 250);
+        });
+
+        fixLaminationTypeVisibility();
     })();
     </script>
 

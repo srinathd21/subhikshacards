@@ -21,6 +21,7 @@ if (empty($_SESSION['enquiries_csrf'])) {
 $csrfToken = $_SESSION['enquiries_csrf'];
 $message = '';
 $messageType = 'success';
+$toastTitle = 'Info';
 
 function enqTableExists(mysqli $conn, string $table): bool
 {
@@ -312,6 +313,317 @@ function enqLog(mysqli $conn, string $actionKey, int $recordId, string $descript
     }
 }
 
+
+function enqSettingValue(mysqli $conn, string $key, string $default = ''): string
+{
+    try {
+        if (!enqTableExists($conn, 'system_settings')) {
+            return $default;
+        }
+
+        $stmt = $conn->prepare("SELECT setting_value FROM system_settings WHERE setting_key = ? LIMIT 1");
+        $stmt->bind_param('s', $key);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ? trim((string)$row['setting_value']) : $default;
+    } catch (Throwable $e) {
+        return $default;
+    }
+}
+
+function enqWhatsappApiReady(mysqli $conn): bool
+{
+    $enabled = enqSettingValue($conn, 'whatsapp_enabled', '0');
+    $apiUrl = enqSettingValue($conn, 'watzup_api_url', '');
+    $apiToken = enqSettingValue($conn, 'watzup_api_token', '');
+    $senderId = enqSettingValue($conn, 'watzup_sender_id', '');
+
+    if ($enabled !== '1') {
+        return false;
+    }
+
+    $dummyValues = [
+        '',
+        'https://your-whatsapp-provider-url/send-message',
+        'PASTE_YOUR_SECRET_KEY_HERE',
+        'PASTE_YOUR_UNIQUE_ID_HERE',
+        'YOUR_REAL_API_URL',
+        'YOUR_REAL_SECRET_KEY',
+        'YOUR_REAL_UNIQUE_ID_OR_ACCOUNT_ID'
+    ];
+
+    if (in_array($apiUrl, $dummyValues, true)) {
+        return false;
+    }
+
+    if (in_array($apiToken, $dummyValues, true)) {
+        return false;
+    }
+
+    if (in_array($senderId, $dummyValues, true)) {
+        return false;
+    }
+
+    return filter_var($apiUrl, FILTER_VALIDATE_URL) !== false;
+}
+
+function enqWhatsappMobile($mobile): string
+{
+    $mobile = preg_replace('/\D+/', '', (string)$mobile);
+
+    if ($mobile === '') {
+        return '';
+    }
+
+    if (strlen($mobile) === 10) {
+        return '91' . $mobile;
+    }
+
+    return $mobile;
+}
+
+function enqWhatsappMessage(array $row): string
+{
+    $customerName = trim((string)($row['customer_name'] ?? 'Customer'));
+    $enquiryNo = trim((string)($row['enquiry_no'] ?? '-'));
+    $functionType = trim((string)($row['function_name'] ?? '-'));
+    $functionDate = !empty($row['function_date']) ? date('d-m-Y', strtotime($row['function_date'])) : '-';
+
+    return "Hi {$customerName},\n\n"
+        . "Thank you for contacting Subhiksha Cards.\n"
+        . "Your enquiry {$enquiryNo} has been received successfully.\n\n"
+        . "Requirement: {$functionType}\n"
+        . "Function Date: {$functionDate}\n\n"
+        . "Our team will follow up shortly.\n\n"
+        . "- Subhiksha Cards";
+}
+
+function enqWhatsappUrl(array $row): string
+{
+    $mobile = enqWhatsappMobile($row['mobile'] ?? '');
+
+    if ($mobile === '') {
+        return '#';
+    }
+
+    return 'https://wa.me/' . $mobile . '?text=' . rawurlencode(enqWhatsappMessage($row));
+}
+
+function enqGetByIdForWhatsapp(mysqli $conn, int $id): ?array
+{
+    if ($id <= 0 || !enqTableExists($conn, 'enquiries')) {
+        return null;
+    }
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT
+                e.*,
+                ft.function_name,
+                es.status_name,
+                es.status_key
+            FROM enquiries e
+            LEFT JOIN function_types ft ON ft.id = e.function_type_id
+            LEFT JOIN enquiry_statuses es ON es.id = e.enquiry_status_id
+            WHERE e.id = ?
+            LIMIT 1
+        ");
+        $stmt->bind_param('i', $id);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+
+function enqWhatsappTemplateId(mysqli $conn, string $templateKey): ?int
+{
+    try {
+        if (!enqTableExists($conn, 'whatsapp_templates')) {
+            return null;
+        }
+
+        $stmt = $conn->prepare("SELECT id FROM whatsapp_templates WHERE template_key = ? LIMIT 1");
+        $stmt->bind_param('s', $templateKey);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ? (int)$row['id'] : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function enqWhatsappLogManual(mysqli $conn, int $id): array
+{
+    $enquiry = enqGetByIdForWhatsapp($conn, $id);
+
+    if (!$enquiry) {
+        return [
+            'success' => false,
+            'message' => 'Enquiry not found.'
+        ];
+    }
+
+    $mobile = enqWhatsappMobile($enquiry['mobile'] ?? '');
+
+    if ($mobile === '') {
+        return [
+            'success' => false,
+            'message' => 'Customer mobile number is missing.'
+        ];
+    }
+
+    if (!enqTableExists($conn, 'whatsapp_logs')) {
+        return [
+            'success' => true,
+            'message' => 'Manual WhatsApp opened. whatsapp_logs table missing, so log not saved.'
+        ];
+    }
+
+    try {
+        $templateId = enqWhatsappTemplateId($conn, 'enquiry_completed');
+        $relatedModule = 'Enquiries';
+        $relatedId = $id;
+        $customerId = !empty($enquiry['customer_id']) ? (int)$enquiry['customer_id'] : null;
+        $jobCardId = null;
+        $messageBody = enqWhatsappMessage($enquiry);
+        $status = 'sent';
+        $providerResponse = json_encode([
+            'mode' => 'manual',
+            'status' => 'opened',
+            'message' => 'Manual WhatsApp Web/App opened by user.'
+        ]);
+        $sentBy = (int)($_SESSION['user_id'] ?? 0);
+        $sentAt = date('Y-m-d H:i:s');
+
+        $stmt = $conn->prepare("
+            INSERT INTO whatsapp_logs
+                (
+                    template_id,
+                    related_module,
+                    related_id,
+                    customer_id,
+                    job_card_id,
+                    mobile,
+                    message_body,
+                    status,
+                    provider_response,
+                    sent_by,
+                    sent_at,
+                    created_at
+                )
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ");
+
+        $stmt->bind_param(
+            'isiiissssis',
+            $templateId,
+            $relatedModule,
+            $relatedId,
+            $customerId,
+            $jobCardId,
+            $mobile,
+            $messageBody,
+            $status,
+            $providerResponse,
+            $sentBy,
+            $sentAt
+        );
+        $stmt->execute();
+        $logId = (int)$stmt->insert_id;
+        $stmt->close();
+
+        enqLog($conn, 'send_whatsapp_manual', $id, 'Manual WhatsApp message opened.');
+
+        return [
+            'success' => true,
+            'message' => 'Manual WhatsApp logged.',
+            'log_id' => $logId
+        ];
+    } catch (Throwable $e) {
+        return [
+            'success' => false,
+            'message' => $e->getMessage()
+        ];
+    }
+}
+
+
+function enqSendWhatsappByApi(mysqli $conn, int $id): array
+{
+    $apiFile = __DIR__ . '/includes/whatsapp-api.php';
+
+    if (!file_exists($apiFile)) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp API file missing.'
+        ];
+    }
+
+    require_once $apiFile;
+
+    if (!function_exists('subhiksha_send_whatsapp')) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp API function missing.'
+        ];
+    }
+
+    $enquiry = enqGetByIdForWhatsapp($conn, $id);
+
+    if (!$enquiry) {
+        return [
+            'success' => false,
+            'message' => 'Enquiry not found.'
+        ];
+    }
+
+    return subhiksha_send_whatsapp($conn, [
+        'mobile' => (string)($enquiry['mobile'] ?? ''),
+        'template_key' => 'enquiry_completed',
+        'variables' => [
+            'customer_name' => (string)($enquiry['customer_name'] ?? 'Customer'),
+            'enquiry_no' => (string)($enquiry['enquiry_no'] ?? '-'),
+            'function_type' => (string)($enquiry['function_name'] ?? '-'),
+            'order_type' => '-'
+        ],
+        'related_module' => 'Enquiries',
+        'related_id' => $id,
+        'customer_id' => $enquiry['customer_id'] ?? null
+    ]);
+}
+
+function enqWhatsappSvg(): string
+{
+    return '<svg viewBox="0 0 32 32" width="17" height="17" aria-hidden="true" focusable="false"><path fill="currentColor" d="M16.04 3C8.85 3 3 8.73 3 15.78c0 2.26.61 4.47 1.77 6.41L3 29l7.02-1.8a13.3 13.3 0 0 0 6.02 1.43C23.23 28.63 29 22.9 29 15.85S23.23 3 16.04 3Zm0 23.45c-1.9 0-3.76-.5-5.39-1.45l-.39-.23-4.16 1.07 1.11-4.01-.26-.41a11.05 11.05 0 0 1-1.73-5.64c0-5.84 4.85-10.6 10.82-10.6 5.96 0 10.81 4.76 10.81 10.67 0 5.84-4.85 10.6-10.81 10.6Zm5.93-7.95c-.32-.16-1.9-.92-2.2-1.03-.3-.11-.52-.16-.74.16-.22.32-.85 1.03-1.04 1.24-.19.22-.38.24-.7.08-.32-.16-1.36-.49-2.59-1.55-.96-.84-1.61-1.88-1.8-2.2-.19-.32-.02-.49.14-.65.14-.14.32-.38.49-.57.16-.19.22-.32.32-.54.11-.22.05-.41-.03-.57-.08-.16-.74-1.76-1.01-2.41-.27-.65-.54-.54-.74-.55h-.63c-.22 0-.57.08-.87.41-.3.32-1.14 1.09-1.14 2.68s1.17 3.12 1.33 3.34c.16.22 2.3 3.46 5.58 4.85.78.33 1.39.53 1.86.68.78.24 1.49.21 2.05.13.63-.09 1.9-.76 2.17-1.49.27-.73.27-1.36.19-1.49-.08-.13-.3-.21-.62-.37Z"/></svg>';
+}
+
+function enqWhatsappPreviewButton(array $row): string
+{
+    return '
+        <button type="button"
+            class="btn btn-sm btn-whatsapp-icon rounded-circle js-whatsapp-preview"
+            title="Preview WhatsApp message"
+            data-id="' . e($row['id'] ?? '') . '"
+            data-customer-name="' . e($row['customer_name'] ?? '') . '"
+            data-mobile="' . e($row['mobile'] ?? '') . '"
+            data-wa-url="' . e(enqWhatsappUrl($row)) . '"
+            data-message="' . e(enqWhatsappMessage($row)) . '">
+            ' . enqWhatsappSvg() . '
+        </button>
+    ';
+}
+
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     enqCsrf();
 
@@ -461,7 +773,69 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->close();
 
             enqLog($conn, 'create_enquiry', $newId, 'Enquiry created: ' . $enquiryNo);
-            enqRedirect('msg=created');
+
+            /*
+             * New enquiry WhatsApp flow:
+             * 1. Save enquiry first.
+             * 2. If real WhatsApp API is ready, send directly using API and log in whatsapp_logs.
+             * 3. If API is dummy/missing, log manual WhatsApp opened and redirect to WhatsApp Web/App.
+             */
+            if (enqWhatsappApiReady($conn)) {
+                $waResult = enqSendWhatsappByApi($conn, $newId);
+
+                if (!($waResult['success'] ?? false)) {
+                    $error = urlencode((string)($waResult['response'] ?? $waResult['message'] ?? 'WhatsApp failed.'));
+                    enqRedirect('msg=created_whatsapp_failed&err=' . $error);
+                }
+
+                enqRedirect('msg=created_whatsapp_sent');
+            }
+
+            $manualResult = enqWhatsappLogManual($conn, $newId);
+            enqRedirect('msg=created_whatsapp_manual&open_whatsapp=' . $newId);
+        }
+
+
+
+        if ($action === 'log_manual_whatsapp') {
+            $id = enqInt($_POST['id'] ?? 0);
+
+            header('Content-Type: application/json');
+
+            if ($id <= 0) {
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Invalid enquiry.'
+                ]);
+                exit;
+            }
+
+            $manualResult = enqWhatsappLogManual($conn, $id);
+
+            echo json_encode($manualResult);
+            exit;
+        }
+
+        if ($action === 'send_whatsapp_api') {
+            $id = enqInt($_POST['id'] ?? 0);
+
+            if ($id <= 0) {
+                throw new RuntimeException('Invalid enquiry.');
+            }
+
+            if (!enqWhatsappApiReady($conn)) {
+                enqRedirect('msg=whatsapp_manual');
+            }
+
+            $waResult = enqSendWhatsappByApi($conn, $id);
+
+            if (!($waResult['success'] ?? false)) {
+                $error = urlencode((string)($waResult['response'] ?? $waResult['message'] ?? 'WhatsApp failed.'));
+                enqRedirect('msg=whatsapp_failed&err=' . $error);
+            }
+
+            enqLog($conn, 'send_whatsapp', $id, 'WhatsApp enquiry message sent using API.');
+            enqRedirect('msg=whatsapp_sent');
         }
 
         if ($action === 'close_record') {
@@ -502,16 +876,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } catch (Throwable $e) {
         $message = $e->getMessage();
         $messageType = 'danger';
+        $toastTitle = 'Failed';
     }
 }
 
 $msg = (string)($_GET['msg'] ?? '');
 if ($msg === 'created') {
     $message = 'Enquiry created successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
+} elseif ($msg === 'created_whatsapp_sent') {
+    $message = 'Enquiry created and WhatsApp message sent successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
+} elseif ($msg === 'created_whatsapp_manual') {
+    $message = 'Enquiry created successfully. Redirecting to WhatsApp for manual sending.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
+} elseif ($msg === 'created_whatsapp_failed') {
+    $message = 'Enquiry created successfully. WhatsApp API sending failed.';
+    $messageType = 'warning';
+    $toastTitle = 'Warning';
 } elseif ($msg === 'updated') {
     $message = 'Enquiry updated successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
 } elseif ($msg === 'closed') {
     $message = 'Enquiry closed successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
+} elseif ($msg === 'whatsapp_sent') {
+    $message = 'WhatsApp message sent successfully using API.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
+} elseif ($msg === 'whatsapp_failed') {
+    $message = 'WhatsApp message sending failed.';
+    $messageType = 'danger';
+    $toastTitle = 'Failed';
+} elseif ($msg === 'whatsapp_manual') {
+    $message = 'WhatsApp API is not ready. Manual WhatsApp mode is active.';
+    $messageType = 'warning';
+    $toastTitle = 'Warning';
+}
+
+if (isset($_GET['err']) && trim((string)$_GET['err']) !== '') {
+    $errText = trim((string)$_GET['err']);
+    $message .= ($message !== '' ? ' ' : '') . 'Error: ' . $errText;
 }
 
 $functionTypes = [];
@@ -592,6 +1002,7 @@ if (enqTableExists($conn, 'enquiries')) {
     } catch (Throwable $e) {
         $message = 'List query error: ' . $e->getMessage();
         $messageType = 'danger';
+        $toastTitle = 'Failed';
         $rows = [];
     }
 }
@@ -623,6 +1034,16 @@ function enqDateTime($value): string
 }
 
 $defaultStatusId = $statuses[0]['id'] ?? '';
+$whatsappApiReady = enqWhatsappApiReady($conn);
+
+$autoOpenWhatsappUrl = '';
+$autoOpenWhatsappId = enqInt($_GET['open_whatsapp'] ?? 0);
+if ($autoOpenWhatsappId > 0) {
+    $autoOpenEnquiry = enqGetByIdForWhatsapp($conn, $autoOpenWhatsappId);
+    if ($autoOpenEnquiry) {
+        $autoOpenWhatsappUrl = enqWhatsappUrl($autoOpenEnquiry);
+    }
+}
 ?>
 <!doctype html>
 <html lang="en">
@@ -635,6 +1056,70 @@ $defaultStatusId = $statuses[0]['id'] ?? '';
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
 
     <style>
+    .view-info-card {
+        border: 1px solid var(--border-soft);
+        border-radius: 16px;
+        padding: 14px 16px;
+        background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg));
+        height: 100%;
+    }
+
+    .view-info-card small {
+        display: block;
+        color: var(--text-muted);
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+        margin-bottom: 4px;
+    }
+
+    .view-info-card strong,
+    .view-info-card span {
+        display: block;
+        color: var(--text-main);
+        font-weight: 900;
+        word-break: break-word;
+        white-space: pre-wrap;
+    }
+
+
+    .toast-ui {
+        border: 0;
+        border-radius: 18px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
+        overflow: hidden;
+        min-width: 320px;
+        max-width: 420px;
+    }
+
+    .toast-ui.success {
+        background: #dcfce7;
+        color: #14532d;
+    }
+
+    .toast-ui.danger {
+        background: #fee2e2;
+        color: #7f1d1d;
+    }
+
+    .toast-ui.warning {
+        background: #fef3c7;
+        color: #78350f;
+    }
+
+    .toast-ui .toast-title {
+        font-size: 14px;
+        font-weight: 900;
+        margin-bottom: 2px;
+    }
+
+    .toast-ui .toast-message {
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.45;
+    }
+
+
     .module-page .page-head {
         padding: 24px 28px;
         margin-bottom: 18px;
@@ -757,6 +1242,66 @@ $defaultStatusId = $statuses[0]['id'] ?? '';
     }
 
 
+
+    .btn-whatsapp-icon {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        color: #fff !important;
+        background: #22c55e;
+        border-color: #22c55e;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .btn-whatsapp-icon:hover {
+        color: #fff !important;
+        background: #16a34a;
+        border-color: #16a34a;
+    }
+
+
+    #whatsappPreviewModal .modal-dialog {
+        max-width: 760px;
+    }
+
+    #whatsappPreviewModal .modal-body {
+        padding: 22px 28px;
+    }
+
+    #whatsappPreviewModal .whatsapp-preview-box {
+        min-height: 330px;
+        max-height: 430px;
+        white-space: pre-wrap;
+        resize: vertical;
+        font-weight: 700;
+        line-height: 1.6;
+        padding: 18px;
+        font-size: 15px;
+    }
+
+    @media(max-width:767.98px) {
+        #whatsappPreviewModal .modal-dialog {
+            max-width: calc(100% - 24px);
+            margin: 12px auto;
+        }
+
+        #whatsappPreviewModal .whatsapp-preview-box {
+            min-height: 300px;
+            max-height: 420px;
+        }
+    }
+
+
+    .whatsapp-preview-box {
+        min-height: 190px;
+        white-space: pre-wrap;
+        resize: vertical;
+        font-weight: 700;
+        line-height: 1.55;
+    }
+
     .select2-container--bootstrap-5 .select2-selection {
         min-height: 46px;
         border-radius: 14px;
@@ -851,8 +1396,18 @@ $defaultStatusId = $statuses[0]['id'] ?? '';
                 </div>
 
                 <?php if ($message !== ''): ?>
-                <div class="alert alert-<?= e($messageType) ?> rounded-4 fw-bold">
-                    <?= e($message) ?>
+                <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 12000">
+                    <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive"
+                        aria-atomic="true" data-bs-delay="4200">
+                        <div class="d-flex">
+                            <div class="toast-body">
+                                <div class="toast-title"><?= e($toastTitle) ?></div>
+                                <div class="toast-message"><?= e($message) ?></div>
+                            </div>
+                            <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
+                                aria-label="Close"></button>
+                        </div>
+                    </div>
                 </div>
                 <?php endif; ?>
 
@@ -948,6 +1503,24 @@ $defaultStatusId = $statuses[0]['id'] ?? '';
                                     </td>
                                     <td class="text-end">
                                         <button type="button"
+                                            class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
+                                            data-bs-toggle="modal" data-bs-target="#viewModal"
+                                            data-enquiry-no="<?= e($row['enquiry_no']) ?>"
+                                            data-customer-name="<?= e($row['customer_name']) ?>"
+                                            data-mobile="<?= e($row['mobile']) ?>"
+                                            data-function-name="<?= e($row['function_name'] ?? '-') ?>"
+                                            data-function-date="<?= e(enqDate($row['function_date'] ?? null)) ?>"
+                                            data-next-callback="<?= e(enqDateTime($row['next_callback_at'] ?? null)) ?>"
+                                            data-venue="<?= e($row['venue']) ?>"
+                                            data-address="<?= e($row['address']) ?>"
+                                            data-enquiry-source="<?= e($row['enquiry_source']) ?>"
+                                            data-status-name="<?= e($row['status_name'] ?? 'New') ?>"
+                                            data-sales-person="<?= e($row['sales_person'] ?? '-') ?>"
+                                            data-remarks="<?= e($row['remarks']) ?>">
+                                            View
+                                        </button>
+
+                                        <button type="button"
                                             class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
                                             data-bs-toggle="modal" data-bs-target="#recordModal"
                                             data-id="<?= e($row['id']) ?>"
@@ -965,9 +1538,11 @@ $defaultStatusId = $statuses[0]['id'] ?? '';
                                             Edit
                                         </button>
 
+                                        <?= enqWhatsappPreviewButton($row) ?>
+
                                         <?php if (!$closed): ?>
                                         <form method="post" class="d-inline"
-                                            onsubmit="return confirm('Close this enquiry?')">
+                                            onsubmit="const ok = confirm('Close this enquiry?'); if (ok) { showToast('Closing enquiry, please wait...', 'warning', 'Processing'); } return ok;">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                             <input type="hidden" name="action" value="close_record">
                                             <input type="hidden" name="id" value="<?= e($row['id']) ?>">
@@ -1010,6 +1585,23 @@ $defaultStatusId = $statuses[0]['id'] ?? '';
 
                             <div class="mobile-card-actions">
                                 <button type="button"
+                                    class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
+                                    data-bs-toggle="modal" data-bs-target="#viewModal"
+                                    data-enquiry-no="<?= e($row['enquiry_no']) ?>"
+                                    data-customer-name="<?= e($row['customer_name']) ?>"
+                                    data-mobile="<?= e($row['mobile']) ?>"
+                                    data-function-name="<?= e($row['function_name'] ?? '-') ?>"
+                                    data-function-date="<?= e(enqDate($row['function_date'] ?? null)) ?>"
+                                    data-next-callback="<?= e(enqDateTime($row['next_callback_at'] ?? null)) ?>"
+                                    data-venue="<?= e($row['venue']) ?>" data-address="<?= e($row['address']) ?>"
+                                    data-enquiry-source="<?= e($row['enquiry_source']) ?>"
+                                    data-status-name="<?= e($row['status_name'] ?? 'New') ?>"
+                                    data-sales-person="<?= e($row['sales_person'] ?? '-') ?>"
+                                    data-remarks="<?= e($row['remarks']) ?>">
+                                    View
+                                </button>
+
+                                <button type="button"
                                     class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
                                     data-bs-toggle="modal" data-bs-target="#recordModal" data-id="<?= e($row['id']) ?>"
                                     data-customer-name="<?= e($row['customer_name']) ?>"
@@ -1025,8 +1617,11 @@ $defaultStatusId = $statuses[0]['id'] ?? '';
                                     Edit
                                 </button>
 
+                                <?= enqWhatsappPreviewButton($row) ?>
+
                                 <?php if (!$closed): ?>
-                                <form method="post" class="d-inline" onsubmit="return confirm('Close this enquiry?')">
+                                <form method="post" class="d-inline"
+                                    onsubmit="const ok = confirm('Close this enquiry?'); if (ok) { showToast('Closing enquiry, please wait...', 'warning', 'Processing'); } return ok;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="close_record">
                                     <input type="hidden" name="id" value="<?= e($row['id']) ?>">
@@ -1152,6 +1747,150 @@ $defaultStatusId = $statuses[0]['id'] ?? '';
         </div>
     </div>
 
+
+
+    <div class="modal fade" id="viewModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div>
+                        <h5 class="modal-title fw-bold">View Enquiry</h5>
+                        <small class="text-muted-custom" id="viewEnquiryNo"></small>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Customer</small>
+                                <strong id="viewCustomerName">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Mobile</small>
+                                <strong id="viewMobile">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Status</small>
+                                <strong id="viewStatusName">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Function / Product Type</small>
+                                <strong id="viewFunctionName">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Function Date</small>
+                                <strong id="viewFunctionDate">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Next Callback</small>
+                                <strong id="viewNextCallback">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Enquiry Source</small>
+                                <strong id="viewEnquirySource">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Assigned Sales Person</small>
+                                <strong id="viewSalesPerson">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="view-info-card">
+                                <small>Venue</small>
+                                <span id="viewVenue">-</span>
+                            </div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="view-info-card">
+                                <small>Address</small>
+                                <span id="viewAddress">-</span>
+                            </div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="view-info-card">
+                                <small>Remarks</small>
+                                <span id="viewRemarks">-</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold"
+                        data-bs-dismiss="modal">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="whatsappPreviewModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-lg">
+            <div class="modal-content">
+                <form method="post" id="whatsappApiForm">
+                    <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                    <input type="hidden" name="action" value="send_whatsapp_api" id="wa_api_action">
+                    <input type="hidden" name="manual_action" value="log_manual_whatsapp" id="wa_manual_action">
+                    <input type="hidden" name="id" id="wa_enquiry_id" value="">
+
+                    <div class="modal-header">
+                        <div>
+                            <h5 class="modal-title fw-bold">WhatsApp Preview</h5>
+                            <small class="text-muted-custom" id="waCustomerInfo"></small>
+                        </div>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+
+                    <div class="modal-body">
+                        <label class="form-label fw-bold">Message Preview</label>
+                        <textarea class="form-control whatsapp-preview-box" id="waMessagePreview" rows="12"
+                            readonly></textarea>
+
+                        <div class="alert alert-info rounded-4 mt-3 mb-0 fw-bold" id="waModeInfo"></div>
+                    </div>
+
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold"
+                            data-bs-dismiss="modal">
+                            Cancel
+                        </button>
+                        <button type="button" class="btn btn-whatsapp-icon rounded-circle" id="waSendBtn"
+                            title="Send WhatsApp">
+                            <?= enqWhatsappSvg() ?>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <?php include __DIR__ . '/includes/script.php'; ?>
 
     <script>
@@ -1159,6 +1898,174 @@ $defaultStatusId = $statuses[0]['id'] ?? '';
         const title = document.getElementById('recordModalTitle');
         const submit = document.getElementById('recordSubmitBtn');
         const defaultStatusId = '<?= e($defaultStatusId) ?>';
+
+
+        const whatsappApiReady = <?= $whatsappApiReady ? 'true' : 'false' ?>;
+        const autoOpenWhatsappUrl = '<?= e($autoOpenWhatsappUrl) ?>';
+        let currentManualWhatsappUrl = '#';
+        let whatsappPreviewModal = null;
+
+
+        function showToast(message, type = 'success', title = '') {
+            if (!message) return;
+
+            const oldToastWrap = document.getElementById('dynamicActionToastWrap');
+            if (oldToastWrap) {
+                oldToastWrap.remove();
+            }
+
+            const toastTitle = title || (type === 'danger' ? 'Failed' : (type === 'warning' ? 'Warning' :
+                'Success'));
+            const wrap = document.createElement('div');
+            wrap.id = 'dynamicActionToastWrap';
+            wrap.className = 'toast-container position-fixed top-0 end-0 p-3';
+            wrap.style.zIndex = '12000';
+
+            wrap.innerHTML = `
+                <div id="dynamicActionToast" class="toast toast-ui ${type}" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="4200">
+                    <div class="d-flex">
+                        <div class="toast-body">
+                            <div class="toast-title">${toastTitle}</div>
+                            <div class="toast-message">${message}</div>
+                        </div>
+                        <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                    </div>
+                </div>
+            `;
+
+            document.body.appendChild(wrap);
+
+            const toastEl = document.getElementById('dynamicActionToast');
+            if (window.bootstrap && bootstrap.Toast && toastEl) {
+                bootstrap.Toast.getOrCreateInstance(toastEl).show();
+            }
+        }
+
+        const pageToastEl = document.getElementById('pageToast');
+        if (pageToastEl && window.bootstrap && bootstrap.Toast) {
+            bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
+        }
+
+
+        function openWhatsappPreview(btn) {
+            const modalEl = document.getElementById('whatsappPreviewModal');
+            if (!modalEl) return;
+
+            set('wa_enquiry_id', btn.dataset.id || '');
+            currentManualWhatsappUrl = btn.dataset.waUrl || '#';
+
+            const messageBox = document.getElementById('waMessagePreview');
+            const infoBox = document.getElementById('waModeInfo');
+            const customerInfo = document.getElementById('waCustomerInfo');
+
+            if (messageBox) {
+                messageBox.value = btn.dataset.message || '';
+            }
+
+            if (customerInfo) {
+                customerInfo.textContent = (btn.dataset.customerName || 'Customer') + ' | ' + (btn.dataset.mobile ||
+                    '');
+            }
+
+            if (infoBox) {
+                infoBox.textContent = whatsappApiReady ?
+                    'API mode: message will be sent directly using WhatsApp API.' :
+                    'Manual mode: WhatsApp Web/App will open and this action will be saved in WhatsApp Logs.';
+            }
+
+            whatsappPreviewModal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            whatsappPreviewModal.show();
+        }
+
+
+        function setText(id, value) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const clean = (value == null || String(value).trim() === '') ? '-' : String(value);
+            el.textContent = clean;
+        }
+
+        document.querySelectorAll('.js-view-record').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                setText('viewEnquiryNo', btn.dataset.enquiryNo || '-');
+                setText('viewCustomerName', btn.dataset.customerName || '-');
+                setText('viewMobile', btn.dataset.mobile || '-');
+                setText('viewStatusName', btn.dataset.statusName || '-');
+                setText('viewFunctionName', btn.dataset.functionName || '-');
+                setText('viewFunctionDate', btn.dataset.functionDate || '-');
+                setText('viewNextCallback', btn.dataset.nextCallback || '-');
+                setText('viewEnquirySource', btn.dataset.enquirySource || '-');
+                setText('viewSalesPerson', btn.dataset.salesPerson || '-');
+                setText('viewVenue', btn.dataset.venue || '-');
+                setText('viewAddress', btn.dataset.address || '-');
+                setText('viewRemarks', btn.dataset.remarks || '-');
+
+                if (typeof showToast === 'function') {
+                    showToast('Enquiry details opened.', 'success', 'Success');
+                }
+            });
+        });
+
+
+        document.querySelectorAll('.js-whatsapp-preview').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                openWhatsappPreview(btn);
+            });
+        });
+
+        document.getElementById('waSendBtn')?.addEventListener('click', function() {
+            if (whatsappApiReady) {
+                showToast('Sending WhatsApp message through API...', 'success', 'Processing');
+                document.getElementById('whatsappApiForm')?.submit();
+                return;
+            }
+
+            if (currentManualWhatsappUrl && currentManualWhatsappUrl !== '#') {
+                const form = document.getElementById('whatsappApiForm');
+                const formData = new FormData(form);
+                formData.set('action', 'log_manual_whatsapp');
+
+                showToast('Opening WhatsApp manual mode...', 'success', 'Success');
+
+                fetch(window.location.href.split('?')[0], {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin'
+                }).catch(function() {
+                    showToast('WhatsApp log failed, but manual WhatsApp will open.', 'warning',
+                        'Warning');
+                }).finally(function() {
+                    window.open(currentManualWhatsappUrl, '_blank', 'noopener');
+
+                    if (whatsappPreviewModal) {
+                        whatsappPreviewModal.hide();
+                    }
+                });
+            } else {
+                showToast('Customer mobile number is missing.', 'danger', 'Failed');
+            }
+        });
+
+
+
+
+        if (autoOpenWhatsappUrl && autoOpenWhatsappUrl !== '#') {
+            window.addEventListener('load', function() {
+                setTimeout(function() {
+                    if (window.history && window.history.replaceState) {
+                        window.history.replaceState({}, document.title,
+                            'enquiries.php?msg=created_whatsapp_manual');
+                    }
+
+                    /*
+                     * Open WhatsApp in the same tab.
+                     * This avoids browser popup blocking and also makes the create modal close first
+                     * because the page reloads cleanly before this redirect happens.
+                     */
+                    window.location.href = autoOpenWhatsappUrl;
+                }, 500);
+            });
+        }
 
 
         function initSelect2AutoType(context) {
@@ -1254,6 +2161,12 @@ $defaultStatusId = $statuses[0]['id'] ?? '';
                 refreshSelect2Value('assigned_sales_user_id');
             });
         });
+
+
+        document.querySelector('#recordModal form')?.addEventListener('submit', function() {
+            showToast('Saving enquiry, please wait...', 'success', 'Processing');
+        });
+
 
         document.getElementById('tableSearch')?.addEventListener('input', function() {
             const value = this.value.toLowerCase().trim();
