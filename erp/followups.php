@@ -2,6 +2,8 @@
 
 require_once __DIR__ . '/includes/auth.php';
 require_permission($conn, 'can_view', 'followups.php');
+// Backend create/update/delete processing moved to api/followups.php
+// Toast rule: show toast only for important save/update/delete/error messages.
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -110,180 +112,7 @@ function fuStatusIdByKey(mysqli $conn, string $statusKey): ?int
 
 
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    fuCsrf();
-
-    try {
-        $action = fuPost('action');
-
-        if ($action === 'save_record') {
-            if (!fuTableExists($conn, 'enquiry_followups')) {
-                throw new RuntimeException('enquiry_followups table is missing. Run the support SQL first.');
-            }
-
-            if (!fuTableExists($conn, 'enquiries')) {
-                throw new RuntimeException('enquiries table is missing.');
-            }
-
-            $id = fuInt($_POST['id'] ?? 0);
-            $enquiryId = fuInt($_POST['enquiry_id'] ?? 0);
-            $followupAt = fuDateTimeValue(fuPost('followup_at'));
-            $callRemarks = fuPost('call_remarks');
-            $customerResponse = fuPost('customer_response');
-            $nextCallbackAt = fuDateTimeValue(fuPost('next_callback_at'));
-            $followupStatus = fuPost('followup_status', 'followup_pending');
-            $createdBy = (int)($_SESSION['user_id'] ?? 0);
-
-            if ($enquiryId <= 0) {
-                throw new RuntimeException('Please select enquiry.');
-            }
-
-            if (!$followupAt) {
-                throw new RuntimeException('Follow-up date and time is required.');
-            }
-
-            if ($callRemarks === '') {
-                throw new RuntimeException('Call remarks is required.');
-            }
-
-            $stmt = $conn->prepare("SELECT id FROM enquiries WHERE id = ? LIMIT 1");
-            $stmt->bind_param('i', $enquiryId);
-            $stmt->execute();
-            $enquiryExists = $stmt->get_result()->fetch_assoc();
-            $stmt->close();
-
-            if (!$enquiryExists) {
-                throw new RuntimeException('Selected enquiry not found.');
-            }
-
-            if ($id > 0) {
-                $stmt = $conn->prepare("
-                    UPDATE enquiry_followups
-                    SET enquiry_id = ?,
-                        followup_at = ?,
-                        call_remarks = ?,
-                        customer_response = ?,
-                        next_callback_at = ?,
-                        followup_status = ?
-                    WHERE id = ?
-                ");
-                $stmt->bind_param(
-                    'isssssi',
-                    $enquiryId,
-                    $followupAt,
-                    $callRemarks,
-                    $customerResponse,
-                    $nextCallbackAt,
-                    $followupStatus,
-                    $id
-                );
-                $stmt->execute();
-                $stmt->close();
-
-                $statusId = fuStatusIdByKey($conn, $followupStatus);
-                if ($statusId || $nextCallbackAt) {
-                    if ($statusId) {
-                        $stmt = $conn->prepare("
-                            UPDATE enquiries
-                            SET enquiry_status_id = ?,
-                                next_callback_at = ?,
-                                updated_by = ?,
-                                updated_at = NOW()
-                            WHERE id = ?
-                        ");
-                        $stmt->bind_param('isii', $statusId, $nextCallbackAt, $createdBy, $enquiryId);
-                    } else {
-                        $stmt = $conn->prepare("
-                            UPDATE enquiries
-                            SET next_callback_at = ?,
-                                updated_by = ?,
-                                updated_at = NOW()
-                            WHERE id = ?
-                        ");
-                        $stmt->bind_param('sii', $nextCallbackAt, $createdBy, $enquiryId);
-                    }
-                    $stmt->execute();
-                    $stmt->close();
-                }
-
-                fuRedirect('msg=updated');
-            }
-
-            $stmt = $conn->prepare("
-                INSERT INTO enquiry_followups
-                    (
-                        enquiry_id,
-                        followup_at,
-                        call_remarks,
-                        customer_response,
-                        next_callback_at,
-                        followup_status,
-                        created_by,
-                        created_at
-                    )
-                VALUES
-                    (?, ?, ?, ?, ?, ?, ?, NOW())
-            ");
-            $stmt->bind_param(
-                'isssssi',
-                $enquiryId,
-                $followupAt,
-                $callRemarks,
-                $customerResponse,
-                $nextCallbackAt,
-                $followupStatus,
-                $createdBy
-            );
-            $stmt->execute();
-            $stmt->close();
-
-            $statusId = fuStatusIdByKey($conn, $followupStatus);
-            if ($statusId) {
-                $stmt = $conn->prepare("
-                    UPDATE enquiries
-                    SET enquiry_status_id = ?,
-                        next_callback_at = ?,
-                        updated_by = ?,
-                        updated_at = NOW()
-                    WHERE id = ?
-                ");
-                $stmt->bind_param('isii', $statusId, $nextCallbackAt, $createdBy, $enquiryId);
-            } else {
-                $stmt = $conn->prepare("
-                    UPDATE enquiries
-                    SET next_callback_at = ?,
-                        updated_by = ?,
-                        updated_at = NOW()
-                    WHERE id = ?
-                ");
-                $stmt->bind_param('sii', $nextCallbackAt, $createdBy, $enquiryId);
-            }
-            $stmt->execute();
-            $stmt->close();
-
-            fuRedirect('msg=created');
-        }
-
-
-        if ($action === 'delete_record') {
-            $id = fuInt($_POST['id'] ?? 0);
-            if ($id <= 0) {
-                throw new RuntimeException('Invalid follow-up.');
-            }
-
-            $stmt = $conn->prepare("DELETE FROM enquiry_followups WHERE id = ?");
-            $stmt->bind_param('i', $id);
-            $stmt->execute();
-            $stmt->close();
-
-            fuRedirect('msg=deleted');
-        }
-    } catch (Throwable $e) {
-        $message = $e->getMessage();
-        $messageType = 'danger';
-        $toastTitle = 'Failed';
-    }
-}
+/* Backend processing moved to api/followups.php */
 
 $msg = (string)($_GET['msg'] ?? '');
 if ($msg === 'created') {
@@ -698,6 +527,190 @@ $nowLocal = date('Y-m-d\TH:i');
             width: 100%;
         }
     }
+
+    /* Mobile follow-up card UI fix */
+    @media(max-width:767.98px) {
+        .mobile-card {
+            padding: 16px 16px 14px !important;
+            border-radius: 20px !important;
+        }
+
+        .mobile-card>.d-flex.justify-content-between {
+            align-items: flex-start !important;
+            gap: 12px !important;
+        }
+
+        .mobile-card .status-pill {
+            align-self: flex-start !important;
+            flex: 0 0 auto !important;
+            min-width: auto !important;
+            height: auto !important;
+            min-height: 0 !important;
+            line-height: 1.2 !important;
+            padding: 6px 10px !important;
+            border-radius: 999px !important;
+            white-space: nowrap !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            font-size: 10px !important;
+            max-width: 110px !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+        }
+
+        .mobile-card-title {
+            font-size: 16px !important;
+            line-height: 1.25 !important;
+            margin-bottom: 6px !important;
+        }
+
+        .mobile-card-subtitle {
+            font-size: 12px !important;
+            line-height: 1.45 !important;
+            margin-top: 3px !important;
+        }
+
+        .mobile-card-actions {
+            margin-top: 14px !important;
+            gap: 8px !important;
+        }
+
+        .mobile-card-actions .btn {
+            min-height: 38px !important;
+            border-radius: 999px !important;
+            font-size: 13px !important;
+            font-weight: 900 !important;
+        }
+
+        .module-card .form-control#tableSearch {
+            min-height: 46px !important;
+            border-radius: 16px !important;
+        }
+    }
+
+    /* Mobile follow-up card UI fix - compact status and neat actions */
+    @media(max-width:767.98px) {
+        .mobile-card {
+            padding: 16px 16px 14px !important;
+            border-radius: 20px !important;
+        }
+
+        .mobile-card > .d-flex.justify-content-between,
+        .mobile-card>.d-flex.justify-content-between {
+            align-items: flex-start !important;
+            gap: 12px !important;
+        }
+
+        .mobile-card .status-pill {
+            align-self: flex-start !important;
+            flex: 0 0 auto !important;
+            width: auto !important;
+            min-width: auto !important;
+            height: auto !important;
+            min-height: 0 !important;
+            line-height: 1.2 !important;
+            padding: 6px 10px !important;
+            border-radius: 999px !important;
+            white-space: nowrap !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            font-size: 10px !important;
+            max-width: 112px !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+        }
+
+        .mobile-card-title {
+            font-size: 16px !important;
+            line-height: 1.25 !important;
+            margin-bottom: 6px !important;
+        }
+
+        .mobile-card-subtitle {
+            font-size: 12px !important;
+            line-height: 1.45 !important;
+            margin-top: 3px !important;
+        }
+
+        .mobile-card-actions {
+            margin-top: 14px !important;
+            gap: 8px !important;
+        }
+
+        .mobile-card-actions .btn {
+            min-height: 38px !important;
+            border-radius: 999px !important;
+            font-size: 13px !important;
+            font-weight: 900 !important;
+        }
+
+        .module-card .form-control#tableSearch {
+            min-height: 46px !important;
+            border-radius: 16px !important;
+        }
+    }
+
+
+    /* Action icon buttons - safe common UI */
+    .btn-action-icon,
+    .btn-delete-icon {
+        width: 36px !important;
+        height: 36px !important;
+        min-width: 36px !important;
+        max-width: 36px !important;
+        padding: 0 !important;
+        border-radius: 50% !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        line-height: 1 !important;
+    }
+
+    .btn-action-icon svg,
+    .btn-delete-icon svg {
+        width: 16px !important;
+        height: 16px !important;
+        stroke-width: 2.5 !important;
+        flex: 0 0 auto !important;
+    }
+
+    .btn-action-icon.btn-whatsapp-icon {
+        background: #22c55e !important;
+        border-color: #22c55e !important;
+        color: #fff !important;
+    }
+
+    .btn-action-icon.btn-whatsapp-icon:hover {
+        background: #16a34a !important;
+        border-color: #16a34a !important;
+        color: #fff !important;
+    }
+
+    @media(max-width:767.98px) {
+        .mobile-card-actions .btn-action-icon,
+        .mobile-card-actions .btn-delete-icon,
+        .proforma-mobile-card .proforma-mobile-actions .btn-action-icon,
+        .proforma-mobile-card .proforma-mobile-actions .btn-delete-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important;
+            border-radius: 50% !important;
+            justify-self: center !important;
+            margin: 0 auto !important;
+        }
+
+        .mobile-card-actions .btn-action-icon svg,
+        .mobile-card-actions .btn-delete-icon svg,
+        .proforma-mobile-card .proforma-mobile-actions .btn-action-icon svg,
+        .proforma-mobile-card .proforma-mobile-actions .btn-delete-icon svg {
+            width: 18px !important;
+            height: 18px !important;
+        }
+    }
+
     </style>
 </head>
 
@@ -836,8 +849,8 @@ $nowLocal = date('Y-m-d\TH:i');
                                             class="status-pill pending"><?= e($row['followup_status'] ?: 'Follow-up') ?></span>
                                     </td>
                                     <td class="text-end">
-                                        <button type="button"
-                                            class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
+                                        <button title="View" aria-label="View" type="button"
+                                            class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-record btn-action-icon"
                                             data-bs-toggle="modal" data-bs-target="#viewModal"
                                             data-enquiry-no="<?= e($row['enquiry_no']) ?>"
                                             data-customer-name="<?= e($row['customer_name']) ?>"
@@ -848,12 +861,10 @@ $nowLocal = date('Y-m-d\TH:i');
                                             data-customer-response="<?= e($row['customer_response'] ?? '-') ?>"
                                             data-next-callback="<?= e(fuDateTime($row['next_callback_at'] ?? null)) ?>"
                                             data-followup-status="<?= e($row['followup_status'] ?: 'Follow-up') ?>"
-                                            data-created-by="<?= e($row['created_by_name'] ?? '-') ?>">
-                                            View
-                                        </button>
+                                            data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i data-lucide="eye"></i></button>
 
-                                        <button type="button"
-                                            class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
+                                        <button title="Edit" aria-label="Edit" type="button"
+                                            class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                             data-bs-toggle="modal" data-bs-target="#recordModal"
                                             data-id="<?= e($row['id']) ?>"
                                             data-enquiry-id="<?= e($row['enquiry_id']) ?>"
@@ -861,19 +872,15 @@ $nowLocal = date('Y-m-d\TH:i');
                                             data-call-remarks="<?= e($row['call_remarks']) ?>"
                                             data-customer-response="<?= e($row['customer_response'] ?? '') ?>"
                                             data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
-                                            data-followup-status="<?= e($row['followup_status'] ?? '') ?>">
-                                            Edit
-                                        </button>
+                                            data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i data-lucide="pencil"></i></button>
 
-                                        <form method="post" class="d-inline"
-                                            onsubmit="const ok = confirm('Delete this follow-up?'); if (ok) { showToast('Deleting follow-up, please wait...', 'warning', 'Processing'); } return ok;">
+                                        <form method="post" action="api/followups.php"
+                                            class="d-inline js-api-delete-form" onsubmit="return false;">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                             <input type="hidden" name="action" value="delete_record">
                                             <input type="hidden" name="id" value="<?= e($row['id']) ?>">
-                                            <button type="submit"
-                                                class="btn btn-sm btn-outline-danger rounded-pill fw-bold">
-                                                Delete
-                                            </button>
+                                            <button title="Delete" aria-label="Delete" type="submit"
+                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i data-lucide="trash-2"></i></button>
                                         </form>
                                     </td>
                                 </tr>
@@ -905,8 +912,8 @@ $nowLocal = date('Y-m-d\TH:i');
                             </div>
 
                             <div class="mobile-card-actions">
-                                <button type="button"
-                                    class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
+                                <button title="View" aria-label="View" type="button"
+                                    class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-record btn-action-icon"
                                     data-bs-toggle="modal" data-bs-target="#viewModal"
                                     data-enquiry-no="<?= e($row['enquiry_no']) ?>"
                                     data-customer-name="<?= e($row['customer_name']) ?>"
@@ -917,30 +924,24 @@ $nowLocal = date('Y-m-d\TH:i');
                                     data-customer-response="<?= e($row['customer_response'] ?? '-') ?>"
                                     data-next-callback="<?= e(fuDateTime($row['next_callback_at'] ?? null)) ?>"
                                     data-followup-status="<?= e($row['followup_status'] ?: 'Follow-up') ?>"
-                                    data-created-by="<?= e($row['created_by_name'] ?? '-') ?>">
-                                    View
-                                </button>
+                                    data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i data-lucide="eye"></i></button>
 
-                                <button type="button"
-                                    class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
+                                <button title="Edit" aria-label="Edit" type="button"
+                                    class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                     data-bs-toggle="modal" data-bs-target="#recordModal" data-id="<?= e($row['id']) ?>"
                                     data-enquiry-id="<?= e($row['enquiry_id']) ?>"
                                     data-followup-at="<?= !empty($row['followup_at']) ? e(date('Y-m-d\TH:i', strtotime($row['followup_at']))) : '' ?>"
                                     data-call-remarks="<?= e($row['call_remarks']) ?>"
                                     data-customer-response="<?= e($row['customer_response'] ?? '') ?>"
                                     data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
-                                    data-followup-status="<?= e($row['followup_status'] ?? '') ?>">
-                                    Edit
-                                </button>
+                                    data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i data-lucide="pencil"></i></button>
 
-                                <form method="post" class="d-inline"
-                                    onsubmit="const ok = confirm('Delete this follow-up?'); if (ok) { showToast('Deleting follow-up, please wait...', 'warning', 'Processing'); } return ok;">
+                                <form method="post" action="api/followups.php" class="d-inline js-api-delete-form"
+                                    onsubmit="return false;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="delete_record">
                                     <input type="hidden" name="id" value="<?= e($row['id']) ?>">
-                                    <button type="submit" class="btn btn-sm btn-outline-danger rounded-pill fw-bold">
-                                        Delete
-                                    </button>
+                                    <button title="Delete" aria-label="Delete" type="submit" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i data-lucide="trash-2"></i></button>
                                 </form>
                             </div>
                         </div>
@@ -956,7 +957,7 @@ $nowLocal = date('Y-m-d\TH:i');
 
     <div class="modal fade" id="recordModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-lg">
-            <form method="post" class="modal-content">
+            <form method="post" action="api/followups.php" class="modal-content" id="followupForm">
                 <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                 <input type="hidden" name="action" value="save_record">
                 <input type="hidden" name="id" id="id" value="">
@@ -1190,7 +1191,6 @@ $nowLocal = date('Y-m-d\TH:i');
                 setText('viewCreatedBy', btn.dataset.createdBy || '-');
                 setText('viewCallRemarks', btn.dataset.callRemarks || '-');
                 setText('viewCustomerResponse', btn.dataset.customerResponse || '-');
-                showToast('Follow-up details opened.', 'success', 'Success');
             });
         });
 
@@ -1273,8 +1273,56 @@ $nowLocal = date('Y-m-d\TH:i');
         });
 
 
-        document.querySelector('#recordModal form')?.addEventListener('submit', function() {
-            showToast('Saving follow-up, please wait...', 'success', 'Processing');
+        document.querySelector('#recordModal form')?.addEventListener('submit', function(event) {
+            event.preventDefault();
+
+            const form = this;
+            const formData = new FormData(form);
+
+            fetch('api/followups.php', {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    showToast(data.message || (data.status ? 'Saved successfully.' : 'Save failed.'),
+                        data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+
+                    if (data.status) {
+                        setTimeout(() => window.location.reload(), 800);
+                    }
+                })
+                .catch(() => showToast('API request failed.', 'danger', 'Failed'));
+        });
+
+        document.querySelectorAll('.js-api-delete-form').forEach(function(form) {
+            form.addEventListener('submit', function(event) {
+                event.preventDefault();
+            });
+
+            form.querySelector('button[type="submit"]')?.addEventListener('click', function() {
+                const ok = confirm('Delete this follow-up?');
+                if (!ok) return;
+
+                const formData = new FormData(form);
+                fetch('api/followups.php', {
+                        method: 'POST',
+                        body: formData,
+                        credentials: 'same-origin'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        showToast(data.message || (data.status ? 'Follow-up deleted.' :
+                                'Delete failed.'), data.status ? 'success' : 'danger', data
+                            .status ? 'Success' : 'Failed');
+
+                        if (data.status) {
+                            setTimeout(() => window.location.reload(), 800);
+                        }
+                    })
+                    .catch(() => showToast('API request failed.', 'danger', 'Failed'));
+            });
         });
 
 

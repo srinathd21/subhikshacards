@@ -2,6 +2,8 @@
 
 require_once __DIR__ . '/includes/auth.php';
 require_permission($conn, 'can_view', 'enquiries.php');
+// Backend create/update/delete/WhatsApp processing moved to api/enquiries.php
+// Toast rule: show toast only for important save/update/delete/API result messages.
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -611,7 +613,7 @@ function enqWhatsappPreviewButton(array $row): string
 {
     return '
         <button type="button"
-            class="btn btn-sm btn-whatsapp-icon rounded-circle js-whatsapp-preview"
+            class="btn btn-sm btn-whatsapp-icon btn-action-icon rounded-circle js-whatsapp-preview"
             title="Preview WhatsApp message"
             data-id="' . e($row['id'] ?? '') . '"
             data-customer-name="' . e($row['customer_name'] ?? '') . '"
@@ -624,261 +626,7 @@ function enqWhatsappPreviewButton(array $row): string
 }
 
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    enqCsrf();
-
-    try {
-        $action = enqPost('action');
-
-        if ($action === 'save_record') {
-            if (!enqTableExists($conn, 'enquiries')) {
-                throw new RuntimeException('enquiries table is missing.');
-            }
-
-            $id = enqInt($_POST['id'] ?? 0);
-            $customerName = enqPost('customer_name');
-            $mobile = enqPost('mobile');
-            $functionTypeRaw = enqPost('function_type_id');
-            $functionTypeId = enqFunctionTypeId($conn, $functionTypeRaw);
-            $functionDate = enqPost('function_date');
-            $venue = enqPost('venue');
-            $address = enqPost('address');
-            $enquirySource = enqPost('enquiry_source');
-            $enquiryStatusId = enqInt($_POST['enquiry_status_id'] ?? 0);
-            $assignedSalesUserId = enqInt($_POST['assigned_sales_user_id'] ?? 0);
-            $nextCallbackAt = enqPost('next_callback_at');
-            $remarks = enqPost('remarks');
-
-            if ($customerName === '' || $mobile === '') {
-                throw new RuntimeException('Customer name and mobile number are required.');
-            }
-
-            if ($functionTypeId <= 0) {
-                throw new RuntimeException('Function / Product type is required.');
-            }
-
-            if ($enquiryStatusId <= 0) {
-                $defaultStatus = enqGetDefaultStatusId($conn);
-                if (!$defaultStatus) {
-                    throw new RuntimeException('Enquiry status master is missing. Add enquiry_statuses first.');
-                }
-                $enquiryStatusId = $defaultStatus;
-            }
-
-            $functionDateValue = $functionDate !== '' ? $functionDate : null;
-            $nextCallbackValue = null;
-
-            if ($nextCallbackAt !== '') {
-                $nextCallbackValue = str_replace('T', ' ', $nextCallbackAt);
-                if (strlen($nextCallbackValue) === 16) {
-                    $nextCallbackValue .= ':00';
-                }
-            }
-
-            $assignedSalesUserIdValue = $assignedSalesUserId > 0 ? $assignedSalesUserId : null;
-            $functionTypeIdValue = $functionTypeId > 0 ? $functionTypeId : null;
-            $enquiryStatusIdValue = $enquiryStatusId > 0 ? $enquiryStatusId : null;
-            $userId = (int)($_SESSION['user_id'] ?? 0);
-            $customerId = enqCustomerId($conn, $customerName, $mobile, $address);
-
-            if ($id > 0) {
-                $stmt = $conn->prepare("
-                    UPDATE enquiries
-                    SET customer_id = ?,
-                        customer_name = ?,
-                        mobile = ?,
-                        function_type_id = ?,
-                        function_date = ?,
-                        venue = ?,
-                        address = ?,
-                        enquiry_source = ?,
-                        enquiry_status_id = ?,
-                        assigned_sales_user_id = ?,
-                        next_callback_at = ?,
-                        remarks = ?,
-                        updated_by = ?,
-                        updated_at = NOW()
-                    WHERE id = ?
-                ");
-
-                $stmt->bind_param(
-                    'ississssiissii',
-                    $customerId,
-                    $customerName,
-                    $mobile,
-                    $functionTypeIdValue,
-                    $functionDateValue,
-                    $venue,
-                    $address,
-                    $enquirySource,
-                    $enquiryStatusIdValue,
-                    $assignedSalesUserIdValue,
-                    $nextCallbackValue,
-                    $remarks,
-                    $userId,
-                    $id
-                );
-                $stmt->execute();
-                $stmt->close();
-
-                enqLog($conn, 'update', $id, 'Enquiry updated.');
-                enqRedirect('msg=updated');
-            }
-
-            $enquiryNo = enqNextNo($conn);
-
-            $stmt = $conn->prepare("
-                INSERT INTO enquiries
-                    (
-                        enquiry_no,
-                        customer_id,
-                        customer_name,
-                        mobile,
-                        function_type_id,
-                        function_date,
-                        venue,
-                        address,
-                        enquiry_source,
-                        enquiry_status_id,
-                        assigned_sales_user_id,
-                        next_callback_at,
-                        remarks,
-                        created_by,
-                        created_at,
-                        updated_at
-                    )
-                VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-            ");
-
-            $stmt->bind_param(
-                'sississssiissi',
-                $enquiryNo,
-                $customerId,
-                $customerName,
-                $mobile,
-                $functionTypeIdValue,
-                $functionDateValue,
-                $venue,
-                $address,
-                $enquirySource,
-                $enquiryStatusIdValue,
-                $assignedSalesUserIdValue,
-                $nextCallbackValue,
-                $remarks,
-                $userId
-            );
-            $stmt->execute();
-            $newId = (int)$stmt->insert_id;
-            $stmt->close();
-
-            enqLog($conn, 'create_enquiry', $newId, 'Enquiry created: ' . $enquiryNo);
-
-            /*
-             * New enquiry WhatsApp flow:
-             * 1. Save enquiry first.
-             * 2. If real WhatsApp API is ready, send directly using API and log in whatsapp_logs.
-             * 3. If API is dummy/missing, log manual WhatsApp opened and redirect to WhatsApp Web/App.
-             */
-            if (enqWhatsappApiReady($conn)) {
-                $waResult = enqSendWhatsappByApi($conn, $newId);
-
-                if (!($waResult['success'] ?? false)) {
-                    $error = urlencode((string)($waResult['response'] ?? $waResult['message'] ?? 'WhatsApp failed.'));
-                    enqRedirect('msg=created_whatsapp_failed&err=' . $error);
-                }
-
-                enqRedirect('msg=created_whatsapp_sent');
-            }
-
-            $manualResult = enqWhatsappLogManual($conn, $newId);
-            enqRedirect('msg=created_whatsapp_manual&open_whatsapp=' . $newId);
-        }
-
-
-
-        if ($action === 'log_manual_whatsapp') {
-            $id = enqInt($_POST['id'] ?? 0);
-
-            header('Content-Type: application/json');
-
-            if ($id <= 0) {
-                echo json_encode([
-                    'success' => false,
-                    'message' => 'Invalid enquiry.'
-                ]);
-                exit;
-            }
-
-            $manualResult = enqWhatsappLogManual($conn, $id);
-
-            echo json_encode($manualResult);
-            exit;
-        }
-
-        if ($action === 'send_whatsapp_api') {
-            $id = enqInt($_POST['id'] ?? 0);
-
-            if ($id <= 0) {
-                throw new RuntimeException('Invalid enquiry.');
-            }
-
-            if (!enqWhatsappApiReady($conn)) {
-                enqRedirect('msg=whatsapp_manual');
-            }
-
-            $waResult = enqSendWhatsappByApi($conn, $id);
-
-            if (!($waResult['success'] ?? false)) {
-                $error = urlencode((string)($waResult['response'] ?? $waResult['message'] ?? 'WhatsApp failed.'));
-                enqRedirect('msg=whatsapp_failed&err=' . $error);
-            }
-
-            enqLog($conn, 'send_whatsapp', $id, 'WhatsApp enquiry message sent using API.');
-            enqRedirect('msg=whatsapp_sent');
-        }
-
-        if ($action === 'close_record') {
-            $id = enqInt($_POST['id'] ?? 0);
-
-            if ($id <= 0) {
-                throw new RuntimeException('Invalid enquiry.');
-            }
-
-            $closedStatusId = enqGetClosedStatusId($conn);
-            $userId = (int)($_SESSION['user_id'] ?? 0);
-
-            if ($closedStatusId) {
-                $stmt = $conn->prepare("
-                    UPDATE enquiries
-                    SET enquiry_status_id = ?,
-                        updated_by = ?,
-                        updated_at = NOW()
-                    WHERE id = ?
-                ");
-                $stmt->bind_param('iii', $closedStatusId, $userId, $id);
-            } else {
-                $stmt = $conn->prepare("
-                    UPDATE enquiries
-                    SET updated_by = ?,
-                        updated_at = NOW()
-                    WHERE id = ?
-                ");
-                $stmt->bind_param('ii', $userId, $id);
-            }
-
-            $stmt->execute();
-            $stmt->close();
-
-            enqLog($conn, 'delete', $id, 'Enquiry closed.');
-            enqRedirect('msg=closed');
-        }
-    } catch (Throwable $e) {
-        $message = $e->getMessage();
-        $messageType = 'danger';
-        $toastTitle = 'Failed';
-    }
-}
+/* Backend processing moved to api/enquiries.php */
 
 $msg = (string)($_GET['msg'] ?? '');
 if ($msg === 'created') {
@@ -1368,6 +1116,146 @@ if ($autoOpenWhatsappId > 0) {
             width: 100%;
         }
     }
+
+    /* Mobile enquiry card UI fix */
+    @media(max-width:767.98px) {
+        .mobile-card {
+            padding: 16px 16px 14px !important;
+            border-radius: 20px !important;
+        }
+
+        .mobile-card > .d-flex.justify-content-between {
+            align-items: flex-start !important;
+            gap: 12px !important;
+        }
+
+        .mobile-card .status-pill {
+            align-self: flex-start !important;
+            flex: 0 0 auto !important;
+            min-width: auto !important;
+            height: auto !important;
+            min-height: 0 !important;
+            line-height: 1.2 !important;
+            padding: 6px 10px !important;
+            border-radius: 999px !important;
+            white-space: nowrap !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            font-size: 10px !important;
+            max-width: 120px !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+        }
+
+        .mobile-card-title {
+            font-size: 16px !important;
+            line-height: 1.25 !important;
+            margin-bottom: 6px !important;
+        }
+
+        .mobile-card-subtitle {
+            font-size: 12px !important;
+            line-height: 1.45 !important;
+            margin-top: 3px !important;
+        }
+
+        .mobile-card-actions {
+            margin-top: 14px !important;
+            gap: 8px !important;
+        }
+
+        .mobile-card-actions .btn {
+            min-height: 38px !important;
+            border-radius: 999px !important;
+            font-size: 13px !important;
+            font-weight: 900 !important;
+        }
+
+        .mobile-card-actions .btn-whatsapp-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important;
+            flex: 0 0 42px !important;
+            padding: 0 !important;
+            border-radius: 50% !important;
+            margin: 0 auto !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+
+        .mobile-card-actions .btn-whatsapp-icon svg {
+            width: 18px !important;
+            height: 18px !important;
+        }
+
+        .module-card .form-control#tableSearch {
+            min-height: 46px !important;
+            border-radius: 16px !important;
+        }
+    }
+
+
+    /* Action icon buttons - safe common UI */
+    .btn-action-icon,
+    .btn-delete-icon {
+        width: 36px !important;
+        height: 36px !important;
+        min-width: 36px !important;
+        max-width: 36px !important;
+        padding: 0 !important;
+        border-radius: 50% !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        line-height: 1 !important;
+    }
+
+    .btn-action-icon svg,
+    .btn-delete-icon svg {
+        width: 16px !important;
+        height: 16px !important;
+        stroke-width: 2.5 !important;
+        flex: 0 0 auto !important;
+    }
+
+    .btn-action-icon.btn-whatsapp-icon {
+        background: #22c55e !important;
+        border-color: #22c55e !important;
+        color: #fff !important;
+    }
+
+    .btn-action-icon.btn-whatsapp-icon:hover {
+        background: #16a34a !important;
+        border-color: #16a34a !important;
+        color: #fff !important;
+    }
+
+    @media(max-width:767.98px) {
+        .mobile-card-actions .btn-action-icon,
+        .mobile-card-actions .btn-delete-icon,
+        .proforma-mobile-card .proforma-mobile-actions .btn-action-icon,
+        .proforma-mobile-card .proforma-mobile-actions .btn-delete-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important;
+            border-radius: 50% !important;
+            justify-self: center !important;
+            margin: 0 auto !important;
+        }
+
+        .mobile-card-actions .btn-action-icon svg,
+        .mobile-card-actions .btn-delete-icon svg,
+        .proforma-mobile-card .proforma-mobile-actions .btn-action-icon svg,
+        .proforma-mobile-card .proforma-mobile-actions .btn-delete-icon svg {
+            width: 18px !important;
+            height: 18px !important;
+        }
+    }
+
     </style>
 </head>
 
@@ -1502,8 +1390,8 @@ if ($autoOpenWhatsappId > 0) {
                                         </span>
                                     </td>
                                     <td class="text-end">
-                                        <button type="button"
-                                            class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
+                                        <button title="View" aria-label="View" type="button"
+                                            class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-record btn-action-icon"
                                             data-bs-toggle="modal" data-bs-target="#viewModal"
                                             data-enquiry-no="<?= e($row['enquiry_no']) ?>"
                                             data-customer-name="<?= e($row['customer_name']) ?>"
@@ -1516,12 +1404,10 @@ if ($autoOpenWhatsappId > 0) {
                                             data-enquiry-source="<?= e($row['enquiry_source']) ?>"
                                             data-status-name="<?= e($row['status_name'] ?? 'New') ?>"
                                             data-sales-person="<?= e($row['sales_person'] ?? '-') ?>"
-                                            data-remarks="<?= e($row['remarks']) ?>">
-                                            View
-                                        </button>
+                                            data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="eye"></i></button>
 
-                                        <button type="button"
-                                            class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
+                                        <button title="Edit" aria-label="Edit" type="button"
+                                            class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                             data-bs-toggle="modal" data-bs-target="#recordModal"
                                             data-id="<?= e($row['id']) ?>"
                                             data-customer-name="<?= e($row['customer_name']) ?>"
@@ -1534,22 +1420,18 @@ if ($autoOpenWhatsappId > 0) {
                                             data-enquiry-status-id="<?= e($row['enquiry_status_id']) ?>"
                                             data-assigned-sales-user-id="<?= e($row['assigned_sales_user_id']) ?>"
                                             data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
-                                            data-remarks="<?= e($row['remarks']) ?>">
-                                            Edit
-                                        </button>
+                                            data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
 
                                         <?= enqWhatsappPreviewButton($row) ?>
 
                                         <?php if (!$closed): ?>
-                                        <form method="post" class="d-inline"
-                                            onsubmit="const ok = confirm('Close this enquiry?'); if (ok) { showToast('Closing enquiry, please wait...', 'warning', 'Processing'); } return ok;">
+                                        <form method="post" action="api/enquiries.php"
+                                            class="d-inline js-api-close-form" onsubmit="return false;">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                             <input type="hidden" name="action" value="close_record">
                                             <input type="hidden" name="id" value="<?= e($row['id']) ?>">
-                                            <button type="submit"
-                                                class="btn btn-sm btn-outline-danger rounded-pill fw-bold">
-                                                Close
-                                            </button>
+                                            <button title="Close" aria-label="Close" type="submit"
+                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i data-lucide="x-circle"></i></button>
                                         </form>
                                         <?php endif; ?>
                                     </td>
@@ -1584,8 +1466,8 @@ if ($autoOpenWhatsappId > 0) {
                             </div>
 
                             <div class="mobile-card-actions">
-                                <button type="button"
-                                    class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
+                                <button title="View" aria-label="View" type="button"
+                                    class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-record btn-action-icon"
                                     data-bs-toggle="modal" data-bs-target="#viewModal"
                                     data-enquiry-no="<?= e($row['enquiry_no']) ?>"
                                     data-customer-name="<?= e($row['customer_name']) ?>"
@@ -1597,12 +1479,10 @@ if ($autoOpenWhatsappId > 0) {
                                     data-enquiry-source="<?= e($row['enquiry_source']) ?>"
                                     data-status-name="<?= e($row['status_name'] ?? 'New') ?>"
                                     data-sales-person="<?= e($row['sales_person'] ?? '-') ?>"
-                                    data-remarks="<?= e($row['remarks']) ?>">
-                                    View
-                                </button>
+                                    data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="eye"></i></button>
 
-                                <button type="button"
-                                    class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
+                                <button title="Edit" aria-label="Edit" type="button"
+                                    class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                     data-bs-toggle="modal" data-bs-target="#recordModal" data-id="<?= e($row['id']) ?>"
                                     data-customer-name="<?= e($row['customer_name']) ?>"
                                     data-mobile="<?= e($row['mobile']) ?>"
@@ -1613,21 +1493,17 @@ if ($autoOpenWhatsappId > 0) {
                                     data-enquiry-status-id="<?= e($row['enquiry_status_id']) ?>"
                                     data-assigned-sales-user-id="<?= e($row['assigned_sales_user_id']) ?>"
                                     data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
-                                    data-remarks="<?= e($row['remarks']) ?>">
-                                    Edit
-                                </button>
+                                    data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
 
                                 <?= enqWhatsappPreviewButton($row) ?>
 
                                 <?php if (!$closed): ?>
-                                <form method="post" class="d-inline"
-                                    onsubmit="const ok = confirm('Close this enquiry?'); if (ok) { showToast('Closing enquiry, please wait...', 'warning', 'Processing'); } return ok;">
+                                <form method="post" action="api/enquiries.php" class="d-inline js-api-close-form"
+                                    onsubmit="return false;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="close_record">
                                     <input type="hidden" name="id" value="<?= e($row['id']) ?>">
-                                    <button type="submit" class="btn btn-sm btn-outline-danger rounded-pill fw-bold">
-                                        Close
-                                    </button>
+                                    <button title="Close" aria-label="Close" type="submit" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i data-lucide="x-circle"></i></button>
                                 </form>
                                 <?php endif; ?>
                             </div>
@@ -1644,7 +1520,7 @@ if ($autoOpenWhatsappId > 0) {
 
     <div class="modal fade" id="recordModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-lg">
-            <form method="post" class="modal-content">
+            <form method="post" action="api/enquiries.php" class="modal-content" id="enquiryForm">
                 <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                 <input type="hidden" name="action" value="save_record">
                 <input type="hidden" name="id" id="id" value="">
@@ -1854,7 +1730,7 @@ if ($autoOpenWhatsappId > 0) {
     <div class="modal fade" id="whatsappPreviewModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-lg">
             <div class="modal-content">
-                <form method="post" id="whatsappApiForm">
+                <form method="post" action="api/enquiries.php" id="whatsappApiForm">
                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                     <input type="hidden" name="action" value="send_whatsapp_api" id="wa_api_action">
                     <input type="hidden" name="manual_action" value="log_manual_whatsapp" id="wa_manual_action">
@@ -1881,7 +1757,7 @@ if ($autoOpenWhatsappId > 0) {
                             data-bs-dismiss="modal">
                             Cancel
                         </button>
-                        <button type="button" class="btn btn-whatsapp-icon rounded-circle" id="waSendBtn"
+                        <button type="button" class="btn btn-whatsapp-icon btn-action-icon rounded-circle" id="waSendBtn"
                             title="Send WhatsApp">
                             <?= enqWhatsappSvg() ?>
                         </button>
@@ -1999,10 +1875,6 @@ if ($autoOpenWhatsappId > 0) {
                 setText('viewVenue', btn.dataset.venue || '-');
                 setText('viewAddress', btn.dataset.address || '-');
                 setText('viewRemarks', btn.dataset.remarks || '-');
-
-                if (typeof showToast === 'function') {
-                    showToast('Enquiry details opened.', 'success', 'Success');
-                }
             });
         });
 
@@ -2015,8 +1887,29 @@ if ($autoOpenWhatsappId > 0) {
 
         document.getElementById('waSendBtn')?.addEventListener('click', function() {
             if (whatsappApiReady) {
-                showToast('Sending WhatsApp message through API...', 'success', 'Processing');
-                document.getElementById('whatsappApiForm')?.submit();
+                const form = document.getElementById('whatsappApiForm');
+                const formData = new FormData(form);
+                formData.set('action', 'send_whatsapp_api');
+
+                fetch('api/enquiries.php', {
+                        method: 'POST',
+                        body: formData,
+                        credentials: 'same-origin'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        showToast(data.message || (data.status ? 'WhatsApp sent successfully.' :
+                                'WhatsApp failed.'), data.status ? 'success' : 'danger', data
+                            .status ? 'Success' : 'Failed');
+                        if (data.open_whatsapp_url) {
+                            window.open(data.open_whatsapp_url, '_blank', 'noopener');
+                        }
+                        if (whatsappPreviewModal) {
+                            whatsappPreviewModal.hide();
+                        }
+                    })
+                    .catch(() => showToast('WhatsApp API request failed.', 'danger', 'Failed'));
+
                 return;
             }
 
@@ -2025,9 +1918,7 @@ if ($autoOpenWhatsappId > 0) {
                 const formData = new FormData(form);
                 formData.set('action', 'log_manual_whatsapp');
 
-                showToast('Opening WhatsApp manual mode...', 'success', 'Success');
-
-                fetch(window.location.href.split('?')[0], {
+                fetch('api/enquiries.php', {
                     method: 'POST',
                     body: formData,
                     credentials: 'same-origin'
@@ -2163,8 +2054,60 @@ if ($autoOpenWhatsappId > 0) {
         });
 
 
-        document.querySelector('#recordModal form')?.addEventListener('submit', function() {
-            showToast('Saving enquiry, please wait...', 'success', 'Processing');
+        document.querySelector('#recordModal form')?.addEventListener('submit', function(event) {
+            event.preventDefault();
+
+            const form = this;
+            const formData = new FormData(form);
+
+            fetch('api/enquiries.php', {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    showToast(data.message || (data.status ? 'Saved successfully.' : 'Save failed.'),
+                        data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+
+                    if (data.open_whatsapp_url) {
+                        setTimeout(() => window.open(data.open_whatsapp_url, '_blank', 'noopener'),
+                            500);
+                    }
+
+                    if (data.status) {
+                        setTimeout(() => window.location.reload(), 900);
+                    }
+                })
+                .catch(() => showToast('API request failed.', 'danger', 'Failed'));
+        });
+
+        document.querySelectorAll('.js-api-close-form').forEach(function(form) {
+            form.addEventListener('submit', function(event) {
+                event.preventDefault();
+            });
+
+            form.querySelector('button[type="submit"]')?.addEventListener('click', function() {
+                const ok = confirm('Close this enquiry?');
+                if (!ok) return;
+
+                const formData = new FormData(form);
+                fetch('api/enquiries.php', {
+                        method: 'POST',
+                        body: formData,
+                        credentials: 'same-origin'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        showToast(data.message || (data.status ? 'Enquiry closed.' :
+                                'Close failed.'), data.status ? 'success' : 'danger', data
+                            .status ? 'Success' : 'Failed');
+                        if (data.status) {
+                            setTimeout(() => window.location.reload(), 800);
+                        }
+                    })
+                    .catch(() => showToast('API request failed.', 'danger', 'Failed'));
+            });
         });
 
 

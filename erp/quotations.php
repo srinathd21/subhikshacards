@@ -3,6 +3,8 @@
 
 require_once __DIR__ . '/includes/auth.php';
 require_permission($conn, 'can_view', 'quotations.php');
+// Backend create/update/cancel/WhatsApp processing moved to api/quotations.php
+// Toast rule: show toast only for important save/update/cancel/WhatsApp result messages.
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -673,7 +675,7 @@ function qtWhatsappPreviewButton(array $row): string
 {
     return '
         <button type="button"
-            class="btn btn-sm btn-whatsapp-icon rounded-circle js-whatsapp-preview"
+            class="btn btn-sm btn-whatsapp-icon btn-action-icon rounded-circle js-whatsapp-preview"
             title="Preview WhatsApp message"
             data-id="' . e($row['id'] ?? '') . '"
             data-customer-name="' . e($row['customer_name'] ?? '') . '"
@@ -686,341 +688,7 @@ function qtWhatsappPreviewButton(array $row): string
 }
 
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    qtCsrf();
-
-    try {
-        $action = qtPost('action');
-
-        if ($action === 'save_record') {
-            if (!qtTableExists($conn, 'quotations')) {
-                throw new RuntimeException('quotations table is missing.');
-            }
-
-            $id = qtInt($_POST['id'] ?? 0);
-            $enquiryId = qtInt($_POST['enquiry_id'] ?? 0);
-            $functionTypeRaw = qtPost('function_type_id');
-            $functionTypeId = qtFunctionTypeId($conn, $functionTypeRaw);
-            $customerName = qtPost('customer_name');
-            $mobile = qtPost('mobile');
-            $address = qtPost('address');
-            $brideName = qtPost('bride_name');
-            $groomName = qtPost('groom_name');
-            $venue = qtPost('venue');
-            $functionDate = qtPost('function_date');
-            $functionTime = qtPost('function_time');
-            $quotationStatusId = qtInt($_POST['quotation_status_id'] ?? 0);
-            $totalQty = qtFloat($_POST['total_qty'] ?? 0);
-            $itemDetails = qtPost('item_details');
-            $unitPrice = qtFloat($_POST['unit_price'] ?? 0);
-            $subTotal = round($totalQty * $unitPrice, 2);
-            $discountAmount = qtFloat($_POST['discount_amount'] ?? 0);
-            $finalAmount = max(0, round($subTotal - $discountAmount, 2));
-            $remarks = qtPost('remarks');
-
-            if ($functionTypeId <= 0) {
-                throw new RuntimeException('Function / Product type is required.');
-            }
-
-            $functionTypeName = qtFunctionTypeName($conn, $functionTypeId);
-            $functionCategory = qtFunctionCategory($functionTypeName);
-
-            if ($functionCategory === 'wedding_reception') {
-                if ($brideName === '' || $groomName === '') {
-                    throw new RuntimeException('Bride name and groom name are required.');
-                }
-
-                if ($customerName === '') {
-                    $customerName = trim($brideName . ' & ' . $groomName);
-                }
-            }
-
-            if (in_array($functionCategory, ['event', 'business_print'], true) && $customerName === '') {
-                throw new RuntimeException('Customer name is required.');
-            }
-
-            if (in_array($functionCategory, ['wedding_reception', 'event', 'business_print'], true) && $mobile === '') {
-                throw new RuntimeException('Mobile number is required.');
-            }
-
-            if (in_array($functionCategory, ['wedding_reception', 'event'], true)) {
-                if ($venue === '') {
-                    throw new RuntimeException('Venue is required.');
-                }
-
-                if ($functionDate === '') {
-                    throw new RuntimeException('Function date is required.');
-                }
-
-                if ($functionTime === '') {
-                    throw new RuntimeException('Function time is required.');
-                }
-            }
-
-            if ($functionCategory === 'business_print' && $address === '') {
-                throw new RuntimeException('Address is required.');
-            }
-
-            if ($functionCategory === 'other') {
-                $customerName = $customerName !== '' ? $customerName : 'Direct Customer';
-                $mobile = $mobile !== '' ? $mobile : '-';
-            }
-
-            if ($totalQty <= 0) {
-                throw new RuntimeException('Number of items must be greater than zero.');
-            }
-
-            if ($itemDetails === '') {
-                throw new RuntimeException('Item details is required.');
-            }
-
-            if ($unitPrice <= 0) {
-                throw new RuntimeException('Each card price must be greater than zero.');
-            }
-
-            if ($subTotal <= 0) {
-                throw new RuntimeException('Sub total must be greater than zero.');
-            }
-
-            if ($discountAmount < 0) {
-                throw new RuntimeException('Discount amount cannot be negative.');
-            }
-
-            if ($discountAmount > $subTotal) {
-                throw new RuntimeException('Discount amount cannot be greater than sub total.');
-            }
-
-            if ($finalAmount <= 0) {
-                throw new RuntimeException('Final price must be greater than zero.');
-            }
-
-            if ($quotationStatusId <= 0) {
-                $defaultStatusId = qtDefaultStatusId($conn);
-                if (!$defaultStatusId) {
-                    throw new RuntimeException('Quotation status master is missing.');
-                }
-                $quotationStatusId = $defaultStatusId;
-            }
-
-            $enquiryIdValue = $enquiryId > 0 ? $enquiryId : null;
-            $functionTypeIdValue = $functionTypeId > 0 ? $functionTypeId : null;
-            $quotationStatusIdValue = $quotationStatusId > 0 ? $quotationStatusId : null;
-            $functionDateValue = $functionDate !== '' ? $functionDate : null;
-            $functionTimeValue = $functionTime !== '' ? $functionTime : null;
-            $userId = (int)($_SESSION['user_id'] ?? 0);
-            $customerId = qtCustomerId($conn, $customerName, $mobile, $address);
-
-            if ($id > 0) {
-                $stmt = $conn->prepare("
-                    UPDATE quotations
-                    SET enquiry_id = ?,
-                        customer_id = ?,
-                        function_type_id = ?,
-                        customer_name = ?,
-                        mobile = ?,
-                        address = ?,
-                        bride_name = ?,
-                        groom_name = ?,
-                        venue = ?,
-                        function_date = ?,
-                        function_time = ?,
-                        quotation_status_id = ?,
-                        total_qty = ?,
-                        item_details = ?,
-                        sub_total = ?,
-                        discount_amount = ?,
-                        final_amount = ?,
-                        remarks = ?,
-                        updated_by = ?,
-                        updated_at = NOW()
-                    WHERE id = ?
-                ");
-                $stmt->bind_param(
-                    'iiissssssssidsdddsii',
-                    $enquiryIdValue,
-                    $customerId,
-                    $functionTypeIdValue,
-                    $customerName,
-                    $mobile,
-                    $address,
-                    $brideName,
-                    $groomName,
-                    $venue,
-                    $functionDateValue,
-                    $functionTimeValue,
-                    $quotationStatusIdValue,
-                    $totalQty,
-                    $itemDetails,
-                    $subTotal,
-                    $discountAmount,
-                    $finalAmount,
-                    $remarks,
-                    $userId,
-                    $id
-                );
-                $stmt->execute();
-                $stmt->close();
-
-                if ($enquiryIdValue) {
-                    $stmt = $conn->prepare("UPDATE enquiries SET converted_to_quotation = 1, updated_by = ?, updated_at = NOW() WHERE id = ?");
-                    $stmt->bind_param('ii', $userId, $enquiryIdValue);
-                    $stmt->execute();
-                    $stmt->close();
-                }
-
-                qtLog($conn, 'update', $id, 'Quotation updated.');
-                qtRedirect('msg=updated');
-            }
-
-            $quotationNo = qtNextNo($conn);
-
-            $stmt = $conn->prepare("
-                INSERT INTO quotations
-                    (
-                        quotation_no,
-                        enquiry_id,
-                        customer_id,
-                        function_type_id,
-                        customer_name,
-                        mobile,
-                        address,
-                        bride_name,
-                        groom_name,
-                        venue,
-                        function_date,
-                        function_time,
-                        quotation_status_id,
-                        total_qty,
-                        item_details,
-                        sub_total,
-                        discount_amount,
-                        final_amount,
-                        remarks,
-                        created_by,
-                        created_at,
-                        updated_at
-                    )
-                VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-            ");
-            $stmt->bind_param(
-                'siiissssssssidsdddsi',
-                $quotationNo,
-                $enquiryIdValue,
-                $customerId,
-                $functionTypeIdValue,
-                $customerName,
-                $mobile,
-                $address,
-                $brideName,
-                $groomName,
-                $venue,
-                $functionDateValue,
-                $functionTimeValue,
-                $quotationStatusIdValue,
-                $totalQty,
-                $itemDetails,
-                $subTotal,
-                $discountAmount,
-                $finalAmount,
-                $remarks,
-                $userId
-            );
-            $stmt->execute();
-            $newId = (int)$stmt->insert_id;
-            $stmt->close();
-
-            if ($enquiryIdValue) {
-                $stmt = $conn->prepare("UPDATE enquiries SET converted_to_quotation = 1, updated_by = ?, updated_at = NOW() WHERE id = ?");
-                $stmt->bind_param('ii', $userId, $enquiryIdValue);
-                $stmt->execute();
-                $stmt->close();
-            }
-
-            qtLog($conn, 'create_quotation', $newId, 'Quotation created: ' . $quotationNo);
-
-            if (qtWhatsappApiReady($conn)) {
-                $waResult = qtSendWhatsappByApi($conn, $newId);
-
-                if (!($waResult['success'] ?? false)) {
-                    $error = urlencode((string)($waResult['response'] ?? $waResult['message'] ?? 'WhatsApp failed.'));
-                    qtRedirect('msg=created_whatsapp_failed&err=' . $error);
-                }
-
-                qtRedirect('msg=created_whatsapp_sent');
-            }
-
-            qtWhatsappLogManual($conn, $newId);
-            qtRedirect('msg=created_whatsapp_manual&open_whatsapp=' . $newId);
-        }
-
-
-        if ($action === 'log_manual_whatsapp') {
-            $id = qtInt($_POST['id'] ?? 0);
-
-            header('Content-Type: application/json');
-
-            if ($id <= 0) {
-                echo json_encode(['success' => false, 'message' => 'Invalid quotation.']);
-                exit;
-            }
-
-            echo json_encode(qtWhatsappLogManual($conn, $id));
-            exit;
-        }
-
-        if ($action === 'send_whatsapp_api') {
-            $id = qtInt($_POST['id'] ?? 0);
-
-            if ($id <= 0) {
-                throw new RuntimeException('Invalid quotation.');
-            }
-
-            if (!qtWhatsappApiReady($conn)) {
-                qtRedirect('msg=whatsapp_manual');
-            }
-
-            $waResult = qtSendWhatsappByApi($conn, $id);
-
-            if (!($waResult['success'] ?? false)) {
-                $error = urlencode((string)($waResult['response'] ?? $waResult['message'] ?? 'WhatsApp failed.'));
-                qtRedirect('msg=whatsapp_failed&err=' . $error);
-            }
-
-            qtLog($conn, 'send_whatsapp', $id, 'Quotation WhatsApp message sent using API.');
-            qtRedirect('msg=whatsapp_sent');
-        }
-
-        if ($action === 'cancel_record') {
-            $id = qtInt($_POST['id'] ?? 0);
-            if ($id <= 0) {
-                throw new RuntimeException('Invalid quotation.');
-            }
-
-            $cancelStatusId = qtCancelledStatusId($conn);
-            $userId = (int)($_SESSION['user_id'] ?? 0);
-
-            if ($cancelStatusId) {
-                $stmt = $conn->prepare("
-                    UPDATE quotations
-                    SET quotation_status_id = ?,
-                        updated_by = ?,
-                        updated_at = NOW()
-                    WHERE id = ?
-                ");
-                $stmt->bind_param('iii', $cancelStatusId, $userId, $id);
-                $stmt->execute();
-                $stmt->close();
-            }
-
-            qtLog($conn, 'delete', $id, 'Quotation cancelled.');
-            qtRedirect('msg=cancelled');
-        }
-    } catch (Throwable $e) {
-        $message = $e->getMessage();
-        $messageType = 'danger';
-    }
-}
+/* Backend processing moved to api/quotations.php */
 
 $msg = (string)($_GET['msg'] ?? '');
 $toastTitle = 'Info';
@@ -1593,6 +1261,171 @@ if ($autoOpenWhatsappId > 0) {
             width: 100%;
         }
     }
+
+    /* Mobile WhatsApp button fix: keep icon as proper circle, not full-width pill */
+    @media(max-width:767.98px) {
+        .mobile-card-actions .btn-whatsapp-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important;
+            flex: 0 0 42px !important;
+            padding: 0 !important;
+            border-radius: 50% !important;
+            margin: 0 auto !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+
+        .mobile-card-actions .btn-whatsapp-icon svg {
+            width: 18px !important;
+            height: 18px !important;
+            flex: 0 0 auto !important;
+        }
+    }
+
+
+    /* Mobile quotation card UI fix */
+    @media(max-width:767.98px) {
+        .mobile-card {
+            padding: 16px 16px 14px !important;
+            border-radius: 20px !important;
+        }
+
+        .mobile-card > .d-flex.justify-content-between {
+            align-items: flex-start !important;
+            gap: 12px !important;
+        }
+
+        .mobile-card .status-pill {
+            align-self: flex-start !important;
+            flex: 0 0 auto !important;
+            min-width: auto !important;
+            height: auto !important;
+            min-height: 0 !important;
+            line-height: 1.2 !important;
+            padding: 6px 10px !important;
+            border-radius: 999px !important;
+            white-space: nowrap !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            font-size: 10px !important;
+            max-width: 110px !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+        }
+
+        .mobile-card-title {
+            font-size: 16px !important;
+            line-height: 1.25 !important;
+            margin-bottom: 6px !important;
+        }
+
+        .mobile-card-subtitle {
+            font-size: 12px !important;
+            line-height: 1.45 !important;
+            margin-top: 3px !important;
+        }
+
+        .mobile-card-actions {
+            margin-top: 14px !important;
+            gap: 8px !important;
+        }
+
+        .mobile-card-actions .btn {
+            min-height: 38px !important;
+            border-radius: 999px !important;
+            font-size: 13px !important;
+            font-weight: 900 !important;
+        }
+
+        .mobile-card-actions .btn-whatsapp-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important;
+            flex: 0 0 42px !important;
+            padding: 0 !important;
+            border-radius: 50% !important;
+            margin: 0 auto !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+
+        .mobile-card-actions .btn-whatsapp-icon svg {
+            width: 18px !important;
+            height: 18px !important;
+            flex: 0 0 auto !important;
+        }
+
+        .module-card .form-control#tableSearch {
+            min-height: 46px !important;
+            border-radius: 16px !important;
+        }
+    }
+
+
+    /* Action icon buttons - safe common UI */
+    .btn-action-icon,
+    .btn-delete-icon {
+        width: 36px !important;
+        height: 36px !important;
+        min-width: 36px !important;
+        max-width: 36px !important;
+        padding: 0 !important;
+        border-radius: 50% !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        line-height: 1 !important;
+    }
+
+    .btn-action-icon svg,
+    .btn-delete-icon svg {
+        width: 16px !important;
+        height: 16px !important;
+        stroke-width: 2.5 !important;
+        flex: 0 0 auto !important;
+    }
+
+    .btn-action-icon.btn-whatsapp-icon {
+        background: #22c55e !important;
+        border-color: #22c55e !important;
+        color: #fff !important;
+    }
+
+    .btn-action-icon.btn-whatsapp-icon:hover {
+        background: #16a34a !important;
+        border-color: #16a34a !important;
+        color: #fff !important;
+    }
+
+    @media(max-width:767.98px) {
+        .mobile-card-actions .btn-action-icon,
+        .mobile-card-actions .btn-delete-icon,
+        .proforma-mobile-card .proforma-mobile-actions .btn-action-icon,
+        .proforma-mobile-card .proforma-mobile-actions .btn-delete-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important;
+            border-radius: 50% !important;
+            justify-self: center !important;
+            margin: 0 auto !important;
+        }
+
+        .mobile-card-actions .btn-action-icon svg,
+        .mobile-card-actions .btn-delete-icon svg,
+        .proforma-mobile-card .proforma-mobile-actions .btn-action-icon svg,
+        .proforma-mobile-card .proforma-mobile-actions .btn-delete-icon svg {
+            width: 18px !important;
+            height: 18px !important;
+        }
+    }
+
     </style>
 </head>
 
@@ -1744,8 +1577,8 @@ if ($autoOpenWhatsappId > 0) {
                                         </span>
                                     </td>
                                     <td class="text-end">
-                                        <button type="button"
-                                            class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
+                                        <button title="View" aria-label="View" type="button"
+                                            class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-record btn-action-icon"
                                             data-bs-toggle="modal" data-bs-target="#viewModal"
                                             data-quotation-no="<?= e($row['quotation_no']) ?>"
                                             data-enquiry-no="<?= e($row['enquiry_no'] ?? 'Direct') ?>"
@@ -1764,12 +1597,10 @@ if ($autoOpenWhatsappId > 0) {
                                             data-discount-amount="<?= e(qtMoney($row['discount_amount'])) ?>"
                                             data-final-amount="<?= e(qtMoney($row['final_amount'])) ?>"
                                             data-status-name="<?= e($row['status_name'] ?? '-') ?>"
-                                            data-remarks="<?= e($row['remarks']) ?>">
-                                            View
-                                        </button>
+                                            data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="eye"></i></button>
 
-                                        <button type="button"
-                                            class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
+                                        <button title="Edit" aria-label="Edit" type="button"
+                                            class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                             data-bs-toggle="modal" data-bs-target="#recordModal"
                                             data-id="<?= e($row['id']) ?>"
                                             data-enquiry-id="<?= e($row['enquiry_id']) ?>"
@@ -1789,22 +1620,18 @@ if ($autoOpenWhatsappId > 0) {
                                             data-sub-total="<?= e($row['sub_total']) ?>"
                                             data-discount-amount="<?= e($row['discount_amount']) ?>"
                                             data-final-amount="<?= e($row['final_amount']) ?>"
-                                            data-remarks="<?= e($row['remarks']) ?>">
-                                            Edit
-                                        </button>
+                                            data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
 
                                         <?= qtWhatsappPreviewButton($row) ?>
 
                                         <?php if (!$cancelled): ?>
-                                        <form method="post" class="d-inline"
-                                            onsubmit="const ok = confirm('Cancel this quotation?'); if (ok) { showToast('Cancelling quotation, please wait...', 'warning', 'Processing'); } return ok;">
+                                        <form method="post" action="api/quotations.php"
+                                            class="d-inline js-api-cancel-form" onsubmit="return false;">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                             <input type="hidden" name="action" value="cancel_record">
                                             <input type="hidden" name="id" value="<?= e($row['id']) ?>">
-                                            <button type="submit"
-                                                class="btn btn-sm btn-outline-danger rounded-pill fw-bold">
-                                                Cancel
-                                            </button>
+                                            <button title="Cancel" aria-label="Cancel" type="submit"
+                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i data-lucide="x-circle"></i></button>
                                         </form>
                                         <?php endif; ?>
                                     </td>
@@ -1839,8 +1666,8 @@ if ($autoOpenWhatsappId > 0) {
                             </div>
 
                             <div class="mobile-card-actions">
-                                <button type="button"
-                                    class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
+                                <button title="View" aria-label="View" type="button"
+                                    class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-record btn-action-icon"
                                     data-bs-toggle="modal" data-bs-target="#viewModal"
                                     data-quotation-no="<?= e($row['quotation_no']) ?>"
                                     data-enquiry-no="<?= e($row['enquiry_no'] ?? 'Direct') ?>"
@@ -1857,12 +1684,10 @@ if ($autoOpenWhatsappId > 0) {
                                     data-discount-amount="<?= e(qtMoney($row['discount_amount'])) ?>"
                                     data-final-amount="<?= e(qtMoney($row['final_amount'])) ?>"
                                     data-status-name="<?= e($row['status_name'] ?? '-') ?>"
-                                    data-remarks="<?= e($row['remarks']) ?>">
-                                    View
-                                </button>
+                                    data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="eye"></i></button>
 
-                                <button type="button"
-                                    class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
+                                <button title="Edit" aria-label="Edit" type="button"
+                                    class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                     data-bs-toggle="modal" data-bs-target="#recordModal" data-id="<?= e($row['id']) ?>"
                                     data-enquiry-id="<?= e($row['enquiry_id']) ?>"
                                     data-function-type-id="<?= e($row['function_type_id']) ?>"
@@ -1879,21 +1704,17 @@ if ($autoOpenWhatsappId > 0) {
                                     data-sub-total="<?= e($row['sub_total']) ?>"
                                     data-discount-amount="<?= e($row['discount_amount']) ?>"
                                     data-final-amount="<?= e($row['final_amount']) ?>"
-                                    data-remarks="<?= e($row['remarks']) ?>">
-                                    Edit
-                                </button>
+                                    data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
 
                                 <?= qtWhatsappPreviewButton($row) ?>
 
                                 <?php if (!$cancelled): ?>
-                                <form method="post" class="d-inline"
-                                    onsubmit="const ok = confirm('Cancel this quotation?'); if (ok) { showToast('Cancelling quotation, please wait...', 'warning', 'Processing'); } return ok;">
+                                <form method="post" action="api/quotations.php" class="d-inline js-api-cancel-form"
+                                    onsubmit="return false;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="cancel_record">
                                     <input type="hidden" name="id" value="<?= e($row['id']) ?>">
-                                    <button type="submit" class="btn btn-sm btn-outline-danger rounded-pill fw-bold">
-                                        Cancel
-                                    </button>
+                                    <button title="Cancel" aria-label="Cancel" type="submit" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i data-lucide="x-circle"></i></button>
                                 </form>
                                 <?php endif; ?>
                             </div>
@@ -1910,7 +1731,7 @@ if ($autoOpenWhatsappId > 0) {
 
     <div class="modal fade" id="recordModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-xl">
-            <form method="post" class="modal-content">
+            <form method="post" action="api/quotations.php" class="modal-content" id="quotationForm">
                 <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                 <input type="hidden" name="action" value="save_record">
                 <input type="hidden" name="id" id="id" value="">
@@ -2241,7 +2062,7 @@ if ($autoOpenWhatsappId > 0) {
     <div class="modal fade" id="whatsappPreviewModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-lg">
             <div class="modal-content">
-                <form method="post" id="whatsappApiForm">
+                <form method="post" action="api/quotations.php" id="whatsappApiForm">
                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                     <input type="hidden" name="action" value="send_whatsapp_api" id="wa_api_action">
                     <input type="hidden" name="manual_action" value="log_manual_whatsapp" id="wa_manual_action">
@@ -2268,7 +2089,7 @@ if ($autoOpenWhatsappId > 0) {
                             data-bs-dismiss="modal">
                             Cancel
                         </button>
-                        <button type="button" class="btn btn-whatsapp-icon rounded-circle" id="waSendBtn"
+                        <button type="button" class="btn btn-whatsapp-icon btn-action-icon rounded-circle" id="waSendBtn"
                             title="Send WhatsApp">
                             <?= qtWhatsappSvg() ?>
                         </button>
@@ -2390,10 +2211,6 @@ if ($autoOpenWhatsappId > 0) {
                 setText('viewDiscountAmount', btn.dataset.discountAmount || '-');
                 setText('viewFinalAmount', btn.dataset.finalAmount || '-');
                 setText('viewRemarks', btn.dataset.remarks || '-');
-
-                if (typeof showToast === 'function') {
-                    showToast('Quotation details opened.', 'success', 'Success');
-                }
             });
         });
 
@@ -2406,8 +2223,32 @@ if ($autoOpenWhatsappId > 0) {
 
         document.getElementById('waSendBtn')?.addEventListener('click', function() {
             if (whatsappApiReady) {
-                showToast('Sending WhatsApp message through API...', 'success', 'Processing');
-                document.getElementById('whatsappApiForm')?.submit();
+                const form = document.getElementById('whatsappApiForm');
+                const formData = new FormData(form);
+                formData.set('action', 'send_whatsapp_api');
+
+
+                fetch('api/quotations.php', {
+                        method: 'POST',
+                        body: formData,
+                        credentials: 'same-origin'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        showToast(data.message || (data.status ? 'WhatsApp sent successfully.' :
+                                'WhatsApp failed.'), data.status ? 'success' : 'danger', data
+                            .status ? 'Success' : 'Failed');
+
+                        if (data.open_whatsapp_url) {
+                            window.location.href = data.open_whatsapp_url;
+                        }
+
+                        if (whatsappPreviewModal) {
+                            whatsappPreviewModal.hide();
+                        }
+                    })
+                    .catch(() => showToast('WhatsApp API request failed.', 'danger', 'Failed'));
+
                 return;
             }
 
@@ -2416,9 +2257,7 @@ if ($autoOpenWhatsappId > 0) {
                 const formData = new FormData(form);
                 formData.set('action', 'log_manual_whatsapp');
 
-                showToast('Opening WhatsApp manual mode...', 'success', 'Success');
-
-                fetch(window.location.href.split('?')[0], {
+                fetch('api/quotations.php', {
                     method: 'POST',
                     body: formData,
                     credentials: 'same-origin'
@@ -2785,8 +2624,61 @@ if ($autoOpenWhatsappId > 0) {
         });
 
 
-        document.querySelector('#recordModal form')?.addEventListener('submit', function() {
-            showToast('Saving quotation, please wait...', 'success', 'Processing');
+        document.querySelector('#recordModal form')?.addEventListener('submit', function(event) {
+            event.preventDefault();
+
+            const form = this;
+            const formData = new FormData(form);
+
+            fetch('api/quotations.php', {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    showToast(data.message || (data.status ? 'Saved successfully.' : 'Save failed.'),
+                        data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+
+                    if (data.open_whatsapp_url) {
+                        setTimeout(() => window.location.href = data.open_whatsapp_url, 500);
+                        return;
+                    }
+
+                    if (data.status) {
+                        setTimeout(() => window.location.reload(), 900);
+                    }
+                })
+                .catch(() => showToast('API request failed.', 'danger', 'Failed'));
+        });
+
+        document.querySelectorAll('.js-api-cancel-form').forEach(function(form) {
+            form.addEventListener('submit', function(event) {
+                event.preventDefault();
+            });
+
+            form.querySelector('button[type="submit"]')?.addEventListener('click', function() {
+                const ok = confirm('Cancel this quotation?');
+                if (!ok) return;
+
+                const formData = new FormData(form);
+                fetch('api/quotations.php', {
+                        method: 'POST',
+                        body: formData,
+                        credentials: 'same-origin'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        showToast(data.message || (data.status ? 'Quotation cancelled.' :
+                                'Cancel failed.'), data.status ? 'success' : 'danger', data
+                            .status ? 'Success' : 'Failed');
+
+                        if (data.status) {
+                            setTimeout(() => window.location.reload(), 800);
+                        }
+                    })
+                    .catch(() => showToast('API request failed.', 'danger', 'Failed'));
+            });
         });
 
 

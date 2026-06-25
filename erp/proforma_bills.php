@@ -18,6 +18,7 @@
 
 require_once __DIR__ . '/includes/auth.php';
 require_permission($conn, 'can_view', 'proforma_bills.php');
+// Backend create/update/job-card/WhatsApp processing moved to api/proforma_bills.php
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -1264,7 +1265,7 @@ function pb_whatsapp_button(array $row): string
 
     return '
         <button type="button"
-            class="btn btn-sm btn-whatsapp-icon rounded-circle js-whatsapp-preview"
+            class="btn btn-sm btn-whatsapp-icon btn-action-icon rounded-circle js-whatsapp-preview"
             title="Preview WhatsApp message"
             data-id="' . e($row['id'] ?? '') . '"
             data-customer-name="' . e($row['customer_name'] ?? '') . '"
@@ -1369,506 +1370,7 @@ try {
 } catch (Throwable $e) {
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    pb_csrf();
-
-    try {
-        $action = pb_post('action');
-
-        if ($action === 'save_proforma') {
-            $id = pb_int($_POST['id'] ?? 0);
-            $quotationId = pb_int($_POST['quotation_id'] ?? 0) ?: null;
-            $functionTypeId = pb_function_type_id($conn, pb_post('function_type_id'));
-            $orderType = pb_post('order_type', 'readymade');
-            $customerName = pb_post('customer_name');
-            $mobile = pb_post('mobile');
-            $billingName = pb_post('billing_name');
-            $billingMobile = pb_post('billing_mobile');
-            $billingAddress = pb_post('billing_address');
-            $gstNumber = pb_post('gst_number');
-            $brideName = pb_post('bride_name');
-            $groomName = pb_post('groom_name');
-            $venue = pb_post('venue');
-            $functionDate = pb_post('function_date') ?: null;
-            $functionTime = pb_post('function_time') ?: null;
-            $statusId = pb_int($_POST['proforma_status_id'] ?? 0) ?: null;
-            $deliveryDate = pb_post('delivery_date') ?: null;
-            $remarks = pb_post('remarks');
-            $createJobCardNow = isset($_POST['create_job_card_now']);
-
-            $productId = pb_int($_POST['product_id'] ?? 0) ?: null;
-            $manualItemName = pb_post('item_name');
-            $description = pb_post('description');
-            $qty = pb_float($_POST['qty'] ?? 1);
-            $rate = pb_float($_POST['rate'] ?? 0);
-            $printingTypeId = pb_int($_POST['printing_type_id'] ?? 0) ?: null;
-            $printingSubTypeId = pb_int($_POST['printing_sub_type_id'] ?? 0) ?: null;
-
-            if ($orderType === 'customized') {
-                $offsetPrintingTypeId = pb_offset_printing_type_id($conn);
-                if (!$offsetPrintingTypeId) {
-                    throw new RuntimeException('Offset Print type is missing. Please add it in Printing Types master.');
-                }
-
-                $printingTypeId = $offsetPrintingTypeId;
-                $printingSubTypeId = null;
-            }
-            $finishingRequired = pb_int($_POST['finishing_required'] ?? 0) === 1 ? 1 : 0;
-            $sizeText = pb_post('size_text');
-            $gsmThickness = pb_post('gsm_thickness');
-            $laminationRequired = pb_int($_POST['lamination_required'] ?? 0) === 1 ? 1 : 0;
-            $laminationType = pb_post('lamination_type') ?: null;
-            if ($laminationRequired !== 1) {
-                $laminationType = null;
-            }
-            $printingSide = pb_post('printing_side') ?: null;
-            $screeningType = pb_post('screening_type') ?: null;
-
-            $discountAmount = pb_float($_POST['discount_amount'] ?? 0);
-            $advanceAmount = pb_float($_POST['advance_amount'] ?? 0);
-            $paymentMode = pb_post('payment_mode', 'cash');
-            $paymentRef = pb_post('payment_reference');
-
-            if (!in_array($orderType, ['readymade', 'customized'], true)) {
-                throw new RuntimeException('Invalid order type.');
-            }
-
-            if ($customerName === '' || $mobile === '') {
-                throw new RuntimeException('Customer name and mobile number are required.');
-            }
-
-            $selectedFieldGroup = 'other';
-            foreach ($functionTypes as $ft) {
-                if ((int)$ft['id'] === (int)$functionTypeId) {
-                    $selectedFieldGroup = (string)$ft['field_group'];
-                    break;
-                }
-            }
-
-            if (!$functionTypeId) {
-                throw new RuntimeException('Please select function / product type.');
-            }
-
-            if ($selectedFieldGroup === 'wedding_reception') {
-                if ($brideName === '' || $groomName === '' || $venue === '' || !$functionDate || !$functionTime) {
-                    throw new RuntimeException('Bride, groom, venue, function date and time are required for Wedding / Reception.');
-                }
-            } elseif ($selectedFieldGroup === 'event') {
-                if ($venue === '' || !$functionDate || !$functionTime) {
-                    throw new RuntimeException('Venue, function date and time are required for this function type.');
-                }
-            } elseif ($selectedFieldGroup === 'business_print') {
-                if ($billingAddress === '') {
-                    throw new RuntimeException('Address is required for Visiting Card / Bill Book / Brochure / Pamphlet.');
-                }
-            }
-
-            if ($manualItemName === '' && !$productId) {
-                throw new RuntimeException('Please select product or enter product name.');
-            }
-
-            if ($orderType === 'readymade') {
-                if (!$printingTypeId) {
-                    throw new RuntimeException('Please select printing type for readymade order.');
-                }
-
-                if (!pb_printing_type_allowed_for_readymade($conn, $printingTypeId)) {
-                    throw new RuntimeException('Readymade order allows only Offset Print, Screen Print, or Digital Print.');
-                }
-
-                if (pb_is_screen_printing_type($conn, $printingTypeId) && !$printingSubTypeId) {
-                    throw new RuntimeException('Please select Screen Print sub-type: UV Products or Foil Products.');
-                }
-
-                $sizeText = '';
-                $gsmThickness = '';
-                $laminationRequired = 0;
-                $laminationType = null;
-                $printingSide = null;
-                $screeningType = null;
-            }
-
-            if ($orderType === 'customized') {
-                if ($sizeText === '') {
-                    throw new RuntimeException('Size is required for customized order.');
-                }
-
-                if ($gsmThickness === '') {
-                    throw new RuntimeException('GSM Thickness is required for customized order.');
-                }
-
-                if (!$printingSide) {
-                    throw new RuntimeException('Please select Single Side or Double Side.');
-                }
-
-                if (!$screeningType) {
-                    throw new RuntimeException('Please select Regular Screening or Special Screening.');
-                }
-
-                if ($laminationRequired === 1 && !$laminationType) {
-                    throw new RuntimeException('Please select lamination type.');
-                }
-
-                $finishingRequired = 0;
-            }
-
-            if ($qty <= 0) {
-                throw new RuntimeException('Quantity must be greater than zero.');
-            }
-
-            if ($rate <= 0) {
-                throw new RuntimeException('Price / rate must be greater than zero.');
-            }
-
-            if ($discountAmount < 0) {
-                throw new RuntimeException('Discount cannot be negative.');
-            }
-
-            if ($advanceAmount < 0) {
-                throw new RuntimeException('Advance amount cannot be negative.');
-            }
-
-            $productName = $manualItemName;
-            if ($productName === '' && $productId) {
-                foreach ($products as $product) {
-                    if ((int)$product['id'] === $productId) {
-                        $productName = $product['product_name'];
-                        break;
-                    }
-                }
-            }
-
-            if ($productName === '') {
-                $productName = 'Invitation Cards';
-            }
-
-            $amount = round($qty * $rate, 2);
-            $subTotal = $amount;
-
-            if ($discountAmount > $subTotal) {
-                throw new RuntimeException('Discount cannot be greater than sub total.');
-            }
-
-            $finalAmount = round(max(0, $subTotal - $discountAmount), 2);
-
-            if ($advanceAmount > $finalAmount) {
-                throw new RuntimeException('Advance cannot be greater than final amount.');
-            }
-
-            $balanceAmount = round(max(0, $finalAmount - $advanceAmount), 2);
-            $totalQty = $qty;
-            $userId = (int)($_SESSION['user_id'] ?? 0);
-            $customerId = pb_customer_id($conn, $customerName, $mobile, $billingAddress, $gstNumber);
-
-            $conn->begin_transaction();
-
-            if ($id > 0) {
-                $stmt = $conn->prepare("
-                    UPDATE proforma_bills
-                    SET quotation_id = ?,
-                        customer_id = ?,
-                        function_type_id = ?,
-                        order_type = ?,
-                        customer_name = ?,
-                        mobile = ?,
-                        billing_name = ?,
-                        billing_mobile = ?,
-                        billing_address = ?,
-                        gst_number = ?,
-                        bride_name = ?,
-                        groom_name = ?,
-                        venue = ?,
-                        function_date = ?,
-                        function_time = ?,
-                        proforma_status_id = ?,
-                        total_qty = ?,
-                        sub_total = ?,
-                        discount_amount = ?,
-                        final_amount = ?,
-                        advance_amount = ?,
-                        balance_amount = ?,
-                        delivery_date = ?,
-                        remarks = ?,
-                        updated_by = ?,
-                        updated_at = NOW()
-                    WHERE id = ?
-                ");
-                $stmt->bind_param(
-                    'iiissssssssssssiddddddssii',
-                    $quotationId,
-                    $customerId,
-                    $functionTypeId,
-                    $orderType,
-                    $customerName,
-                    $mobile,
-                    $billingName,
-                    $billingMobile,
-                    $billingAddress,
-                    $gstNumber,
-                    $brideName,
-                    $groomName,
-                    $venue,
-                    $functionDate,
-                    $functionTime,
-                    $statusId,
-                    $totalQty,
-                    $subTotal,
-                    $discountAmount,
-                    $finalAmount,
-                    $advanceAmount,
-                    $balanceAmount,
-                    $deliveryDate,
-                    $remarks,
-                    $userId,
-                    $id
-                );
-                $stmt->execute();
-                $stmt->close();
-
-                $stmt = $conn->prepare("DELETE FROM proforma_bill_items WHERE proforma_bill_id = ?");
-                $stmt->bind_param('i', $id);
-                $stmt->execute();
-                $stmt->close();
-
-                $proformaId = $id;
-                pb_log($conn, 'update', 'Proforma Bills', $proformaId, 'Proforma bill updated.');
-            } else {
-                $proformaNo = pb_next_no($conn, 'proforma_bills', 'proforma_no', 'SC-PRO');
-
-                if (!$statusId) {
-                    $statusId = pb_status_id($conn, 'proforma_statuses', 'status_key', 'confirmed');
-                }
-
-                $stmt = $conn->prepare("
-                    INSERT INTO proforma_bills
-                        (
-                            proforma_no,
-                            quotation_id,
-                            customer_id,
-                            function_type_id,
-                            order_type,
-                            customer_name,
-                            mobile,
-                            billing_name,
-                            billing_mobile,
-                            billing_address,
-                            gst_number,
-                            bride_name,
-                            groom_name,
-                            venue,
-                            function_date,
-                            function_time,
-                            proforma_status_id,
-                            total_qty,
-                            sub_total,
-                            discount_amount,
-                            final_amount,
-                            advance_amount,
-                            balance_amount,
-                            delivery_date,
-                            remarks,
-                            created_by,
-                            created_at,
-                            updated_at
-                        )
-                    VALUES
-                        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-                ");
-                $stmt->bind_param(
-                    'siiissssssssssssiddddddssi',
-                    $proformaNo,
-                    $quotationId,
-                    $customerId,
-                    $functionTypeId,
-                    $orderType,
-                    $customerName,
-                    $mobile,
-                    $billingName,
-                    $billingMobile,
-                    $billingAddress,
-                    $gstNumber,
-                    $brideName,
-                    $groomName,
-                    $venue,
-                    $functionDate,
-                    $functionTime,
-                    $statusId,
-                    $totalQty,
-                    $subTotal,
-                    $discountAmount,
-                    $finalAmount,
-                    $advanceAmount,
-                    $balanceAmount,
-                    $deliveryDate,
-                    $remarks,
-                    $userId
-                );
-                $stmt->execute();
-                $proformaId = (int)$stmt->insert_id;
-                $stmt->close();
-
-                pb_log($conn, 'create_proforma_bill', 'Proforma Bills', $proformaId, 'Proforma bill created.');
-            }
-
-            $stmt = $conn->prepare("
-                INSERT INTO proforma_bill_items
-                    (
-                        proforma_bill_id,
-                        product_id,
-                        item_name,
-                        description,
-                        qty,
-                        rate,
-                        amount,
-                        printing_type_id,
-                        printing_sub_type_id,
-                        finishing_required,
-                        size_text,
-                        gsm_thickness,
-                        lamination_required,
-                        lamination_type,
-                        printing_side,
-                        screening_type,
-                        sort_order,
-                        created_at
-                    )
-                VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())
-            ");
-            $stmt->bind_param(
-                'iissdddiiississs',
-                $proformaId,
-                $productId,
-                $productName,
-                $description,
-                $qty,
-                $rate,
-                $amount,
-                $printingTypeId,
-                $printingSubTypeId,
-                $finishingRequired,
-                $sizeText,
-                $gsmThickness,
-                $laminationRequired,
-                $laminationType,
-                $printingSide,
-                $screeningType
-            );
-            $stmt->execute();
-            $stmt->close();
-
-            if ($advanceAmount > 0 && $id <= 0) {
-                $paymentNo = pb_next_no($conn, 'payments', 'payment_no', 'SC-PAY');
-                $paymentType = $balanceAmount <= 0 ? 'full' : 'advance';
-                $today = date('Y-m-d');
-
-                $stmt = $conn->prepare("
-                    INSERT INTO payments
-                        (
-                            customer_id,
-                            proforma_bill_id,
-                            payment_no,
-                            payment_type,
-                            payment_mode,
-                            amount,
-                            payment_date,
-                            reference_no,
-                            remarks,
-                            received_by,
-                            created_at
-                        )
-                    VALUES
-                        (?, ?, ?, ?, ?, ?, ?, ?, 'Advance collected from proforma bill', ?, NOW())
-                ");
-                $stmt->bind_param(
-                    'iisssdssi',
-                    $customerId,
-                    $proformaId,
-                    $paymentNo,
-                    $paymentType,
-                    $paymentMode,
-                    $advanceAmount,
-                    $today,
-                    $paymentRef,
-                    $userId
-                );
-                $stmt->execute();
-                $stmt->close();
-
-                pb_log($conn, 'collect_payment', 'Payments', $proformaId, 'Advance payment collected.');
-            }
-
-            $conn->commit();
-
-            if ($createJobCardNow) {
-                $conn->begin_transaction();
-                $jobId = pb_create_job_card($conn, $proformaId);
-                $conn->commit();
-
-                pb_redirect('msg=job_created&job_id=' . $jobId);
-            }
-
-            pb_redirect($id > 0 ? 'msg=updated' : 'msg=created');
-        }
-
-
-        if ($action === 'log_manual_whatsapp') {
-            $id = pb_int($_POST['id'] ?? 0);
-
-            header('Content-Type: application/json');
-
-            if ($id <= 0) {
-                echo json_encode(['success' => false, 'message' => 'Invalid proforma bill.']);
-                exit;
-            }
-
-            echo json_encode(pb_whatsapp_log_manual($conn, $id));
-            exit;
-        }
-
-        if ($action === 'send_whatsapp_api') {
-            $id = pb_int($_POST['id'] ?? 0);
-
-            if ($id <= 0) {
-                throw new RuntimeException('Invalid proforma bill.');
-            }
-
-            if (!pb_whatsapp_api_ready($conn)) {
-                pb_redirect('msg=whatsapp_manual');
-            }
-
-            $waResult = pb_send_whatsapp_by_api($conn, $id);
-
-            if (!($waResult['success'] ?? false)) {
-                $error = urlencode((string)($waResult['response'] ?? $waResult['message'] ?? 'WhatsApp failed.'));
-                pb_redirect('msg=whatsapp_failed&err=' . $error);
-            }
-
-            pb_redirect('msg=whatsapp_sent');
-        }
-
-        if ($action === 'create_job_card') {
-            $proformaId = pb_int($_POST['proforma_id'] ?? 0);
-
-            $conn->begin_transaction();
-            $jobId = pb_create_job_card($conn, $proformaId);
-            $conn->commit();
-
-            pb_redirect('msg=job_created&job_id=' . $jobId);
-        }
-    } catch (Throwable $e) {
-        try {
-            if ($conn->errno === 0) {
-                $conn->rollback();
-            }
-        } catch (Throwable $rollbackError) {
-        }
-
-        $message = $e->getMessage();
-        $messageType = 'danger';
-        $toastTitle = 'Failed';
-    }
-}
+/* Backend processing moved to api/proforma_bills.php */
 
 $msg = (string)($_GET['msg'] ?? '');
 if ($msg === 'created') {
@@ -2181,6 +1683,349 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
             display: block;
         }
     }
+
+    /* Mobile proforma card UI fix */
+    @media(max-width:767.98px) {
+        .mobile-card {
+            padding: 16px 16px 14px !important;
+            border-radius: 20px !important;
+        }
+
+        .mobile-card > .d-flex.justify-content-between {
+            align-items: flex-start !important;
+            gap: 12px !important;
+        }
+
+        .mobile-card .status-pill {
+            align-self: flex-start !important;
+            flex: 0 0 auto !important;
+            min-width: auto !important;
+            height: auto !important;
+            min-height: 0 !important;
+            line-height: 1.2 !important;
+            padding: 6px 10px !important;
+            border-radius: 999px !important;
+            white-space: nowrap !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            font-size: 10px !important;
+            max-width: 120px !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+        }
+
+        .mobile-card-title,
+        .mobile-card strong:first-child {
+            font-size: 16px !important;
+            line-height: 1.25 !important;
+            margin-bottom: 6px !important;
+            display: block !important;
+        }
+
+        .mobile-card-subtitle,
+        .mobile-card .text-muted-custom {
+            font-size: 12px !important;
+            line-height: 1.45 !important;
+            margin-top: 3px !important;
+        }
+
+        .mobile-card-actions,
+        .mobile-card .mt-3.d-flex.gap-2.flex-wrap {
+            margin-top: 14px !important;
+            gap: 8px !important;
+            display: flex !important;
+            flex-wrap: wrap !important;
+        }
+
+        .mobile-card-actions .btn,
+        .mobile-card .mt-3.d-flex.gap-2.flex-wrap .btn {
+            min-height: 38px !important;
+            border-radius: 999px !important;
+            font-size: 13px !important;
+            font-weight: 900 !important;
+        }
+
+        .mobile-card-actions .btn-whatsapp-icon,
+        .mobile-card .mt-3.d-flex.gap-2.flex-wrap .btn-whatsapp-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important;
+            flex: 0 0 42px !important;
+            padding: 0 !important;
+            border-radius: 50% !important;
+            margin: 0 auto !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+
+        .mobile-card-actions .btn-whatsapp-icon svg,
+        .mobile-card .mt-3.d-flex.gap-2.flex-wrap .btn-whatsapp-icon svg {
+            width: 18px !important;
+            height: 18px !important;
+        }
+
+        .card-pad,
+        .module-card {
+            border-radius: 18px !important;
+        }
+
+        #tableSearch {
+            min-height: 46px !important;
+            border-radius: 16px !important;
+        }
+    }
+
+
+    /* Proforma Bill List alignment - job card separate + action buttons */
+    .proforma-list-table {
+        table-layout: fixed;
+        width: 100%;
+        min-width: 1280px;
+    }
+
+    .proforma-list-table th,
+    .proforma-list-table td {
+        vertical-align: middle !important;
+        white-space: normal;
+        overflow: hidden;
+    }
+
+    .proforma-list-table th {
+        font-size: 12px;
+        letter-spacing: .01em;
+    }
+
+    .proforma-list-table th:nth-child(1),
+    .proforma-list-table td:nth-child(1) { width: 11%; }
+
+    .proforma-list-table th:nth-child(2),
+    .proforma-list-table td:nth-child(2) { width: 12%; }
+
+    .proforma-list-table th:nth-child(3),
+    .proforma-list-table td:nth-child(3) { width: 9%; }
+
+    .proforma-list-table th:nth-child(4),
+    .proforma-list-table td:nth-child(4) { width: 9%; }
+
+    .proforma-list-table th:nth-child(5),
+    .proforma-list-table td:nth-child(5),
+    .proforma-list-table th:nth-child(6),
+    .proforma-list-table td:nth-child(6),
+    .proforma-list-table th:nth-child(7),
+    .proforma-list-table td:nth-child(7) {
+        width: 8%;
+        white-space: nowrap;
+    }
+
+    .proforma-list-table th:nth-child(8),
+    .proforma-list-table td:nth-child(8) { width: 9%; }
+
+    .proforma-list-table th:nth-child(9),
+    .proforma-list-table td:nth-child(9) { width: 12%; }
+
+    .proforma-list-table th:nth-child(10),
+    .proforma-list-table td:nth-child(10) { width: 14%; }
+
+    .proforma-list-table .status-pill {
+        max-width: 100%;
+        line-height: 1.25;
+        white-space: normal;
+        text-align: center;
+        justify-content: center;
+        padding: 7px 10px;
+        word-break: break-word;
+    }
+
+    .proforma-list-table .action-buttons {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+
+    .proforma-list-table .action-buttons form {
+        margin: 0;
+        display: inline-flex;
+    }
+
+    .proforma-list-table .action-buttons .btn {
+        min-height: 34px;
+    }
+
+    .proforma-list-table .action-buttons .btn-whatsapp-icon {
+        width: 36px;
+        height: 36px;
+        flex: 0 0 36px;
+    }
+
+    .desktop-table {
+        overflow-x: auto;
+    }
+
+    @media(max-width:767.98px) {
+        .mobile-card.proforma-mobile-card {
+            padding: 16px 16px 14px !important;
+            border-radius: 20px !important;
+        }
+
+        .proforma-mobile-card .proforma-mobile-head {
+            align-items: flex-start !important;
+            gap: 12px !important;
+        }
+
+        .proforma-mobile-card .mobile-card-title,
+        .proforma-mobile-card strong:first-child {
+            display: block !important;
+            font-size: 16px !important;
+            line-height: 1.25 !important;
+            margin-bottom: 6px !important;
+            word-break: break-word;
+        }
+
+        .proforma-mobile-card .mobile-card-subtitle,
+        .proforma-mobile-card .text-muted-custom {
+            font-size: 12px !important;
+            line-height: 1.45 !important;
+            margin-top: 3px !important;
+        }
+
+        .proforma-mobile-card .status-pill {
+            align-self: flex-start !important;
+            flex: 0 0 auto !important;
+            min-width: auto !important;
+            max-width: 125px !important;
+            height: auto !important;
+            min-height: 0 !important;
+            line-height: 1.2 !important;
+            padding: 6px 10px !important;
+            border-radius: 999px !important;
+            white-space: normal !important;
+            text-align: center !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            font-size: 10px !important;
+        }
+
+        .proforma-mobile-card .proforma-mobile-actions {
+            margin-top: 14px !important;
+            gap: 8px !important;
+            display: grid !important;
+            grid-template-columns: 1fr 1fr 42px;
+            align-items: center;
+        }
+
+        .proforma-mobile-card .proforma-mobile-actions .btn:not(.btn-whatsapp-icon) {
+            min-height: 38px !important;
+            border-radius: 999px !important;
+            font-size: 13px !important;
+            font-weight: 900 !important;
+            width: 100% !important;
+        }
+
+        .proforma-mobile-card .proforma-mobile-actions form {
+            grid-column: 1 / -1;
+            margin: 0;
+        }
+
+        .proforma-mobile-card .proforma-mobile-actions form .btn {
+            width: 100% !important;
+            min-height: 38px !important;
+        }
+
+        .proforma-mobile-card .proforma-mobile-actions .status-pill.ok {
+            grid-column: 1 / -1;
+            width: 100%;
+            max-width: 100% !important;
+        }
+
+        .proforma-mobile-card .proforma-mobile-actions .btn-whatsapp-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important;
+            flex: 0 0 42px !important;
+            padding: 0 !important;
+            border-radius: 50% !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+
+        .proforma-mobile-card .proforma-mobile-actions .btn-whatsapp-icon svg {
+            width: 18px !important;
+            height: 18px !important;
+        }
+
+        #tableSearch {
+            min-height: 46px !important;
+            border-radius: 16px !important;
+        }
+    }
+
+
+    /* Action icon buttons - safe common UI */
+    .btn-action-icon,
+    .btn-delete-icon {
+        width: 36px !important;
+        height: 36px !important;
+        min-width: 36px !important;
+        max-width: 36px !important;
+        padding: 0 !important;
+        border-radius: 50% !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        line-height: 1 !important;
+    }
+
+    .btn-action-icon svg,
+    .btn-delete-icon svg {
+        width: 16px !important;
+        height: 16px !important;
+        stroke-width: 2.5 !important;
+        flex: 0 0 auto !important;
+    }
+
+    .btn-action-icon.btn-whatsapp-icon {
+        background: #22c55e !important;
+        border-color: #22c55e !important;
+        color: #fff !important;
+    }
+
+    .btn-action-icon.btn-whatsapp-icon:hover {
+        background: #16a34a !important;
+        border-color: #16a34a !important;
+        color: #fff !important;
+    }
+
+    @media(max-width:767.98px) {
+        .mobile-card-actions .btn-action-icon,
+        .mobile-card-actions .btn-delete-icon,
+        .proforma-mobile-card .proforma-mobile-actions .btn-action-icon,
+        .proforma-mobile-card .proforma-mobile-actions .btn-delete-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important;
+            border-radius: 50% !important;
+            justify-self: center !important;
+            margin: 0 auto !important;
+        }
+
+        .mobile-card-actions .btn-action-icon svg,
+        .mobile-card-actions .btn-delete-icon svg,
+        .proforma-mobile-card .proforma-mobile-actions .btn-action-icon svg,
+        .proforma-mobile-card .proforma-mobile-actions .btn-delete-icon svg {
+            width: 18px !important;
+            height: 18px !important;
+        }
+    }
+
     </style>
 </head>
 
@@ -2228,7 +2073,7 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                 </div>
                 <?php endif; ?>
 
-                <form method="post" class="card-ui card-pad mb-3" id="proformaForm">
+                <form method="post" action="api/proforma_bills.php" class="card-ui card-pad mb-3" id="proformaForm">
                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                     <input type="hidden" name="action" value="save_proforma">
                     <input type="hidden" name="id" value="<?= e($editData['id'] ?? '') ?>">
@@ -2694,7 +2539,7 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                     </div>
 
                     <div class="table-responsive desktop-table">
-                        <table class="table-ui" id="proformaTable">
+                        <table class="table-ui proforma-list-table" id="proformaTable">
                             <thead>
                                 <tr>
                                     <th>No</th>
@@ -2737,29 +2582,47 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                                         <?php endif; ?>
                                     </td>
                                     <td class="text-end">
-                                        <a href="proforma_bills.php?edit=<?= e($row['id']) ?>"
-                                            class="btn btn-sm btn-outline-primary rounded-pill fw-bold">
-                                            Edit
-                                        </a>
+                                        <div class="action-buttons">
+                                            <button title="View" aria-label="View" type="button"
+                                                class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-proforma btn-action-icon"
+                                                data-bs-toggle="modal" data-bs-target="#viewModal"
+                                                data-proforma-no="<?= e($row['proforma_no']) ?>"
+                                                data-customer-name="<?= e($row['customer_name']) ?>"
+                                                data-mobile="<?= e($row['mobile']) ?>"
+                                                data-function-name="<?= e($row['function_name'] ?? '-') ?>"
+                                                data-order-type="<?= e(ucfirst((string)$row['order_type'])) ?>"
+                                                data-total-qty="<?= e(number_format((float)$row['total_qty'], 2)) ?>"
+                                                data-sub-total="₹<?= e(number_format((float)$row['sub_total'], 2)) ?>"
+                                                data-discount-amount="₹<?= e(number_format((float)$row['discount_amount'], 2)) ?>"
+                                                data-final-amount="₹<?= e(number_format((float)$row['final_amount'], 2)) ?>"
+                                                data-advance-amount="₹<?= e(number_format((float)$row['advance_amount'], 2)) ?>"
+                                                data-balance-amount="₹<?= e(number_format((float)$row['balance_amount'], 2)) ?>"
+                                                data-delivery-date="<?= !empty($row['delivery_date']) ? e(date('d-m-Y', strtotime($row['delivery_date']))) : '-' ?>"
+                                                data-status-name="<?= e($row['status_name'] ?? '-') ?>"
+                                                data-job-card-no="<?= e($row['job_card_no'] ?? '-') ?>"
+                                                data-remarks="<?= e($row['remarks'] ?? '') ?>"><i data-lucide="eye"></i></button>
 
-                                        <?= pb_whatsapp_button($row) ?>
+                                            <a title="Edit" aria-label="Edit" href="proforma_bills.php?edit=<?= e($row['id']) ?>"
+                                                class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon"><i data-lucide="pencil"></i></a>
 
-                                        <?php if (empty($row['job_card_no'])): ?>
-                                        <form method="post" class="d-inline"
-                                            onsubmit="return confirm('Create job card for this proforma bill?')">
-                                            <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
-                                            <input type="hidden" name="action" value="create_job_card">
-                                            <input type="hidden" name="proforma_id" value="<?= e($row['id']) ?>">
-                                            <button type="submit" class="btn btn-sm btn-success rounded-pill fw-bold">
-                                                Create Job Card
-                                            </button>
-                                        </form>
-                                        <?php else: ?>
-                                        <a href="job_cards.php"
-                                            class="btn btn-sm btn-outline-secondary rounded-pill fw-bold">
-                                            View
-                                        </a>
-                                        <?php endif; ?>
+                                            <?= pb_whatsapp_button($row) ?>
+
+                                            <?php if (empty($row['job_card_no'])): ?>
+                                            <form method="post" action="api/proforma_bills.php" class="js-api-job-card-form" onsubmit="return false;">
+                                                <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                                                <input type="hidden" name="action" value="create_job_card">
+                                                <input type="hidden" name="proforma_id" value="<?= e($row['id']) ?>">
+                                                <button title="Create Job Card" aria-label="Create Job Card" type="submit" class="btn btn-sm btn-success rounded-circle fw-bold btn-action-icon"><i data-lucide="briefcase-business"></i></button>
+                                            </form>
+                                            <?php endif; ?>
+
+                                            <form method="post" action="api/proforma_bills.php" class="js-api-delete-form" onsubmit="return false;">
+                                                <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                                                <input type="hidden" name="action" value="delete_record">
+                                                <input type="hidden" name="id" value="<?= e($row['id']) ?>">
+                                                <button title="Delete" aria-label="Delete" type="submit" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i data-lucide="trash-2"></i></button>
+                                            </form>
+                                        </div>
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
@@ -2769,8 +2632,8 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
 
                     <div class="mobile-cards" id="mobileCards">
                         <?php foreach ($rows as $row): ?>
-                        <div class="mobile-card">
-                            <div class="d-flex justify-content-between gap-2">
+                        <div class="mobile-card proforma-mobile-card">
+                            <div class="d-flex justify-content-between gap-2 proforma-mobile-head">
                                 <div>
                                     <strong><?= e($row['proforma_no']) ?></strong>
                                     <small class="d-block text-muted-custom"><?= e($row['customer_name']) ?> ·
@@ -2778,26 +2641,52 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                                     <small class="d-block text-muted-custom"><?= e($row['function_name'] ?? '-') ?> ·
                                         <?= e(ucfirst($row['order_type'])) ?> ·
                                         ₹<?= number_format((float)$row['final_amount'], 2) ?></small>
+                                    <?php if (!empty($row['job_card_no'])): ?>
+                                    <small class="d-block text-muted-custom">Job Card: <?= e($row['job_card_no']) ?></small>
+                                    <?php endif; ?>
                                 </div>
                                 <span class="status-pill"><?= e($row['status_name'] ?? '-') ?></span>
                             </div>
 
-                            <div class="mt-3 d-flex gap-2 flex-wrap">
-                                <a href="proforma_bills.php?edit=<?= e($row['id']) ?>"
-                                    class="btn btn-sm btn-outline-primary rounded-pill fw-bold">Edit</a>
+                            <div class="mobile-card-actions proforma-mobile-actions mt-3 d-flex gap-2 flex-wrap">
+                                <button title="View" aria-label="View" type="button"
+                                    class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-proforma btn-action-icon"
+                                    data-bs-toggle="modal" data-bs-target="#viewModal"
+                                    data-proforma-no="<?= e($row['proforma_no']) ?>"
+                                    data-customer-name="<?= e($row['customer_name']) ?>"
+                                    data-mobile="<?= e($row['mobile']) ?>"
+                                    data-function-name="<?= e($row['function_name'] ?? '-') ?>"
+                                    data-order-type="<?= e(ucfirst((string)$row['order_type'])) ?>"
+                                    data-total-qty="<?= e(number_format((float)$row['total_qty'], 2)) ?>"
+                                    data-sub-total="₹<?= e(number_format((float)$row['sub_total'], 2)) ?>"
+                                    data-discount-amount="₹<?= e(number_format((float)$row['discount_amount'], 2)) ?>"
+                                    data-final-amount="₹<?= e(number_format((float)$row['final_amount'], 2)) ?>"
+                                    data-advance-amount="₹<?= e(number_format((float)$row['advance_amount'], 2)) ?>"
+                                    data-balance-amount="₹<?= e(number_format((float)$row['balance_amount'], 2)) ?>"
+                                    data-delivery-date="<?= !empty($row['delivery_date']) ? e(date('d-m-Y', strtotime($row['delivery_date']))) : '-' ?>"
+                                    data-status-name="<?= e($row['status_name'] ?? '-') ?>"
+                                    data-job-card-no="<?= e($row['job_card_no'] ?? '-') ?>"
+                                    data-remarks="<?= e($row['remarks'] ?? '') ?>"><i data-lucide="eye"></i></button>
+
+                                <a title="Edit" aria-label="Edit" href="proforma_bills.php?edit=<?= e($row['id']) ?>"
+                                    class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon"><i data-lucide="pencil"></i></a>
 
                                 <?= pb_whatsapp_button($row) ?>
                                 <?php if (empty($row['job_card_no'])): ?>
-                                <form method="post"
-                                    onsubmit="const ok = confirm('Create job card?'); if (ok) { showToast('Creating job card, please wait...', 'success', 'Processing'); } return ok">
+                                <form method="post" action="api/proforma_bills.php" class="js-api-job-card-form" onsubmit="return false;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="create_job_card">
                                     <input type="hidden" name="proforma_id" value="<?= e($row['id']) ?>">
-                                    <button class="btn btn-sm btn-success rounded-pill fw-bold">Create Job Card</button>
+                                    <button title="Create Job Card" aria-label="Create Job Card" class="btn btn-sm btn-success rounded-circle fw-bold btn-action-icon"><i data-lucide="briefcase-business"></i></button>
                                 </form>
-                                <?php else: ?>
-                                <span class="status-pill ok"><?= e($row['job_card_no']) ?></span>
                                 <?php endif; ?>
+
+                                <form method="post" action="api/proforma_bills.php" class="js-api-delete-form" onsubmit="return false;">
+                                    <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                                    <input type="hidden" name="action" value="delete_record">
+                                    <input type="hidden" name="id" value="<?= e($row['id']) ?>">
+                                    <button title="Delete" aria-label="Delete" type="submit" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i data-lucide="trash-2"></i></button>
+                                </form>
                             </div>
                         </div>
                         <?php endforeach; ?>
@@ -2810,11 +2699,133 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
         <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
     </div>
 
+    <div class="modal fade" id="viewModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div>
+                        <h5 class="modal-title fw-bold">View Proforma Bill / Sales Order</h5>
+                        <small class="text-muted-custom" id="viewProformaNo">-</small>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Customer</small>
+                                <strong id="viewCustomerName">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Mobile</small>
+                                <strong id="viewMobile">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Status</small>
+                                <strong id="viewStatusName">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Function / Product Type</small>
+                                <strong id="viewFunctionName">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Order Type</small>
+                                <strong id="viewOrderType">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Total Qty</small>
+                                <strong id="viewTotalQty">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Sub Total</small>
+                                <strong id="viewSubTotal">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Discount</small>
+                                <strong id="viewDiscountAmount">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Final Amount</small>
+                                <strong id="viewFinalAmount">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Advance Paid</small>
+                                <strong id="viewAdvanceAmount">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Balance Amount</small>
+                                <strong id="viewBalanceAmount">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Delivery Date</small>
+                                <strong id="viewDeliveryDate">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="view-info-card">
+                                <small>Job Card</small>
+                                <strong id="viewJobCardNo">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="view-info-card">
+                                <small>Remarks</small>
+                                <span id="viewRemarks">-</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold" data-bs-dismiss="modal">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
 
     <div class="modal fade" id="whatsappPreviewModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-lg">
             <div class="modal-content">
-                <form method="post" id="whatsappApiForm">
+                <form method="post" action="api/proforma_bills.php" id="whatsappApiForm">
                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                     <input type="hidden" name="action" value="send_whatsapp_api">
                     <input type="hidden" name="id" id="wa_proforma_id" value="">
@@ -2840,7 +2851,7 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                             data-bs-dismiss="modal">
                             Cancel
                         </button>
-                        <button type="button" class="btn btn-whatsapp-icon rounded-circle" id="waSendBtn"
+                        <button type="button" class="btn btn-whatsapp-icon btn-action-icon rounded-circle" id="waSendBtn"
                             title="Send WhatsApp">
                             <?= pb_whatsapp_svg() ?>
                         </button>
@@ -3322,10 +3333,6 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
             }
 
             calculate();
-
-            if (typeof showToast === 'function') {
-                showToast('Quotation details auto-filled successfully.', 'success', 'Success');
-            }
         }
 
         document.querySelector('[name="quotation_id"]')?.addEventListener('change', applyQuotationReference);
@@ -3434,6 +3441,34 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
             whatsappPreviewModal.show();
         }
 
+
+        function setViewText(id, value) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const clean = (value == null || String(value).trim() === '') ? '-' : String(value);
+            el.textContent = clean;
+        }
+
+        document.querySelectorAll('.js-view-proforma').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                setViewText('viewProformaNo', btn.dataset.proformaNo || '-');
+                setViewText('viewCustomerName', btn.dataset.customerName || '-');
+                setViewText('viewMobile', btn.dataset.mobile || '-');
+                setViewText('viewStatusName', btn.dataset.statusName || '-');
+                setViewText('viewFunctionName', btn.dataset.functionName || '-');
+                setViewText('viewOrderType', btn.dataset.orderType || '-');
+                setViewText('viewTotalQty', btn.dataset.totalQty || '-');
+                setViewText('viewSubTotal', btn.dataset.subTotal || '-');
+                setViewText('viewDiscountAmount', btn.dataset.discountAmount || '-');
+                setViewText('viewFinalAmount', btn.dataset.finalAmount || '-');
+                setViewText('viewAdvanceAmount', btn.dataset.advanceAmount || '-');
+                setViewText('viewBalanceAmount', btn.dataset.balanceAmount || '-');
+                setViewText('viewDeliveryDate', btn.dataset.deliveryDate || '-');
+                setViewText('viewJobCardNo', btn.dataset.jobCardNo || '-');
+                setViewText('viewRemarks', btn.dataset.remarks || '-');
+            });
+        });
+
         document.querySelectorAll('.js-whatsapp-preview').forEach(function(btn) {
             btn.addEventListener('click', function() {
                 openWhatsappPreview(btn);
@@ -3442,8 +3477,29 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
 
         document.getElementById('waSendBtn')?.addEventListener('click', function() {
             if (whatsappApiReady) {
-                showToast('Sending WhatsApp message through API...', 'success', 'Processing');
-                document.getElementById('whatsappApiForm')?.submit();
+                const form = document.getElementById('whatsappApiForm');
+                const formData = new FormData(form);
+                formData.set('action', 'send_whatsapp_api');
+
+                fetch('api/proforma_bills.php', {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    showToast(data.message || (data.status ? 'WhatsApp sent successfully.' : 'WhatsApp failed.'), data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+
+                    if (data.open_whatsapp_url) {
+                        window.location.href = data.open_whatsapp_url;
+                    }
+
+                    if (whatsappPreviewModal) {
+                        whatsappPreviewModal.hide();
+                    }
+                })
+                .catch(() => showToast('WhatsApp API request failed.', 'danger', 'Failed'));
+
                 return;
             }
 
@@ -3452,9 +3508,7 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                 const formData = new FormData(form);
                 formData.set('action', 'log_manual_whatsapp');
 
-                showToast('Opening WhatsApp manual mode...', 'success', 'Success');
-
-                fetch(window.location.href.split('?')[0], {
+                fetch('api/proforma_bills.php', {
                     method: 'POST',
                     body: formData,
                     credentials: 'same-origin'
@@ -3475,8 +3529,84 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
 
 
 
-        document.getElementById('proformaForm')?.addEventListener('submit', function() {
-            showToast('Saving proforma bill, please wait...', 'success', 'Processing');
+        document.getElementById('proformaForm')?.addEventListener('submit', function(event) {
+            event.preventDefault();
+
+            const form = this;
+            const formData = new FormData(form);
+
+            fetch('api/proforma_bills.php', {
+                method: 'POST',
+                body: formData,
+                credentials: 'same-origin'
+            })
+            .then(response => response.json())
+            .then(data => {
+                showToast(data.message || (data.status ? 'Saved successfully.' : 'Save failed.'), data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+
+                if (data.status) {
+                    setTimeout(() => window.location.href = 'proforma_bills.php', 900);
+                }
+            })
+            .catch(() => showToast('API request failed.', 'danger', 'Failed'));
+        });
+
+        document.querySelectorAll('.js-api-job-card-form').forEach(function(form) {
+            form.addEventListener('submit', function(event) {
+                event.preventDefault();
+            });
+
+            form.querySelector('button[type="submit"], button:not([type])')?.addEventListener('click', function() {
+                const ok = confirm('Create job card?');
+                if (!ok) return;
+
+                const formData = new FormData(form);
+
+                fetch('api/proforma_bills.php', {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    showToast(data.message || (data.status ? 'Job card created.' : 'Job card creation failed.'), data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+
+                    if (data.status) {
+                        setTimeout(() => window.location.reload(), 900);
+                    }
+                })
+                .catch(() => showToast('API request failed.', 'danger', 'Failed'));
+            });
+        });
+
+
+
+        document.querySelectorAll('.js-api-delete-form').forEach(function(form) {
+            form.addEventListener('submit', function(event) {
+                event.preventDefault();
+            });
+
+            form.querySelector('button[type="submit"]')?.addEventListener('click', function() {
+                const ok = confirm('Delete this proforma bill? Related job card, job tracking, items and payments will also be removed.');
+                if (!ok) return;
+
+                const formData = new FormData(form);
+
+                fetch('api/proforma_bills.php', {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    showToast(data.message || (data.status ? 'Proforma bill deleted.' : 'Delete failed.'), data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+
+                    if (data.status) {
+                        setTimeout(() => window.location.reload(), 900);
+                    }
+                })
+                .catch(() => showToast('API request failed.', 'danger', 'Failed'));
+            });
         });
 
 

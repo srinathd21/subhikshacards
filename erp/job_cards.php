@@ -41,54 +41,15 @@ try{
         $pbiQty = (jc_table_exists($conn,'proforma_bill_items') && jc_col($conn,'proforma_bill_items','qty')) ? 'pbi.qty' : '1';
         $pbiRate = (jc_table_exists($conn,'proforma_bill_items') && jc_col($conn,'proforma_bill_items','rate')) ? 'pbi.rate' : '0';
         $pbiAmount = (jc_table_exists($conn,'proforma_bill_items') && jc_col($conn,'proforma_bill_items','amount')) ? 'pbi.amount' : 'pb.final_amount';
-
         $res=$conn->query("SELECT pb.id,pb.proforma_no,pb.customer_name,pb.mobile,pb.customer_id,pb.quotation_id,pb.function_type_id,pb.order_type,pb.final_amount,pb.advance_amount,pb.balance_amount,pb.delivery_date,{$pbRemarks} remarks,pbi.product_id,pbi.item_name,{$pbiDescription} description,{$pbiQty} qty,{$pbiRate} rate,{$pbiAmount} amount,pbi.printing_type_id,pbi.printing_sub_type_id,pbi.size_text,pbi.gsm_thickness,pbi.lamination_required,pbi.lamination_type,pbi.printing_side,pbi.screening_type,pbi.finishing_required FROM proforma_bills pb LEFT JOIN proforma_bill_items pbi ON pbi.proforma_bill_id=pb.id ORDER BY pb.id DESC LIMIT 300");
-
         while($r=$res->fetch_assoc()) $proformas[]=$r;
         $res->free();
     }
 }catch(Throwable $e){}
 
-if($_SERVER['REQUEST_METHOD']==='POST'){
-    jc_csrf();
-    try{
-        $action=jc_post('action');
-        if($action==='save_record'){
-            if(!jc_table_exists($conn,'job_cards')) throw new RuntimeException('job_cards table is missing.');
-            $id=jc_int($_POST['id']??0); $orderType=jc_post('order_type','readymade');
-            $jobNo=jc_post('job_card_no') ?: $nextJobNo; $customerName=jc_post('customer_name'); $mobile=jc_post('mobile'); $deliveryDate=jc_post('delivery_date')?:null;
-            $productId=jc_int($_POST['product_id']??0)?:null; $productName=jc_product_name($conn,$productId,jc_post('product_name'));
-            $printingTypeId=jc_int($_POST['printing_type_id']??0)?:null; $printingSubTypeId=jc_int($_POST['printing_sub_type_id']??0)?:null;
-            $sizeText=jc_post('size_text'); $gsm=jc_post('gsm_thickness'); $lamReq=jc_int($_POST['lamination_required']??0)===1?1:0; $lamType=jc_post('lamination_type')?:null; $side=jc_post('printing_side')?:null; $screening=jc_post('screening_type')?:null; $finish=jc_int($_POST['finishing_required']??0)===1?1:0;
-            $final=jc_float($_POST['final_amount']??0); $advance=jc_float($_POST['advance_amount']??0); $balance=max(0,$final-$advance); $qty=jc_float($_POST['qty']??1); $rate=jc_float($_POST['rate']??0); $amount=$qty*$rate; $notes=jc_post('notes');
-            if(!in_array($orderType,['readymade','customized'],true)) throw new RuntimeException('Invalid order type.');
-            if($customerName===''||$mobile==='') throw new RuntimeException('Customer name and mobile are required.');
-            if($productName==='') throw new RuntimeException('Product / item name is required.');
-            if($orderType==='customized'){
-                $multi=jc_multicolor_id($conn); if(!$multi) throw new RuntimeException('Multicolor Offset Print is missing in Printing Types master.');
-                $printingTypeId=$multi; $printingSubTypeId=null; $finish=0;
-                if($sizeText==='') throw new RuntimeException('Size is required for customized order.');
-                if($gsm==='') throw new RuntimeException('GSM Thickness is required for customized order.');
-                if($lamReq===1 && !$lamType) throw new RuntimeException('Please select lamination type.');
-                if(!$side) throw new RuntimeException('Please select Single Side or Double Side.');
-                if(!$screening) throw new RuntimeException('Please select Regular Screening or Special Screening.');
-            } else {
-                if(!$printingTypeId) throw new RuntimeException('Please select printing type.');
-                if(jc_is_screen($conn,$printingTypeId) && !$printingSubTypeId) throw new RuntimeException('Please select Screen Print sub-type.');
-                $sizeText=''; $gsm=''; $lamReq=0; $lamType=null; $side=null; $screening=null;
-            }
-            $uid=(int)($_SESSION['user_id']??0); $statusId=jc_int($_POST['job_card_status_id']??0)?:jc_status_id($conn); $stepId=jc_int($_POST['current_workflow_step_id']??0)?:jc_first_step($conn,$orderType);
-            $jobData=['job_card_no'=>$jobNo,'job_no'=>$jobNo,'tracking_token'=>bin2hex(random_bytes(24)),'proforma_bill_id'=>jc_int($_POST['proforma_bill_id']??0)?:null,'quotation_id'=>jc_int($_POST['quotation_id']??0)?:null,'customer_id'=>jc_int($_POST['customer_id']??0)?:null,'order_type'=>$orderType,'customer_name'=>$customerName,'mobile'=>$mobile,'function_type_id'=>jc_int($_POST['function_type_id']??0)?:null,'product_id'=>$productId,'product_name'=>$productName,'printing_type_id'=>$printingTypeId,'printing_sub_type_id'=>$printingSubTypeId,'job_card_status_id'=>$statusId,'current_workflow_step_id'=>$stepId,'final_amount'=>$final,'advance_amount'=>$advance,'balance_amount'=>$balance,'delivery_date'=>$deliveryDate,'notes'=>$notes,'status'=>'Active','created_by'=>$uid,'updated_at'=>date('Y-m-d H:i:s')];
-            if($id>0){ jc_update($conn,'job_cards',$jobData,$id); $jobId=$id; if(jc_table_exists($conn,'job_card_items')){ $st=$conn->prepare('DELETE FROM job_card_items WHERE job_card_id=?'); $st->bind_param('i',$jobId); $st->execute(); $st->close(); } $msg='updated'; }
-            else { $jobData['created_at']=date('Y-m-d H:i:s'); $jobId=jc_insert($conn,'job_cards',$jobData); $msg='created'; }
-            if(jc_table_exists($conn,'job_card_items')) jc_insert($conn,'job_card_items',['job_card_id'=>$jobId,'product_id'=>$productId,'item_name'=>$productName,'description'=>$notes,'qty'=>$qty,'rate'=>$rate,'amount'=>$amount,'size_text'=>$sizeText,'gsm_thickness'=>$gsm,'lamination_required'=>$lamReq,'lamination_type'=>$lamType,'printing_side'=>$side,'screening_type'=>$screening,'finishing_required'=>$finish,'created_at'=>date('Y-m-d H:i:s')]);
-            jc_redirect('msg='.$msg);
-        }
-        if($action==='delete_record'){ $id=jc_int($_POST['id']??0); if($id<=0) throw new RuntimeException('Invalid record.'); if(jc_col($conn,'job_cards','status')) jc_update($conn,'job_cards',['status'=>'Inactive','updated_at'=>date('Y-m-d H:i:s')],$id); jc_redirect('msg=deleted'); }
-    }catch(Throwable $e){ $message=$e->getMessage(); $messageType='danger'; $toastTitle='Failed'; }
-}
+/* Backend processing moved to api/job_cards.php */
 $msg=(string)($_GET['msg']??'');
-if($msg==='created'){ $message='Job card created successfully.'; $messageType='success'; $toastTitle='Success'; }
+if($msg==='created'){ $message='Job card saved successfully.'; $messageType='success'; $toastTitle='Success'; }
 elseif($msg==='updated'){ $message='Job card updated successfully.'; $messageType='success'; $toastTitle='Success'; }
 elseif($msg==='deleted'){ $message='Job card disabled successfully.'; $messageType='success'; $toastTitle='Success'; }
 elseif($msg==='failed'){ $message='Action failed. Please try again.'; $messageType='danger'; $toastTitle='Failed'; }
@@ -171,47 +132,45 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
         white-space: nowrap
     }
 
+
     .record-proforma-wrap {
-        display: flex;
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) auto;
         gap: 8px;
-        align-items: flex-start
+        align-items: start;
+        width: 100%;
     }
 
     .record-proforma-wrap .select2-container {
-        flex: 1 1 auto !important;
-        width: 100% !important
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
     }
 
-    #recordModal .modal-dialog {
-        max-width: min(1180px, 96vw)
+    .record-proforma-wrap .select2-selection {
+        width: 100% !important;
+    }
+
+    .proforma-clear-btn {
+        min-height: 46px;
+        white-space: nowrap;
+        flex: 0 0 auto;
     }
 
     #recordModal .modal-body {
-        max-height: calc(100vh - 210px);
+        max-height: calc(100vh - 205px);
         overflow-y: auto;
-        overflow-x: hidden
+        overflow-x: hidden;
+        padding-bottom: 28px;
     }
 
-    .select2-container--open {
-        z-index: 20000 !important
+    #recordModal .select2-container--open {
+        z-index: 20000 !important;
     }
 
     .select2-dropdown {
         z-index: 20000 !important;
-        border-radius: 14px !important;
-        border-color: var(--border-soft) !important;
-        box-shadow: 0 18px 45px rgba(15, 23, 42, .18) !important;
-        overflow: hidden
-    }
-
-    .select2-results__options {
-        max-height: 220px !important;
-        overflow-y: auto !important
-    }
-
-    .select2-container--bootstrap-5 .select2-selection {
-        min-height: 46px;
-        border-radius: 14px !important
+        max-width: 100% !important;
     }
 
     .module-page .page-head {
@@ -424,6 +383,103 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
             width: 100%
         }
     }
+
+    /* Job Cards UI + action icon fix */
+    .btn-action-icon {
+        width: 36px !important;
+        height: 36px !important;
+        min-width: 36px !important;
+        max-width: 36px !important;
+        padding: 0 !important;
+        border-radius: 50% !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        line-height: 1 !important;
+    }
+
+    .btn-action-icon svg {
+        display: block !important;
+        width: 16px !important;
+        height: 16px !important;
+        color: currentColor !important;
+        stroke: currentColor !important;
+    }
+
+    #dataTable {
+        table-layout: fixed;
+        width: 100%;
+        min-width: 1120px;
+    }
+
+    #dataTable th,
+    #dataTable td {
+        vertical-align: middle !important;
+    }
+
+    #dataTable td.text-end {
+        white-space: nowrap;
+    }
+
+    #dataTable td.text-end > button,
+    #dataTable td.text-end > form {
+        margin-left: 6px;
+    }
+
+    #dataTable td.text-end form {
+        display: inline-flex;
+        margin-bottom: 0;
+    }
+
+    @media(max-width:767.98px) {
+        .mobile-card {
+            padding: 16px 16px 14px !important;
+            border-radius: 20px !important;
+        }
+
+        .mobile-card > .d-flex.justify-content-between {
+            align-items: flex-start !important;
+            gap: 12px !important;
+        }
+
+        .mobile-card .status-pill {
+            align-self: flex-start !important;
+            flex: 0 0 auto !important;
+            min-width: auto !important;
+            max-width: 125px !important;
+            height: auto !important;
+            min-height: 0 !important;
+            line-height: 1.2 !important;
+            padding: 6px 10px !important;
+            border-radius: 999px !important;
+            white-space: normal !important;
+            text-align: center !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            font-size: 10px !important;
+        }
+
+        .mobile-card-actions {
+            display: flex !important;
+            align-items: center !important;
+            gap: 8px !important;
+            margin-top: 14px !important;
+        }
+
+        .mobile-card-actions .btn-action-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important;
+        }
+
+        .mobile-card-actions .btn-action-icon svg {
+            width: 18px !important;
+            height: 18px !important;
+        }
+    }
+
     </style>
 </head>
 
@@ -527,20 +583,11 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
                                     <td><span
                                             class="status-pill <?= e($rowStatus) ?>"><?= e($row['display_status']??'Active') ?></span>
                                     </td>
-                                    <td class="text-end"><button type="button"
-                                            class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
-                                            data-bs-toggle="modal" data-bs-target="#viewModal"
-                                            data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'>View</button><button
-                                            type="button"
-                                            class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
-                                            data-bs-toggle="modal" data-bs-target="#recordModal"
-                                            data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'>Edit</button><?php if($rowStatus!=='inactive'): ?>
-                                        <form method="post" class="d-inline"
-                                            onsubmit="return confirm('Disable this job card?')"><input type="hidden"
-                                                name="csrf_token" value="<?= e($csrfToken) ?>"><input type="hidden"
-                                                name="action" value="delete_record"><input type="hidden" name="id"
-                                                value="<?= e($row['id']) ?>"><button type="submit"
-                                                class="btn btn-sm btn-outline-danger rounded-pill fw-bold">Disable</button>
+                                    <td class="text-end"><button type="button" title="View" aria-label="View" class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-record btn-action-icon" data-bs-toggle="modal" data-bs-target="#viewModal" data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2.25 12s3.5-6.75 9.75-6.75S21.75 12 21.75 12 18.25 18.75 12 18.75 2.25 12 2.25 12Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.75" fill="none" stroke="currentColor" stroke-width="2"/></svg></button><button type="button" title="Edit" aria-label="Edit" class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon" data-bs-toggle="modal" data-bs-target="#recordModal" data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 20h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button><?php if($rowStatus!=='inactive'): ?>
+                                        <form method="post" action="api/job_cards.php" class="d-inline js-api-disable-form" onsubmit="return false;">
+                                            <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>"><input
+                                                type="hidden" name="action" value="delete_record"><input type="hidden"
+                                                name="id" value="<?= e($row['id']) ?>"><button type="submit" title="Disable" aria-label="Disable" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 9l6 6M15 9l-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
                                         </form><?php endif; ?>
                                     </td>
                                 </tr><?php endforeach; ?>
@@ -566,14 +613,7 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
                                 </div><span
                                     class="status-pill <?= e($rowStatus) ?>"><?= e($row['display_status']??'Active') ?></span>
                             </div>
-                            <div class="mobile-card-actions"><button type="button"
-                                    class="btn btn-sm btn-outline-secondary rounded-pill fw-bold js-view-record"
-                                    data-bs-toggle="modal" data-bs-target="#viewModal"
-                                    data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'>View</button><button
-                                    type="button"
-                                    class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit-record"
-                                    data-bs-toggle="modal" data-bs-target="#recordModal"
-                                    data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'>Edit</button>
+                            <div class="mobile-card-actions"><button type="button" title="Edit" aria-label="Edit" class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon" data-bs-toggle="modal" data-bs-target="#recordModal" data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 20h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
                             </div>
                         </div><?php endforeach; ?>
                     </div>
@@ -584,7 +624,7 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
     </div>
     <div class="modal fade" id="recordModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-xl">
-            <form method="post" class="modal-content" id="jobCardForm"><input type="hidden" name="csrf_token"
+            <form method="post" action="api/job_cards.php" class="modal-content" id="jobCardForm"><input type="hidden" name="csrf_token"
                     value="<?= e($csrfToken) ?>"><input type="hidden" name="action" value="save_record"><input
                     type="hidden" name="id" id="id"><input type="hidden" name="quotation_id" id="quotation_id"><input
                     type="hidden" name="customer_id" id="customer_id"><input type="hidden" name="function_type_id"
@@ -599,44 +639,46 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
                     <div class="row g-3">
                         <div class="col-md-4"><label class="form-label fw-bold">Job No</label><input name="job_card_no"
                                 id="job_card_no" class="form-control" value="<?= e($nextJobNo) ?>"></div>
-                        <div class="col-md-5"><label class="form-label fw-bold">Proforma / Sales Order</label>
-                            <div class="record-proforma-wrap"><select name="proforma_bill_id" id="proforma_bill_id"
-                                    class="form-select select2-autotype" data-placeholder="Search proforma">
-                                    <option value="">Direct Job Card</option><?php foreach($proformas as $pf): ?><option
-                                        value="<?= e($pf['id']) ?>"
-                                        data-quotation-id="<?= e($pf['quotation_id']??'') ?>"
-                                        data-customer-id="<?= e($pf['customer_id']??'') ?>"
-                                        data-customer-name="<?= e($pf['customer_name']??'') ?>"
-                                        data-mobile="<?= e($pf['mobile']??'') ?>"
-                                        data-function-type-id="<?= e($pf['function_type_id']??'') ?>"
-                                        data-order-type="<?= e($pf['order_type']??'readymade') ?>"
-                                        data-final-amount="<?= e($pf['final_amount']??'0') ?>"
-                                        data-advance-amount="<?= e($pf['advance_amount']??'0') ?>"
-                                        data-balance-amount="<?= e($pf['balance_amount']??'0') ?>"
-                                        data-delivery-date="<?= e($pf['delivery_date']??'') ?>"
-                                        data-product-id="<?= e($pf['product_id']??'') ?>"
-                                        data-product-name="<?= e($pf['item_name']??'') ?>"
-                                        data-printing-type-id="<?= e($pf['printing_type_id']??'') ?>"
-                                        data-printing-sub-type-id="<?= e($pf['printing_sub_type_id']??'') ?>"
-                                        data-size-text="<?= e($pf['size_text']??'') ?>"
-                                        data-gsm-thickness="<?= e($pf['gsm_thickness']??'') ?>"
-                                        data-lamination-required="<?= e($pf['lamination_required']??'0') ?>"
-                                        data-lamination-type="<?= e($pf['lamination_type']??'') ?>"
-                                        data-printing-side="<?= e($pf['printing_side']??'') ?>"
-                                        data-screening-type="<?= e($pf['screening_type']??'') ?>"
-                                        data-finishing-required="<?= e($pf['finishing_required']??'0') ?>"
-                                        data-qty="<?= e($pf['qty']??'1') ?>" data-rate="<?= e($pf['rate']??'0') ?>"
-                                        data-amount="<?= e($pf['amount']??'0') ?>"
-                                        data-description="<?= e($pf['description']??'') ?>"
-                                        data-remarks="<?= e($pf['remarks']??'') ?>"
-                                        data-proforma-no="<?= e($pf['proforma_no']??'') ?>">
-                                        <?= e($pf['proforma_no']) ?> - <?= e($pf['customer_name']) ?></option>
-                                    <?php endforeach; ?>
-                                </select><button type="button"
+                        <div class="col-md-8"><label class="form-label fw-bold">Proforma / Sales Order</label>
+                            <div class="record-proforma-wrap">
+                                <div class="flex-grow-1"><select name="proforma_bill_id" id="proforma_bill_id"
+                                        class="form-select select2-autotype" data-placeholder="Search proforma">
+                                        <option value="">Direct Job Card</option><?php foreach($proformas as $pf): ?>
+                                        <option value="<?= e($pf['id']) ?>"
+                                            data-quotation-id="<?= e($pf['quotation_id']??'') ?>"
+                                            data-customer-id="<?= e($pf['customer_id']??'') ?>"
+                                            data-customer-name="<?= e($pf['customer_name']??'') ?>"
+                                            data-mobile="<?= e($pf['mobile']??'') ?>"
+                                            data-function-type-id="<?= e($pf['function_type_id']??'') ?>"
+                                            data-order-type="<?= e($pf['order_type']??'readymade') ?>"
+                                            data-final-amount="<?= e($pf['final_amount']??'0') ?>"
+                                            data-advance-amount="<?= e($pf['advance_amount']??'0') ?>"
+                                            data-balance-amount="<?= e($pf['balance_amount']??'0') ?>"
+                                            data-delivery-date="<?= e($pf['delivery_date']??'') ?>"
+                                            data-product-id="<?= e($pf['product_id']??'') ?>"
+                                            data-product-name="<?= e($pf['item_name']??'') ?>"
+                                            data-printing-type-id="<?= e($pf['printing_type_id']??'') ?>"
+                                            data-printing-sub-type-id="<?= e($pf['printing_sub_type_id']??'') ?>"
+                                            data-size-text="<?= e($pf['size_text']??'') ?>"
+                                            data-gsm-thickness="<?= e($pf['gsm_thickness']??'') ?>"
+                                            data-lamination-required="<?= e($pf['lamination_required']??'0') ?>"
+                                            data-lamination-type="<?= e($pf['lamination_type']??'') ?>"
+                                            data-printing-side="<?= e($pf['printing_side']??'') ?>"
+                                            data-screening-type="<?= e($pf['screening_type']??'') ?>"
+                                            data-finishing-required="<?= e($pf['finishing_required']??'0') ?>"
+                                            data-qty="<?= e($pf['qty']??'1') ?>" data-rate="<?= e($pf['rate']??'0') ?>"
+                                            data-amount="<?= e($pf['amount']??'0') ?>"
+                                            data-description="<?= e($pf['description']??'') ?>"
+                                            data-remarks="<?= e($pf['remarks']??'') ?>"
+                                            data-proforma-no="<?= e($pf['proforma_no']??'') ?>">
+                                            <?= e($pf['proforma_no']) ?> - <?= e($pf['customer_name']) ?></option>
+                                        <?php endforeach; ?>
+                                    </select></div><button type="button"
                                     class="btn btn-outline-secondary rounded-pill px-3 fw-bold proforma-clear-btn"
-                                    id="clearProformaBtn">Clear</button></div>
+                                    id="clearProformaBtn">Clear</button>
+                            </div>
                         </div>
-                        <div class="col-md-3"><label class="form-label fw-bold">Order Type *</label><select
+                        <div class="col-md-4"><label class="form-label fw-bold">Order Type *</label><select
                                 name="order_type" id="order_type" class="form-select select2-autotype" required
                                 data-placeholder="Select order type">
                                 <option value="readymade">Readymade</option>
@@ -828,9 +870,10 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
                         </div>
                     </div>
                 </div>
-                <div class="modal-footer"><button type="button"
-                        class="btn btn-outline-secondary rounded-pill px-4 fw-bold"
-                        data-bs-dismiss="modal">Close</button></div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold"
+                        data-bs-dismiss="modal">Close</button>
+                </div>
             </div>
         </div>
     </div>
@@ -855,6 +898,7 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
             if (window.bootstrap && bootstrap.Toast && toastEl) bootstrap.Toast.getOrCreateInstance(toastEl).show();
         }
         window.showToast = showToast;
+        // Toast rule: important result messages only.
         const pageToastEl = document.getElementById('pageToast');
         if (pageToastEl && window.bootstrap && bootstrap.Toast) bootstrap.Toast.getOrCreateInstance(pageToastEl)
             .show();
@@ -1044,12 +1088,13 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
             set('function_type_id', o.dataset.functionTypeId || '');
             set('customer_name', o.dataset.customerName || '');
             set('mobile', o.dataset.mobile || '');
+
             setS('order_type', o.dataset.orderType || 'readymade');
 
             set('final_amount', o.dataset.finalAmount || '0');
             set('advance_amount', o.dataset.advanceAmount || '0');
             set('balance_amount', o.dataset.balanceAmount || '0');
-            set('delivery_date', o.dataset.deliveryDate || '');
+            set('delivery_date', o.datasetDeliveryDate || o.dataset.deliveryDate || '');
 
             setS('product_id', o.dataset.productId || '');
             set('product_name', o.dataset.productName || '');
@@ -1078,7 +1123,6 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
                 filterSub();
                 toggle();
                 calc();
-                showToast('Proforma details auto-filled successfully.', 'success', 'Success');
             }, 120);
         }
 
@@ -1104,7 +1148,6 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
             setText('viewLamination', (String(r.lamination_required || '0') === '1' ? 'Required' :
                 'No Lamination') + (r.lamination_type ? ' / ' + r.lamination_type : ''));
             setText('viewNotes', r.notes || '-');
-            showToast('Job card details opened.', 'success', 'Success');
         }));
 
         document.getElementById('clearProformaBtn')?.addEventListener('click', () => {
@@ -1124,7 +1167,6 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
             set('advance_amount', '0');
             set('balance_amount', '0');
             toggle();
-            showToast('Proforma reference cleared.', 'success', 'Success');
         });
 
         document.getElementById('newRecordBtn')?.addEventListener('click', () => setTimeout(() => {
@@ -1183,8 +1225,56 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
             if (o?.dataset.price) set('rate', o.dataset.price)
         });
         $('#final_amount,#advance_amount').on('input', calc);
-        form?.addEventListener('submit', () => showToast('Saving job card, please wait...', 'success',
-            'Processing'));
+
+        form?.addEventListener('submit', function(event) {
+            event.preventDefault();
+
+            const formData = new FormData(form);
+
+            fetch('api/job_cards.php', {
+                method: 'POST',
+                body: formData,
+                credentials: 'same-origin'
+            })
+            .then(response => response.json())
+            .then(data => {
+                showToast(data.message || (data.status ? 'Job card saved successfully.' : 'Job card save failed.'), data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+
+                if (data.status) {
+                    setTimeout(() => window.location.reload(), 900);
+                }
+            })
+            .catch(() => showToast('Request failed. Please try again.', 'danger', 'Failed'));
+        });
+
+        document.querySelectorAll('.js-api-disable-form').forEach(function(disableForm) {
+            disableForm.addEventListener('submit', function(event) {
+                event.preventDefault();
+            });
+
+            disableForm.querySelector('button[type="submit"]')?.addEventListener('click', function() {
+                const ok = confirm('Disable this job card?');
+                if (!ok) return;
+
+                const formData = new FormData(disableForm);
+
+                fetch('api/job_cards.php', {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    showToast(data.message || (data.status ? 'Job card disabled successfully.' : 'Job card disable failed.'), data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+
+                    if (data.status) {
+                        setTimeout(() => window.location.reload(), 900);
+                    }
+                })
+                .catch(() => showToast('Request failed. Please try again.', 'danger', 'Failed'));
+            });
+        });
+
         document.getElementById('tableSearch')?.addEventListener('input', function() {
             const v = this.value.toLowerCase().trim();
             document.querySelectorAll('#dataTable tbody tr').forEach(r => r.style.display = r.textContent
