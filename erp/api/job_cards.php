@@ -127,6 +127,605 @@ function apiJobCardList(mysqli $conn): array
     return $rows;
 }
 
+
+function jc_current_role_ids(mysqli $conn): array
+{
+    $ids = [];
+
+    foreach (['role_id', 'current_role_id'] as $key) {
+        if (!empty($_SESSION[$key])) {
+            $ids[] = (int)$_SESSION[$key];
+        }
+    }
+
+    foreach (['role_ids', 'user_role_ids'] as $key) {
+        if (!empty($_SESSION[$key]) && is_array($_SESSION[$key])) {
+            foreach ($_SESSION[$key] as $id) {
+                $ids[] = (int)$id;
+            }
+        }
+    }
+
+    if (!empty($_SESSION['roles']) && is_array($_SESSION['roles'])) {
+        foreach ($_SESSION['roles'] as $role) {
+            if (is_array($role) && !empty($role['id'])) {
+                $ids[] = (int)$role['id'];
+            } elseif (is_numeric($role)) {
+                $ids[] = (int)$role;
+            }
+        }
+    }
+
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+    if ($userId > 0 && jc_table_exists($conn, 'user_roles')) {
+        try {
+            $stmt = $conn->prepare("SELECT role_id FROM user_roles WHERE user_id = ?");
+            $stmt->bind_param('i', $userId);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            while ($row = $res->fetch_assoc()) {
+                $ids[] = (int)$row['role_id'];
+            }
+            $stmt->close();
+        } catch (Throwable $e) {}
+    }
+
+    return array_values(array_unique(array_filter($ids)));
+}
+
+function jc_current_role_keys(mysqli $conn): array
+{
+    $keys = [];
+
+    foreach (['role_key', 'current_role_key'] as $key) {
+        if (!empty($_SESSION[$key])) {
+            $keys[] = strtolower((string)$_SESSION[$key]);
+        }
+    }
+
+    if (!empty($_SESSION['roles']) && is_array($_SESSION['roles'])) {
+        foreach ($_SESSION['roles'] as $role) {
+            if (is_array($role) && !empty($role['role_key'])) {
+                $keys[] = strtolower((string)$role['role_key']);
+            } elseif (is_string($role)) {
+                $keys[] = strtolower($role);
+            }
+        }
+    }
+
+    $roleIds = jc_current_role_ids($conn);
+    if ($roleIds && jc_table_exists($conn, 'roles') && jc_col($conn, 'roles', 'role_key')) {
+        try {
+            $placeholders = implode(',', array_fill(0, count($roleIds), '?'));
+            $types = str_repeat('i', count($roleIds));
+            $stmt = $conn->prepare("SELECT role_key FROM roles WHERE id IN ({$placeholders})");
+            $stmt->bind_param($types, ...$roleIds);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            while ($row = $res->fetch_assoc()) {
+                $keys[] = strtolower((string)$row['role_key']);
+            }
+            $stmt->close();
+        } catch (Throwable $e) {}
+    }
+
+    return array_values(array_unique(array_filter($keys)));
+}
+
+function jc_is_admin_user(mysqli $conn): bool
+{
+    if (function_exists('is_super_admin') && is_super_admin()) return true;
+    if (!empty($_SESSION['is_super_admin'])) return true;
+
+    $roleKeys = jc_current_role_keys($conn);
+    foreach ($roleKeys as $key) {
+        if (in_array($key, ['super_admin', 'admin', 'business_admin'], true)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function jc_can_update_tracking(mysqli $conn, array $trackingRow): bool
+{
+    if (jc_is_admin_user($conn)) return true;
+
+    $responsibleRoleId = (int)($trackingRow['responsible_role_id'] ?? 0);
+    if ($responsibleRoleId <= 0) return false;
+
+    return in_array($responsibleRoleId, jc_current_role_ids($conn), true);
+}
+
+function jc_status_id_by_key(mysqli $conn, string $key): ?int
+{
+    if (!jc_table_exists($conn, 'job_card_statuses')) return null;
+
+    try {
+        if (jc_col($conn, 'job_card_statuses', 'status_key')) {
+            $stmt = $conn->prepare("SELECT id FROM job_card_statuses WHERE status_key = ? LIMIT 1");
+            $stmt->bind_param('s', $key);
+        } elseif (jc_col($conn, 'job_card_statuses', 'status_name')) {
+            $name = ucwords(str_replace('_', ' ', $key));
+            $stmt = $conn->prepare("SELECT id FROM job_card_statuses WHERE LOWER(status_name) = LOWER(?) LIMIT 1");
+            $stmt->bind_param('s', $name);
+        } else {
+            return null;
+        }
+
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ? (int)$row['id'] : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function jc_job_status_key_by_id(mysqli $conn, ?int $statusId): string
+{
+    if (!$statusId || !jc_table_exists($conn, 'job_card_statuses')) return 'in_progress';
+
+    try {
+        if (jc_col($conn, 'job_card_statuses', 'status_key')) {
+            $stmt = $conn->prepare("SELECT status_key, status_name FROM job_card_statuses WHERE id = ? LIMIT 1");
+        } else {
+            $stmt = $conn->prepare("SELECT NULL AS status_key, status_name FROM job_card_statuses WHERE id = ? LIMIT 1");
+        }
+
+        $stmt->bind_param('i', $statusId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        $key = strtolower(trim((string)($row['status_key'] ?? '')));
+        if ($key !== '') return $key;
+
+        $name = strtolower(trim((string)($row['status_name'] ?? '')));
+        $name = preg_replace('/[^a-z0-9]+/', '_', $name);
+        return trim($name, '_') ?: 'in_progress';
+    } catch (Throwable $e) {
+        return 'in_progress';
+    }
+}
+
+function jc_tracking_history_insert(mysqli $conn, int $trackingId, int $jobCardId, int $workflowStepId, string $oldStatus, string $newStatus, string $remarks, int $userId): void
+{
+    if (!jc_table_exists($conn, 'job_tracking_history')) return;
+
+    try {
+        $history = [
+            'job_tracking_id' => $trackingId,
+            'job_card_id' => $jobCardId,
+            'workflow_step_id' => $workflowStepId,
+            'old_status' => $oldStatus,
+            'new_status' => $newStatus,
+            'action_remarks' => $remarks,
+            'changed_by' => $userId ?: null,
+            'changed_at' => date('Y-m-d H:i:s')
+        ];
+
+        if (jc_col($conn, 'job_tracking_history', 'old_data')) {
+            $history['old_data'] = json_encode(['status' => $oldStatus], JSON_UNESCAPED_UNICODE);
+        }
+
+        if (jc_col($conn, 'job_tracking_history', 'new_data')) {
+            $history['new_data'] = json_encode(['status' => $newStatus], JSON_UNESCAPED_UNICODE);
+        }
+
+        jc_insert($conn, 'job_tracking_history', $history);
+    } catch (Throwable $e) {}
+}
+
+
+
+function jc_default_delay_reason_id(mysqli $conn): ?int
+{
+    if (!jc_table_exists($conn, 'delay_reasons')) return null;
+
+    try {
+        $key = 'other';
+        if (jc_col($conn, 'delay_reasons', 'reason_key')) {
+            $stmt = $conn->prepare("SELECT id FROM delay_reasons WHERE reason_key = ? AND is_active = 1 LIMIT 1");
+            $stmt->bind_param('s', $key);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if ($row) return (int)$row['id'];
+        }
+
+        $stmt = $conn->prepare("SELECT id FROM delay_reasons WHERE is_active = 1 ORDER BY id DESC LIMIT 1");
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ? (int)$row['id'] : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function jc_next_expected_date($plannedDate): ?string
+{
+    if (empty($plannedDate)) return null;
+
+    try {
+        $dt = new DateTime(date('Y-m-d', strtotime((string)$plannedDate)));
+        $dt->modify('+1 day');
+        return $dt->format('Y-m-d');
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function jc_auto_mark_overdue_tracking(mysqli $conn, int $jobCardId = 0): array
+{
+    $summary = ['checked' => 0, 'updated' => 0];
+
+    if (!jc_table_exists($conn, 'job_tracking')) {
+        return $summary;
+    }
+
+    $today = date('Y-m-d');
+    $defaultReasonId = jc_default_delay_reason_id($conn);
+
+    try {
+        $where = "WHERE jt.status NOT IN ('completed','cancelled','skipped')
+                    AND jt.planned_completion_date IS NOT NULL
+                    AND jt.planned_completion_date < ?";
+        $types = 's';
+        $params = [$today];
+
+        if ($jobCardId > 0) {
+            $where .= " AND jt.job_card_id = ?";
+            $types .= 'i';
+            $params[] = $jobCardId;
+        }
+
+        $stmt = $conn->prepare("SELECT jt.* FROM job_tracking jt {$where}");
+        $stmt->bind_param($types, ...$params);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        while ($row = $res->fetch_assoc()) {
+            $summary['checked']++;
+            $trackingId = (int)$row['id'];
+            $plannedDate = (string)($row['planned_completion_date'] ?? '');
+            $nextExpectedDate = !empty($row['revised_completion_date']) ? (string)$row['revised_completion_date'] : jc_next_expected_date($plannedDate);
+            $delayDays = jc_delay_days_from_planned($plannedDate);
+            $oldStatus = (string)($row['status'] ?? 'pending');
+
+            $data = [];
+            if (jc_col($conn, 'job_tracking', 'status') && $oldStatus !== 'delayed') $data['status'] = 'delayed';
+            if (jc_col($conn, 'job_tracking', 'is_delayed')) $data['is_delayed'] = 1;
+            if (jc_col($conn, 'job_tracking', 'delay_started_at') && empty($row['delay_started_at'])) $data['delay_started_at'] = date('Y-m-d H:i:s');
+            if (jc_col($conn, 'job_tracking', 'delay_days')) $data['delay_days'] = max(1, $delayDays);
+            if (jc_col($conn, 'job_tracking', 'revised_completion_date') && empty($row['revised_completion_date'])) $data['revised_completion_date'] = $nextExpectedDate;
+            if (jc_col($conn, 'job_tracking', 'delay_reason_id') && empty($row['delay_reason_id']) && $defaultReasonId) $data['delay_reason_id'] = $defaultReasonId;
+            if (jc_col($conn, 'job_tracking', 'delay_remarks') && trim((string)($row['delay_remarks'] ?? '')) === '') $data['delay_remarks'] = 'Auto marked delayed because planned date was missed.';
+            if (jc_col($conn, 'job_tracking', 'updated_at')) $data['updated_at'] = date('Y-m-d H:i:s');
+
+            if ($data) {
+                jc_update($conn, 'job_tracking', $data, $trackingId);
+                $summary['updated']++;
+
+                jc_tracking_history_insert(
+                    $conn,
+                    $trackingId,
+                    (int)$row['job_card_id'],
+                    (int)$row['workflow_step_id'],
+                    $oldStatus,
+                    $data['status'] ?? $oldStatus,
+                    'Auto marked delayed. Original planned date: ' . $plannedDate . '. Next expected date: ' . ($nextExpectedDate ?: '-') . '.',
+                    0
+                );
+            }
+        }
+        $stmt->close();
+
+        if ($jobCardId > 0) {
+            jc_update_job_card_progress($conn, $jobCardId);
+        }
+    } catch (Throwable $e) {}
+
+    return $summary;
+}
+
+
+function jc_delay_days_from_planned($plannedDate): int
+{
+    if (empty($plannedDate)) return 0;
+
+    try {
+        $planned = new DateTime(date('Y-m-d', strtotime((string)$plannedDate)));
+        $today = new DateTime(date('Y-m-d'));
+
+        if ($today <= $planned) return 0;
+
+        return (int)$planned->diff($today)->days;
+    } catch (Throwable $e) {
+        return 0;
+    }
+}
+
+function jc_tracking_needs_delay_reason(array $trackingRow, string $newStatus): bool
+{
+    if (!in_array($newStatus, ['in_progress', 'completed', 'delayed'], true)) {
+        return false;
+    }
+
+    $delayDays = jc_delay_days_from_planned($trackingRow['planned_completion_date'] ?? null);
+    if ($delayDays <= 0) return false;
+
+    $hasReason = !empty($trackingRow['delay_reason_id']) || trim((string)($trackingRow['delay_remarks'] ?? '')) !== '';
+
+    return !$hasReason;
+}
+
+function jc_apply_delay_data(mysqli $conn, array &$data, array $trackingRow, string $newStatus, ?int $delayReasonId, string $delayRemarks): void
+{
+    $delayDays = jc_delay_days_from_planned($trackingRow['planned_completion_date'] ?? null);
+    $isDelayed = $delayDays > 0 && in_array($newStatus, ['in_progress', 'completed', 'delayed'], true);
+
+    if (!$isDelayed) return;
+
+    if (!$delayReasonId || trim($delayRemarks) === '') {
+        throw new RuntimeException('Delay reason and delay remarks are required before updating this delayed job status.');
+    }
+
+    if (jc_col($conn, 'job_tracking', 'is_delayed')) $data['is_delayed'] = 1;
+    if (jc_col($conn, 'job_tracking', 'delay_started_at') && empty($trackingRow['delay_started_at'])) $data['delay_started_at'] = date('Y-m-d H:i:s');
+    if (jc_col($conn, 'job_tracking', 'delay_days')) $data['delay_days'] = $delayDays;
+    if (jc_col($conn, 'job_tracking', 'revised_completion_date') && empty($trackingRow['revised_completion_date'])) $data['revised_completion_date'] = jc_next_expected_date($trackingRow['planned_completion_date'] ?? null);
+    if (jc_col($conn, 'job_tracking', 'delay_reason_id')) $data['delay_reason_id'] = $delayReasonId;
+    if (jc_col($conn, 'job_tracking', 'delay_remarks')) $data['delay_remarks'] = $delayRemarks;
+}
+
+
+function jc_sync_tracking_from_job_card(mysqli $conn, int $jobCardId, ?int $selectedStepId, ?int $selectedStatusId, string $remarks = '', ?int $delayReasonId = null, string $delayRemarks = ''): array
+{
+    if ($jobCardId <= 0 || !$selectedStepId || !jc_table_exists($conn, 'job_tracking')) {
+        return jc_update_job_card_progress($conn, $jobCardId);
+    }
+
+    $jobStatusKey = jc_job_status_key_by_id($conn, $selectedStatusId);
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+    $now = date('Y-m-d H:i:s');
+
+    $rows = [];
+    try {
+        $join = jc_table_exists($conn, 'workflow_steps') ? 'LEFT JOIN workflow_steps ws ON ws.id = jt.workflow_step_id' : '';
+        $sort = jc_table_exists($conn, 'workflow_steps') ? 'ORDER BY ws.sort_order ASC, jt.id ASC' : 'ORDER BY jt.id ASC';
+        $stmt = $conn->prepare("SELECT jt.*, " . (jc_table_exists($conn, 'workflow_steps') ? 'ws.sort_order' : 'jt.id AS sort_order') . " FROM job_tracking jt {$join} WHERE jt.job_card_id = ? {$sort}");
+        $stmt->bind_param('i', $jobCardId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        while ($row = $res->fetch_assoc()) {
+            $rows[] = $row;
+        }
+        $stmt->close();
+    } catch (Throwable $e) {}
+
+    if (!$rows) {
+        return jc_update_job_card_progress($conn, $jobCardId);
+    }
+
+    $selectedIndex = null;
+    foreach ($rows as $index => $row) {
+        if ((int)($row['workflow_step_id'] ?? 0) === (int)$selectedStepId) {
+            $selectedIndex = $index;
+            break;
+        }
+    }
+
+    if ($selectedIndex === null) {
+        return jc_update_job_card_progress($conn, $jobCardId);
+    }
+
+    $allCompleted = in_array($jobStatusKey, ['completed', 'complete', 'closed', 'delivered'], true);
+
+    foreach ($rows as $index => $row) {
+        $trackingId = (int)($row['id'] ?? 0);
+        $workflowStepId = (int)($row['workflow_step_id'] ?? 0);
+        $oldStatus = (string)($row['status'] ?? 'pending');
+
+        if ($allCompleted || $index < $selectedIndex) {
+            $newStatus = 'completed';
+        } elseif ($index === $selectedIndex) {
+            $newStatus = 'in_progress';
+        } else {
+            $newStatus = 'pending';
+        }
+
+        $data = ['status' => $newStatus];
+
+        if ($newStatus === 'completed') {
+            if (jc_col($conn, 'job_tracking', 'actual_start_at') && empty($row['actual_start_at'])) $data['actual_start_at'] = $now;
+            if (jc_col($conn, 'job_tracking', 'actual_completed_at') && empty($row['actual_completed_at'])) $data['actual_completed_at'] = $now;
+            if (jc_col($conn, 'job_tracking', 'completed_by') && empty($row['completed_by'])) $data['completed_by'] = $userId ?: null;
+        } elseif ($newStatus === 'in_progress') {
+            if (jc_col($conn, 'job_tracking', 'actual_start_at') && empty($row['actual_start_at'])) $data['actual_start_at'] = $now;
+            if (jc_col($conn, 'job_tracking', 'actual_completed_at')) $data['actual_completed_at'] = null;
+            if (jc_col($conn, 'job_tracking', 'completed_by')) $data['completed_by'] = null;
+        } else {
+            if (jc_col($conn, 'job_tracking', 'actual_completed_at')) $data['actual_completed_at'] = null;
+            if (jc_col($conn, 'job_tracking', 'completed_by')) $data['completed_by'] = null;
+        }
+
+        jc_apply_delay_data($conn, $data, $row, $newStatus, $delayReasonId, $delayRemarks);
+
+        if (jc_col($conn, 'job_tracking', 'updated_at')) $data['updated_at'] = $now;
+
+        jc_update($conn, 'job_tracking', $data, $trackingId);
+
+        if ($oldStatus !== $newStatus) {
+            jc_tracking_history_insert(
+                $conn,
+                $trackingId,
+                $jobCardId,
+                $workflowStepId,
+                $oldStatus,
+                $newStatus,
+                ($remarks !== '' ? $remarks : 'Status synced from Job Card update.') . ($delayRemarks !== '' ? ' Delay: ' . $delayRemarks : ''),
+                $userId
+            );
+        }
+    }
+
+    return jc_update_job_card_progress($conn, $jobCardId);
+}
+
+
+
+function jc_update_job_card_progress(mysqli $conn, int $jobCardId): array
+{
+    $total = 0;
+    $completed = 0;
+    $inProgress = 0;
+    $pending = 0;
+    $currentStepId = null;
+    $allCompleted = false;
+
+    if ($jobCardId <= 0 || !jc_table_exists($conn, 'job_tracking')) {
+        return ['progress' => 0, 'current_step_id' => null, 'job_status_key' => 'in_progress'];
+    }
+
+    $rows = [];
+    try {
+        $join = jc_table_exists($conn, 'workflow_steps') ? 'LEFT JOIN workflow_steps ws ON ws.id = jt.workflow_step_id' : '';
+        $sort = jc_table_exists($conn, 'workflow_steps') ? 'ORDER BY ws.sort_order ASC, jt.id ASC' : 'ORDER BY jt.id ASC';
+        $stmt = $conn->prepare("SELECT jt.*, " . (jc_table_exists($conn, 'workflow_steps') ? 'ws.sort_order' : 'jt.id AS sort_order') . " FROM job_tracking jt {$join} WHERE jt.job_card_id = ? {$sort}");
+        $stmt->bind_param('i', $jobCardId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        while ($row = $res->fetch_assoc()) {
+            $rows[] = $row;
+        }
+        $stmt->close();
+    } catch (Throwable $e) {}
+
+    $total = count($rows);
+
+    foreach ($rows as $row) {
+        $status = (string)($row['status'] ?? 'pending');
+
+        if ($status === 'completed') {
+            $completed++;
+        } elseif ($status === 'in_progress') {
+            $inProgress++;
+        } else {
+            $pending++;
+        }
+
+        if ($currentStepId === null && $status !== 'completed') {
+            $currentStepId = (int)($row['workflow_step_id'] ?? 0);
+        }
+    }
+
+    if ($total > 0 && $completed === $total) {
+        $allCompleted = true;
+        $last = end($rows);
+        $currentStepId = (int)($last['workflow_step_id'] ?? 0);
+    }
+
+    $progress = $total > 0 ? (int)round(($completed / $total) * 100) : 0;
+    $jobStatusKey = $allCompleted ? 'completed' : 'in_progress';
+    $statusId = jc_status_id_by_key($conn, $jobStatusKey);
+
+    $updates = [];
+    if (jc_col($conn, 'job_cards', 'current_workflow_step_id')) $updates['current_workflow_step_id'] = $currentStepId ?: null;
+    if ($statusId && jc_col($conn, 'job_cards', 'job_card_status_id')) $updates['job_card_status_id'] = $statusId;
+    if (jc_col($conn, 'job_cards', 'updated_at')) $updates['updated_at'] = date('Y-m-d H:i:s');
+
+    if ($updates && jc_table_exists($conn, 'job_cards')) {
+        jc_update($conn, 'job_cards', $updates, $jobCardId);
+    }
+
+    return [
+        'progress' => $progress,
+        'total' => $total,
+        'completed' => $completed,
+        'in_progress' => $inProgress,
+        'pending' => $pending,
+        'current_step_id' => $currentStepId,
+        'job_status_key' => $jobStatusKey
+    ];
+}
+
+function jc_tracking_status_update(mysqli $conn, int $trackingId, string $newStatus, string $remarks = '', ?int $delayReasonId = null, string $delayRemarks = ''): array
+{
+    if ($trackingId <= 0) throw new RuntimeException('Invalid tracking record.');
+    if (!in_array($newStatus, ['pending', 'in_progress', 'completed'], true)) {
+        throw new RuntimeException('Invalid tracking status.');
+    }
+    if (!jc_table_exists($conn, 'job_tracking')) {
+        throw new RuntimeException('job_tracking table is missing.');
+    }
+
+    $stmt = $conn->prepare("
+        SELECT jt.*, ws.step_name, ws.step_key
+        FROM job_tracking jt
+        LEFT JOIN workflow_steps ws ON ws.id = jt.workflow_step_id
+        WHERE jt.id = ?
+        LIMIT 1
+    ");
+    $stmt->bind_param('i', $trackingId);
+    $stmt->execute();
+    $tracking = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$tracking) throw new RuntimeException('Tracking step not found.');
+
+    if (!jc_can_update_tracking($conn, $tracking)) {
+        throw new RuntimeException('You do not have role access to update this tracking step.');
+    }
+
+    $jobCardId = (int)($tracking['job_card_id'] ?? 0);
+    $oldStatus = (string)($tracking['status'] ?? 'pending');
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+    $now = date('Y-m-d H:i:s');
+
+    $data = ['status' => $newStatus];
+
+    if ($newStatus === 'pending') {
+        if (jc_col($conn, 'job_tracking', 'actual_start_at')) $data['actual_start_at'] = null;
+        if (jc_col($conn, 'job_tracking', 'actual_completed_at')) $data['actual_completed_at'] = null;
+        if (jc_col($conn, 'job_tracking', 'completed_by')) $data['completed_by'] = null;
+    } elseif ($newStatus === 'in_progress') {
+        if (jc_col($conn, 'job_tracking', 'actual_start_at') && empty($tracking['actual_start_at'])) $data['actual_start_at'] = $now;
+        if (jc_col($conn, 'job_tracking', 'actual_completed_at')) $data['actual_completed_at'] = null;
+        if (jc_col($conn, 'job_tracking', 'completed_by')) $data['completed_by'] = null;
+    } elseif ($newStatus === 'completed') {
+        if (jc_col($conn, 'job_tracking', 'actual_start_at') && empty($tracking['actual_start_at'])) $data['actual_start_at'] = $now;
+        if (jc_col($conn, 'job_tracking', 'actual_completed_at')) $data['actual_completed_at'] = $now;
+        if (jc_col($conn, 'job_tracking', 'completed_by')) $data['completed_by'] = $userId ?: null;
+    }
+
+    jc_apply_delay_data($conn, $data, $tracking, $newStatus, $delayReasonId, $delayRemarks);
+
+    if (jc_col($conn, 'job_tracking', 'updated_at')) $data['updated_at'] = $now;
+
+    $conn->begin_transaction();
+
+    jc_update($conn, 'job_tracking', $data, $trackingId);
+    jc_tracking_history_insert($conn, $trackingId, $jobCardId, (int)($tracking['workflow_step_id'] ?? 0), $oldStatus, $newStatus, ($remarks !== '' ? $remarks : 'Status updated from job progress page.') . ($delayRemarks !== '' ? ' Delay: ' . $delayRemarks : ''), $userId);
+
+
+    $progress = jc_update_job_card_progress($conn, $jobCardId);
+
+    $conn->commit();
+
+    return [
+        'tracking_id' => $trackingId,
+        'job_card_id' => $jobCardId,
+        'old_status' => $oldStatus,
+        'new_status' => $newStatus,
+        'progress' => $progress
+    ];
+}
+
+
 try {
     $action = (string)($_REQUEST['action'] ?? '');
 
@@ -134,21 +733,43 @@ try {
         apiResponse(false, 'Action is required.');
     }
 
-    if (in_array($action, ['save_record', 'create', 'update', 'delete_record', 'delete'], true)) {
+    if (in_array($action, ['save_record', 'create', 'update', 'delete_record', 'delete', 'update_tracking_status', 'auto_mark_delays'], true)) {
         apiCsrf();
     }
 
+
+    if ($action === 'auto_mark_delays') {
+        $jobCardId = jc_int($_POST['job_card_id'] ?? 0);
+        $summary = jc_auto_mark_overdue_tracking($conn, $jobCardId);
+        apiResponse(true, 'Delayed tracking stages checked successfully.', ['summary' => $summary]);
+    }
+
     if ($action === 'list') {
+        jc_auto_mark_overdue_tracking($conn);
         apiResponse(true, 'Job cards loaded successfully.', ['data' => apiJobCardList($conn)]);
     }
 
     if ($action === 'view') {
         $id = jc_int($_REQUEST['id'] ?? 0);
+        jc_auto_mark_overdue_tracking($conn, $id);
         $row = apiJobCardRow($conn, $id);
         if (!$row) {
             apiResponse(false, 'Job card not found.');
         }
         apiResponse(true, 'Job card loaded successfully.', ['data' => $row]);
+    }
+
+
+    if ($action === 'update_tracking_status') {
+        $trackingId = jc_int($_POST['tracking_id'] ?? 0);
+        $newStatus = jc_post('status');
+        $remarks = jc_post('remarks');
+        $delayReasonId = jc_int($_POST['delay_reason_id'] ?? 0) ?: null;
+        $delayRemarks = jc_post('delay_remarks');
+
+        $result = jc_tracking_status_update($conn, $trackingId, $newStatus, $remarks, $delayReasonId, $delayRemarks);
+
+        apiResponse(true, 'Job tracking status updated successfully.', $result);
     }
 
     if (in_array($action, ['save_record', 'create', 'update'], true)) {
@@ -178,6 +799,8 @@ try {
         $rate = jc_float($_POST['rate'] ?? 0);
         $amount = $qty*$rate;
         $notes = jc_post('notes');
+        $delayReasonId = jc_int($_POST['delay_reason_id'] ?? 0) ?: null;
+        $delayRemarks = jc_post('delay_remarks');
 
         if(!in_array($orderType,['readymade','customized'],true)) throw new RuntimeException('Invalid order type.');
         if($customerName===''||$mobile==='') throw new RuntimeException('Customer name and mobile are required.');
@@ -264,7 +887,9 @@ try {
             ]);
         }
 
-        apiResponse(true, $msg, ['id' => $jobId]);
+        $progressSync = jc_sync_tracking_from_job_card($conn, $jobId, $stepId, $statusId, 'Status synced from Job Card page.', $delayReasonId, $delayRemarks);
+
+        apiResponse(true, $msg, ['id' => $jobId, 'progress' => $progressSync]);
     }
 
     if (in_array($action, ['delete_record', 'delete'], true)) {
