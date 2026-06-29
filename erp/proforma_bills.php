@@ -1374,7 +1374,15 @@ try {
 
 $msg = (string)($_GET['msg'] ?? '');
 if ($msg === 'created') {
-    $message = 'Proforma bill created successfully.';
+    $createdNo = trim((string)($_GET['proforma_no'] ?? ''));
+    $createdJobNo = trim((string)($_GET['job_card_no'] ?? ''));
+    $message = 'Proforma bill created successfully and listed below.';
+    if ($createdNo !== '') {
+        $message .= ' Proforma: ' . $createdNo . '.';
+    }
+    if ($createdJobNo !== '') {
+        $message .= ' Job Card: ' . $createdJobNo . '.';
+    }
     $messageType = 'success';
     $toastTitle = 'Success';
 } elseif ($msg === 'updated') {
@@ -1404,6 +1412,8 @@ if (isset($_GET['err']) && trim((string)$_GET['err']) !== '') {
     $message .= ($message !== '' ? ' ' : '') . 'Error: ' . $errText;
 }
 
+$createdProformaNoFilter = trim((string)($_GET['proforma_no'] ?? ''));
+
 $rows = [];
 try {
     $res = $conn->query("
@@ -1414,7 +1424,7 @@ try {
             ft.function_name
         FROM proforma_bills pb
         LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
-        LEFT JOIN job_cards jc ON jc.proforma_bill_id = pb.id
+        LEFT JOIN (SELECT proforma_bill_id, MAX(job_card_no) AS job_card_no FROM job_cards GROUP BY proforma_bill_id) jc ON jc.proforma_bill_id = pb.id
         LEFT JOIN function_types ft ON ft.id = pb.function_type_id
         ORDER BY pb.id DESC
         LIMIT 300
@@ -1424,6 +1434,11 @@ try {
     }
 } catch (Throwable $e) {
     $rows = [];
+    if ($message === '') {
+        $message = 'Unable to load proforma bills list: ' . $e->getMessage();
+        $messageType = 'danger';
+        $toastTitle = 'Failed';
+    }
 }
 
 $editData = null;
@@ -2026,7 +2041,21 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
         }
     }
 
-    </style>
+
+    .recent-created-row {
+        outline: 2px solid color-mix(in srgb, var(--success-color, #16a34a) 55%, transparent);
+        background: color-mix(in srgb, var(--success-color, #16a34a) 8%, var(--card-bg)) !important;
+    }
+
+    
+    .list-only-info{
+        border:1px dashed var(--border-soft);
+        border-radius:18px;
+        padding:14px 18px;
+        background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg));
+        font-weight:800;
+    }
+</style>
 </head>
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -2044,16 +2073,15 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                         <div>
                             <h1 class="mb-1">Proforma Bills / Sales Orders</h1>
                             <p class="text-muted-custom mb-0">
-                                Create proforma bill as sales order reference, collect advance, balance, printing
-                                details, delivery date and job card.
+                                Only created proforma bills are listed here. Use Create Proforma Bill page for new entries.
                             </p>
                         </div>
 
-                        <?php if ($editData): ?>
-                        <a href="proforma_bills.php" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">
-                            Cancel Edit
-                        </a>
-                        <?php endif; ?>
+                        <div class="d-flex flex-column flex-sm-row gap-2">
+                            <a href="create_proforma.php" class="btn btn-primary rounded-pill px-4 fw-bold">
+                                Create Proforma Bill
+                            </a>
+                        </div>
                     </div>
                 </div>
 
@@ -2073,465 +2101,16 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                 </div>
                 <?php endif; ?>
 
-                <form method="post" action="api/proforma_bills.php" class="card-ui card-pad mb-3" id="proformaForm">
-                    <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
-                    <input type="hidden" name="action" value="save_proforma">
-                    <input type="hidden" name="id" value="<?= e($editData['id'] ?? '') ?>">
+                <!-- Create/Edit Proforma form removed from this page. Use create_proforma.php for creation. -->
 
-                    <div class="section-title">
-                        <?= $editData ? 'Edit Proforma Bill / Sales Order' : 'Create Proforma Bill / Sales Order' ?>
-                    </div>
-
-                    <div class="row g-3">
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Quotation Reference</label>
-                            <select name="quotation_id" class="form-select select2-autotype"
-                                data-placeholder="Search quotation reference">
-                                <option value="">Direct Proforma</option>
-                                <?php foreach ($quotations as $quotation): ?>
-                                <option value="<?= e($quotation['id']) ?>"
-                                    data-customer-name="<?= e($quotation['customer_name']) ?>"
-                                    data-mobile="<?= e($quotation['mobile']) ?>"
-                                    data-billing-address="<?= e($quotation['address'] ?? '') ?>"
-                                    data-function-type-id="<?= e($quotation['function_type_id'] ?? '') ?>"
-                                    data-bride-name="<?= e($quotation['bride_name'] ?? '') ?>"
-                                    data-groom-name="<?= e($quotation['groom_name'] ?? '') ?>"
-                                    data-venue="<?= e($quotation['venue'] ?? '') ?>"
-                                    data-function-date="<?= e($quotation['function_date'] ?? '') ?>"
-                                    data-function-time="<?= e($quotation['function_time'] ?? '') ?>"
-                                    data-total-qty="<?= e($quotation['total_qty'] ?? '') ?>"
-                                    data-sub-total="<?= e($quotation['sub_total'] ?? '') ?>"
-                                    data-discount-amount="<?= e($quotation['discount_amount'] ?? '') ?>"
-                                    data-final-amount="<?= e($quotation['final_amount'] ?? '') ?>"
-                                    data-unit-rate="<?= e(((float)($quotation['total_qty'] ?? 0) > 0) ? ((float)($quotation['sub_total'] / (float)$quotation['total_qty'])) : (float)($quotation['sub_total'] ?? 0)) ?>"
-                                    data-delivery-date="<?= e($quotation['delivery_date'] ?? '') ?>"
-                                    data-remarks="<?= e($quotation['remarks'] ?? '') ?>"
-                                    <?= ((int)($editData['quotation_id'] ?? 0) === (int)$quotation['id']) ? 'selected' : '' ?>>
-                                    <?= e($quotation['quotation_no']) ?> - <?= e($quotation['customer_name']) ?> -
-                                    ₹<?= number_format((float)$quotation['final_amount'], 2) ?>
-                                </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Function / Product Type *</label>
-                            <select name="function_type_id" id="function_type_id" class="form-select select2-autotype"
-                                required data-placeholder="Type or select function / product type" data-tags="true">
-                                <option value="">Select Type</option>
-                                <?php foreach ($functionTypes as $ft): ?>
-                                <option value="<?= e($ft['id']) ?>" data-field-group="<?= e($ft['field_group']) ?>"
-                                    data-function-key="<?= e($ft['function_key']) ?>"
-                                    <?= ((int)($editData['function_type_id'] ?? 0) === (int)$ft['id']) ? 'selected' : '' ?>>
-                                    <?= e($ft['function_name']) ?>
-                                </option>
-                                <?php endforeach; ?>
-                            </select>
-                            <small class="text-muted-custom fw-bold d-block mt-1" id="functionHelp">
-                                Select type to show required inputs.
-                            </small>
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Order Type *</label>
-                            <select name="order_type" id="order_type" class="form-select select2-autotype" required
-                                data-placeholder="Search order type"
-                                onchange="window.subhikshaToggleLaminationType && window.subhikshaToggleLaminationType()">
-                                <option value="readymade"
-                                    <?= (($editData['order_type'] ?? '') === 'readymade') ? 'selected' : '' ?>>Readymade
-                                </option>
-                                <option value="customized"
-                                    <?= (($editData['order_type'] ?? '') === 'customized') ? 'selected' : '' ?>>
-                                    Customized</option>
-                            </select>
-                        </div>
-
-
-                        <div class="col-12">
-                            <div class="order-type-info readymade-info d-none">
-                                <strong>Readymade Order Required Info:</strong>
-                                Customer + Billing details, Product, Printing Type, Screen Print sub-type if applicable,
-                                With/Without finishing, Advance, Final amount, Balance, Delivery date and Remarks.
-                            </div>
-                            <div class="order-type-info customized-info d-none">
-                                <strong>Customized Order Required Info:</strong>
-                                Customer + Billing details, Product, Size, GSM, Lamination required/not,
-                                Lamination type if selected, Single/Double side, Regular/Special screening,
-                                Advance, Final amount, Balance, Delivery date and Remarks.
-                            </div>
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Delivery Date</label>
-                            <input type="date" name="delivery_date" class="form-control"
-                                value="<?= pb_form_value($editData, 'delivery_date') ?>">
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Customer Name *</label>
-                            <input name="customer_name" class="form-control" required
-                                value="<?= pb_form_value($editData, 'customer_name') ?>">
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Mobile *</label>
-                            <input name="mobile" class="form-control" required
-                                value="<?= pb_form_value($editData, 'mobile') ?>">
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">GST Number</label>
-                            <input name="gst_number" class="form-control"
-                                value="<?= pb_form_value($editData, 'gst_number') ?>">
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Billing Name</label>
-                            <input name="billing_name" class="form-control"
-                                value="<?= pb_form_value($editData, 'billing_name') ?>">
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Billing Mobile</label>
-                            <input name="billing_mobile" class="form-control"
-                                value="<?= pb_form_value($editData, 'billing_mobile') ?>">
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Status</label>
-                            <select name="proforma_status_id" class="form-select select2-autotype"
-                                data-placeholder="Search status">
-                                <?php foreach ($statuses as $status): ?>
-                                <option value="<?= e($status['id']) ?>"
-                                    <?= ((int)($editData['proforma_status_id'] ?? 0) === (int)$status['id']) ? 'selected' : '' ?>>
-                                    <?= e($status['status_name']) ?>
-                                </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-
-                        <div class="col-12 function-specific group-business group-other">
-                            <label class="form-label fw-bold">Address / Billing Address <span
-                                    class="text-danger group-business-required">*</span></label>
-                            <textarea name="billing_address" class="form-control"
-                                rows="2"><?= pb_form_value($editData, 'billing_address') ?></textarea>
-                        </div>
-                    </div>
-
-                    <hr class="my-4">
-
-                    <div class="section-title">Function Details</div>
-
-                    <div class="row g-3">
-                        <div class="col-md-4 function-specific group-wedding">
-                            <label class="form-label fw-bold">Bride Name <span class="text-danger">*</span></label>
-                            <input name="bride_name" class="form-control"
-                                value="<?= pb_form_value($editData, 'bride_name') ?>">
-                        </div>
-
-                        <div class="col-md-4 function-specific group-wedding">
-                            <label class="form-label fw-bold">Groom Name <span class="text-danger">*</span></label>
-                            <input name="groom_name" class="form-control"
-                                value="<?= pb_form_value($editData, 'groom_name') ?>">
-                        </div>
-
-                        <div class="col-md-2 function-specific group-wedding group-event">
-                            <label class="form-label fw-bold">Function Date <span class="text-danger">*</span></label>
-                            <input type="date" name="function_date" class="form-control"
-                                value="<?= pb_form_value($editData, 'function_date') ?>">
-                        </div>
-
-                        <div class="col-md-2 function-specific group-wedding group-event">
-                            <label class="form-label fw-bold">Function Time <span class="text-danger">*</span></label>
-                            <input type="time" name="function_time" class="form-control"
-                                value="<?= pb_form_value($editData, 'function_time') ?>">
-                        </div>
-
-                        <div class="col-12 function-specific group-wedding group-event">
-                            <label class="form-label fw-bold">Venue <span class="text-danger">*</span></label>
-                            <textarea name="venue" class="form-control"
-                                rows="2"><?= pb_form_value($editData, 'venue') ?></textarea>
-                        </div>
-                    </div>
-
-                    <hr class="my-4">
-
-                    <div class="section-title">Product, Price & Printing Details</div>
-
-                    <div class="row g-3">
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Product</label>
-                            <select name="product_id" id="product_id" class="form-select select2-autotype"
-                                data-placeholder="Search product or type manual product name" data-tags="true">
-                                <option value="">Manual Product Name</option>
-                                <?php foreach ($products as $product): ?>
-                                <option value="<?= e($product['id']) ?>"
-                                    data-price="<?= e($product['default_price']) ?>"
-                                    <?= ((int)($editItem['product_id'] ?? 0) === (int)$product['id']) ? 'selected' : '' ?>>
-                                    <?= e($product['product_name']) ?>
-                                </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Product / New Product Name *</label>
-                            <input name="item_name" id="item_name" class="form-control"
-                                value="<?= pb_form_value($editItem, 'item_name') ?>">
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Printing Type <span
-                                    class="text-danger readymade-required">*</span></label>
-                            <select name="printing_type_id" id="printing_type_id" class="form-select select2-autotype"
-                                data-placeholder="Search printing type">
-                                <option value="">Select</option>
-                                <?php foreach ($printingTypes as $type): ?>
-                                <option value="<?= e($type['id']) ?>"
-                                    data-printing-key="<?= e($type['printing_key'] ?? '') ?>"
-                                    data-normalized-key="<?= e($type['normalized_key'] ?? '') ?>"
-                                    data-printing-name="<?= e($type['printing_name'] ?? '') ?>"
-                                    data-allowed-printing="<?= (str_contains(strtolower(($type['printing_name'] ?? '') . ' ' . ($type['printing_key'] ?? '')), 'offset') || str_contains(strtolower(($type['printing_name'] ?? '') . ' ' . ($type['printing_key'] ?? '')), 'screen') || str_contains(strtolower(($type['printing_name'] ?? '') . ' ' . ($type['printing_key'] ?? '')), 'digital')) ? '1' : '0' ?>"
-                                    <?= ((int)($editItem['printing_type_id'] ?? 0) === (int)$type['id']) ? 'selected' : '' ?>>
-                                    <?= e($type['printing_name']) ?>
-                                </option>
-                                <?php endforeach; ?>
-                            </select>
-                            <small class="text-muted-custom fw-bold d-block mt-1 d-none" id="customizedPrintingHelp">
-                                Customized order automatically uses Multicolor Offset Printing.
-                            </small>
-                        </div>
-
-                        <div class="col-md-4" id="screenSubTypeWrap">
-                            <label class="form-label fw-bold">Screen Print Sub-Type <span
-                                    class="text-danger screen-subtype-required d-none">*</span></label>
-                            <select name="printing_sub_type_id" id="printing_sub_type_id"
-                                class="form-select select2-autotype" data-placeholder="Search printing sub type">
-                                <option value="">Select</option>
-                                <?php foreach ($printingSubTypes as $sub): ?>
-                                <option value="<?= e($sub['id']) ?>"
-                                    data-printing-type="<?= e($sub['printing_type_id']) ?>"
-                                    <?= ((int)($editItem['printing_sub_type_id'] ?? 0) === (int)$sub['id']) ? 'selected' : '' ?>>
-                                    <?= e($sub['sub_type_name']) ?>
-                                </option>
-                                <?php endforeach; ?>
-                            </select>
-                            <small class="text-muted-custom fw-bold d-none" id="screenSubTypeHelp">
-                                Screen Print selected: choose UV Products or Foil Products.
-                            </small>
-                        </div>
-
-                        <div class="col-md-2">
-                            <label class="form-label fw-bold">Qty *</label>
-                            <input type="number" step="0.01" min="0.01" name="qty" id="qty" class="form-control"
-                                value="<?= pb_form_value($editItem, 'qty', '1') ?>" required>
-                        </div>
-
-                        <div class="col-md-2">
-                            <label class="form-label fw-bold">Final Amount / Rate</label>
-                            <input type="number" step="0.01" min="0" name="rate" id="rate" class="form-control"
-                                value="<?= pb_form_value($editItem, 'rate', '0') ?>">
-                        </div>
-
-                        <div class="col-md-2">
-                            <label class="form-label fw-bold">Discount</label>
-                            <input type="number" step="0.01" min="0" name="discount_amount" id="discount_amount"
-                                class="form-control" value="<?= pb_form_value($editData, 'discount_amount', '0') ?>">
-                        </div>
-
-                        <div class="col-md-2">
-                            <label class="form-label fw-bold">Advance</label>
-                            <input type="number" step="0.01" min="0" name="advance_amount" id="advance_amount"
-                                class="form-control" value="<?= pb_form_value($editData, 'advance_amount', '0') ?>">
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Payment Mode</label>
-                            <select name="payment_mode" class="form-select select2-autotype"
-                                data-placeholder="Search payment mode">
-                                <option value="cash">Cash</option>
-                                <option value="upi">UPI</option>
-                                <option value="bank">Bank</option>
-                                <option value="cheque">Cheque</option>
-                                <option value="card">Card</option>
-                                <option value="other">Other</option>
-                            </select>
-                        </div>
-
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Payment Reference</label>
-                            <input name="payment_reference" class="form-control">
-                        </div>
-
-                        <div class="col-md-4 readymade-only">
-                            <label class="form-label fw-bold">Finishing Option *</label>
-                            <select name="finishing_required" id="finishing_required"
-                                class="form-select select2-autotype" data-placeholder="Select finishing option">
-                                <option value="1"
-                                    <?= ((int)($editItem['finishing_required'] ?? 0) === 1) ? 'selected' : '' ?>>With
-                                    Finishing</option>
-                                <option value="0"
-                                    <?= ((int)($editItem['finishing_required'] ?? 0) === 0) ? 'selected' : '' ?>>Without
-                                    Finishing</option>
-                            </select>
-                        </div>
-
-
-                        <div class="col-12 customized-only" id="customizedOptionsTitle">
-                            <div class="customized-options-box">
-                                <strong>Customized Order Options</strong>
-                                <span>Fill Size, GSM, Lamination, Printing Side and Screening details.</span>
-                            </div>
-                        </div>
-
-                        <div class="col-md-4 customized-only">
-                            <label class="form-label fw-bold">Size <span class="text-danger">*</span></label>
-                            <input name="size_text" class="form-control"
-                                value="<?= pb_form_value($editItem, 'size_text') ?>">
-                        </div>
-
-                        <div class="col-md-4 customized-only">
-                            <label class="form-label fw-bold">GSM Thickness <span class="text-danger">*</span></label>
-                            <input name="gsm_thickness" class="form-control"
-                                value="<?= pb_form_value($editItem, 'gsm_thickness') ?>">
-                        </div>
-
-                        <div class="col-md-4 customized-only">
-                            <label class="form-label fw-bold">Lamination Required?</label>
-                            <select name="lamination_required" id="lamination_required"
-                                class="form-select select2-autotype" data-placeholder="Select lamination option"
-                                onchange="window.subhikshaToggleLaminationType && window.subhikshaToggleLaminationType()">
-                                <option value="0"
-                                    <?= ((int)($editItem['lamination_required'] ?? 0) === 0) ? 'selected' : '' ?>>No
-                                    Lamination</option>
-                                <option value="1"
-                                    <?= ((int)($editItem['lamination_required'] ?? 0) === 1) ? 'selected' : '' ?>>
-                                    Lamination Required</option>
-                            </select>
-                        </div>
-
-                        <div class="col-md-4 lamination-type-only" id="laminationTypeWrap"
-                            style="display:none !important;">
-                            <label class="form-label fw-bold">Lamination Type <span class="text-danger">*</span></label>
-                            <select name="lamination_type" id="lamination_type" class="form-select select2-autotype"
-                                data-placeholder="Search lamination type">
-                                <option value="">Select</option>
-                                <option value="glossy"
-                                    <?= (($editItem['lamination_type'] ?? '') === 'glossy') ? 'selected' : '' ?>>Glossy
-                                </option>
-                                <option value="matte"
-                                    <?= (($editItem['lamination_type'] ?? '') === 'matte') ? 'selected' : '' ?>>Matte
-                                </option>
-                                <option value="special"
-                                    <?= (($editItem['lamination_type'] ?? '') === 'special') ? 'selected' : '' ?>>
-                                    Special</option>
-                            </select>
-                        </div>
-
-                        <div class="col-md-4 customized-only">
-                            <label class="form-label fw-bold">Printing Side <span class="text-danger">*</span></label>
-                            <select name="printing_side" class="form-select select2-autotype"
-                                data-placeholder="Search printing side">
-                                <option value="">Select</option>
-                                <option value="single"
-                                    <?= (($editItem['printing_side'] ?? '') === 'single') ? 'selected' : '' ?>>Single
-                                    Side</option>
-                                <option value="double"
-                                    <?= (($editItem['printing_side'] ?? '') === 'double') ? 'selected' : '' ?>>Double
-                                    Side</option>
-                            </select>
-                        </div>
-
-                        <div class="col-md-4 customized-only">
-                            <label class="form-label fw-bold">Screening <span class="text-danger">*</span></label>
-                            <select name="screening_type" class="form-select select2-autotype"
-                                data-placeholder="Search screening">
-                                <option value="">Select</option>
-                                <option value="regular"
-                                    <?= (($editItem['screening_type'] ?? '') === 'regular') ? 'selected' : '' ?>>Regular
-                                    Screening</option>
-                                <option value="special"
-                                    <?= (($editItem['screening_type'] ?? '') === 'special') ? 'selected' : '' ?>>Special
-                                    Screening</option>
-                            </select>
-                        </div>
-
-                        <div class="col-12">
-                            <label class="form-label fw-bold">Item Description</label>
-                            <textarea name="description" class="form-control"
-                                rows="2"><?= pb_form_value($editItem, 'description') ?></textarea>
-                        </div>
-
-                        <div class="col-12">
-                            <label class="form-label fw-bold">Remarks</label>
-                            <textarea name="remarks" class="form-control"
-                                rows="2"><?= pb_form_value($editData, 'remarks') ?></textarea>
-                        </div>
-                    </div>
-
-                    <div class="row g-3 my-3">
-                        <div class="col-md-3">
-                            <div class="amount-box">
-                                <small>Sub Total</small>
-                                <strong id="subTotalText">₹0.00</strong>
-                            </div>
-                        </div>
-
-                        <div class="col-md-3">
-                            <div class="amount-box">
-                                <small>Final Amount</small>
-                                <strong id="finalAmountText">₹0.00</strong>
-                            </div>
-                        </div>
-
-                        <div class="col-md-3">
-                            <div class="amount-box">
-                                <small>Advance</small>
-                                <strong id="advanceText">₹0.00</strong>
-                            </div>
-                        </div>
-
-                        <div class="col-md-3">
-                            <div class="amount-box">
-                                <small>Balance</small>
-                                <strong id="balanceText">₹0.00</strong>
-                            </div>
-                        </div>
-                    </div>
-
-
-                    <div class="sales-order-note mb-3">
-                        <div class="fw-black mb-1">Job Card Creation Details</div>
-                        <div>
-                            Proforma No is treated as the Sales Order Reference.
-                            If job card is created immediately, tracking stages are created based on order type.
-                            Customized jobs go to Designing / Proofing first and only move to Multicolor Offset Printing
-                            after Design Approval.
-                        </div>
-                    </div>
-
-                    <div class="d-flex flex-column flex-md-row gap-2 justify-content-between align-items-md-center">
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" name="create_job_card_now"
-                                id="create_job_card_now" <?= $editData ? '' : 'checked' ?>>
-                            <label class="form-check-label fw-bold" for="create_job_card_now">
-                                Create Job Card immediately after save
-                            </label>
-                        </div>
-
-                        <button type="submit" class="btn btn-primary rounded-pill px-5 fw-bold">
-                            <?= $editData ? 'Update Proforma' : 'Save Proforma' ?>
-                        </button>
-                    </div>
-                </form>
+                
 
                 <div class="card-ui card-pad">
                     <div
                         class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
                         <div>
                             <div class="section-title mb-1">Proforma Bill List</div>
-                            <p class="text-muted-custom mb-0">Create job card directly from confirmed proforma bills.
-                            </p>
+                            <p class="text-muted-custom mb-0">Created proforma bills are listed here. View opens full details in a new tab.</p>
                         </div>
 
                         <input type="search" id="tableSearch" class="form-control" style="max-width:340px"
@@ -2564,7 +2143,8 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                                 <?php endif; ?>
 
                                 <?php foreach ($rows as $row): ?>
-                                <tr>
+                                <?php $isCreatedRow = ($createdProformaNoFilter !== '' && (string)($row['proforma_no'] ?? '') === $createdProformaNoFilter); ?>
+                                <tr class="<?= $isCreatedRow ? 'recent-created-row' : '' ?>">
                                     <td><strong><?= e($row['proforma_no']) ?></strong></td>
                                     <td><?= e($row['customer_name']) ?><small
                                             class="d-block text-muted-custom"><?= e($row['mobile']) ?></small></td>
@@ -2583,29 +2163,9 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                                     </td>
                                     <td class="text-end">
                                         <div class="action-buttons">
-                                            <button title="View" aria-label="View" type="button"
-                                                class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-proforma btn-action-icon"
-                                                data-bs-toggle="modal" data-bs-target="#viewModal"
-                                                data-proforma-no="<?= e($row['proforma_no']) ?>"
-                                                data-customer-name="<?= e($row['customer_name']) ?>"
-                                                data-mobile="<?= e($row['mobile']) ?>"
-                                                data-function-name="<?= e($row['function_name'] ?? '-') ?>"
-                                                data-order-type="<?= e(ucfirst((string)$row['order_type'])) ?>"
-                                                data-total-qty="<?= e(number_format((float)$row['total_qty'], 2)) ?>"
-                                                data-sub-total="₹<?= e(number_format((float)$row['sub_total'], 2)) ?>"
-                                                data-discount-amount="₹<?= e(number_format((float)$row['discount_amount'], 2)) ?>"
-                                                data-final-amount="₹<?= e(number_format((float)$row['final_amount'], 2)) ?>"
-                                                data-advance-amount="₹<?= e(number_format((float)$row['advance_amount'], 2)) ?>"
-                                                data-balance-amount="₹<?= e(number_format((float)$row['balance_amount'], 2)) ?>"
-                                                data-delivery-date="<?= !empty($row['delivery_date']) ? e(date('d-m-Y', strtotime($row['delivery_date']))) : '-' ?>"
-                                                data-status-name="<?= e($row['status_name'] ?? '-') ?>"
-                                                data-job-card-no="<?= e($row['job_card_no'] ?? '-') ?>"
-                                                data-remarks="<?= e($row['remarks'] ?? '') ?>"><i data-lucide="eye"></i></button>
-
-                                            <a title="Edit" aria-label="Edit" href="proforma_bills.php?edit=<?= e($row['id']) ?>"
-                                                class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon"><i data-lucide="pencil"></i></a>
-
-                                            <?= pb_whatsapp_button($row) ?>
+                                            <a title="View" aria-label="View" href="proforma_bill_view.php?id=<?= e($row['id']) ?>" target="_blank"
+                                                class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon"><i data-lucide="eye"></i></a>
+<?= pb_whatsapp_button($row) ?>
 
                                             <?php if (empty($row['job_card_no'])): ?>
                                             <form method="post" action="api/proforma_bills.php" class="js-api-job-card-form" onsubmit="return false;">
@@ -2649,29 +2209,9 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
                             </div>
 
                             <div class="mobile-card-actions proforma-mobile-actions mt-3 d-flex gap-2 flex-wrap">
-                                <button title="View" aria-label="View" type="button"
-                                    class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-proforma btn-action-icon"
-                                    data-bs-toggle="modal" data-bs-target="#viewModal"
-                                    data-proforma-no="<?= e($row['proforma_no']) ?>"
-                                    data-customer-name="<?= e($row['customer_name']) ?>"
-                                    data-mobile="<?= e($row['mobile']) ?>"
-                                    data-function-name="<?= e($row['function_name'] ?? '-') ?>"
-                                    data-order-type="<?= e(ucfirst((string)$row['order_type'])) ?>"
-                                    data-total-qty="<?= e(number_format((float)$row['total_qty'], 2)) ?>"
-                                    data-sub-total="₹<?= e(number_format((float)$row['sub_total'], 2)) ?>"
-                                    data-discount-amount="₹<?= e(number_format((float)$row['discount_amount'], 2)) ?>"
-                                    data-final-amount="₹<?= e(number_format((float)$row['final_amount'], 2)) ?>"
-                                    data-advance-amount="₹<?= e(number_format((float)$row['advance_amount'], 2)) ?>"
-                                    data-balance-amount="₹<?= e(number_format((float)$row['balance_amount'], 2)) ?>"
-                                    data-delivery-date="<?= !empty($row['delivery_date']) ? e(date('d-m-Y', strtotime($row['delivery_date']))) : '-' ?>"
-                                    data-status-name="<?= e($row['status_name'] ?? '-') ?>"
-                                    data-job-card-no="<?= e($row['job_card_no'] ?? '-') ?>"
-                                    data-remarks="<?= e($row['remarks'] ?? '') ?>"><i data-lucide="eye"></i></button>
-
-                                <a title="Edit" aria-label="Edit" href="proforma_bills.php?edit=<?= e($row['id']) ?>"
-                                    class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon"><i data-lucide="pencil"></i></a>
-
-                                <?= pb_whatsapp_button($row) ?>
+                                <a title="View" aria-label="View" href="proforma_bill_view.php?id=<?= e($row['id']) ?>" target="_blank"
+                                                class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon"><i data-lucide="eye"></i></a>
+<?= pb_whatsapp_button($row) ?>
                                 <?php if (empty($row['job_card_no'])): ?>
                                 <form method="post" action="api/proforma_bills.php" class="js-api-job-card-form" onsubmit="return false;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
@@ -3527,30 +3067,6 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
             }
         });
 
-
-
-        document.getElementById('proformaForm')?.addEventListener('submit', function(event) {
-            event.preventDefault();
-
-            const form = this;
-            const formData = new FormData(form);
-
-            fetch('api/proforma_bills.php', {
-                method: 'POST',
-                body: formData,
-                credentials: 'same-origin'
-            })
-            .then(response => response.json())
-            .then(data => {
-                showToast(data.message || (data.status ? 'Saved successfully.' : 'Save failed.'), data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
-
-                if (data.status) {
-                    setTimeout(() => window.location.href = 'proforma_bills.php', 900);
-                }
-            })
-            .catch(() => showToast('API request failed.', 'danger', 'Failed'));
-        });
-
         document.querySelectorAll('.js-api-job-card-form').forEach(function(form) {
             form.addEventListener('submit', function(event) {
                 event.preventDefault();
@@ -3621,15 +3137,6 @@ function pb_form_value(?array $data, string $key, string $default = ''): string
         });
 
         initPageSelect2(document);
-
-        if (document.querySelector('[name="quotation_id"]')?.value) {
-            setTimeout(applyQuotationReference, 100);
-        }
-
-        toggleFunctionFields();
-        toggleOrderFields();
-        forceCorrectOrderTypeFields();
-        calculate();
 
         if (window.lucide && typeof window.lucide.createIcons === 'function') {
             window.lucide.createIcons();

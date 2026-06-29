@@ -1428,7 +1428,7 @@ function apiProformaRow(mysqli $conn, int $id): ?array
             pbi.screening_type
         FROM proforma_bills pb
         LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
-        LEFT JOIN job_cards jc ON jc.proforma_bill_id = pb.id
+        LEFT JOIN (SELECT proforma_bill_id, MAX(job_card_no) AS job_card_no FROM job_cards GROUP BY proforma_bill_id) jc ON jc.proforma_bill_id = pb.id
         LEFT JOIN function_types ft ON ft.id = pb.function_type_id
         LEFT JOIN proforma_bill_items pbi ON pbi.proforma_bill_id = pb.id
         WHERE pb.id = ?
@@ -1458,7 +1458,7 @@ function apiProformaList(mysqli $conn): array
             ft.function_name
         FROM proforma_bills pb
         LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
-        LEFT JOIN job_cards jc ON jc.proforma_bill_id = pb.id
+        LEFT JOIN (SELECT proforma_bill_id, MAX(job_card_no) AS job_card_no FROM job_cards GROUP BY proforma_bill_id) jc ON jc.proforma_bill_id = pb.id
         LEFT JOIN function_types ft ON ft.id = pb.function_type_id
         ORDER BY pb.id DESC
         LIMIT 300

@@ -28,11 +28,11 @@ function jc_status_id(mysqli $conn): ?int { try{ if(!jc_table_exists($conn,'job_
 function jc_first_step(mysqli $conn,string $orderType): ?int { try{ if(!jc_table_exists($conn,'workflow_steps')||!jc_col($conn,'workflow_steps','order_type')) return null; $pref=$orderType==='customized'?'designing':'proofing'; $st=$conn->prepare("SELECT id FROM workflow_steps WHERE order_type=? AND step_key=? AND is_active=1 ORDER BY sort_order ASC LIMIT 1"); $st->bind_param('ss',$orderType,$pref); $st->execute(); $r=$st->get_result()->fetch_assoc(); $st->close(); if($r) return (int)$r['id']; $st=$conn->prepare("SELECT id FROM workflow_steps WHERE order_type=? AND is_active=1 ORDER BY sort_order ASC LIMIT 1"); $st->bind_param('s',$orderType); $st->execute(); $r=$st->get_result()->fetch_assoc(); $st->close(); return $r?(int)$r['id']:null; } catch(Throwable $e){ return null; } }
 function jc_product_name(mysqli $conn, ?int $id, string $manual): string { if(trim($manual)!=='') return trim($manual); if(!$id||!jc_table_exists($conn,'products')) return 'Cards'; try{ $st=$conn->prepare("SELECT product_name FROM products WHERE id=? LIMIT 1"); $st->bind_param('i',$id); $st->execute(); $r=$st->get_result()->fetch_assoc(); $st->close(); return $r?(string)$r['product_name']:'Cards'; }catch(Throwable $e){ return 'Cards'; } }
 
-$products=[]; $printingTypes=[]; $printingSubTypes=[]; $statuses=[]; $workflowSteps=[]; $proformas=[]; $multiColorId=jc_multicolor_id($conn); $nextJobNo=jc_next_no($conn);
+$products=[]; $printingTypes=[]; $printingSubTypes=[]; $statuses=[]; $workflowSteps=[]; $proformas=[]; $delayReasons=[]; $multiColorId=jc_multicolor_id($conn); $nextJobNo=jc_next_no($conn);
 try{ if(jc_table_exists($conn,'products')){ $res=$conn->query("SELECT id,product_name,default_price FROM products WHERE is_active=1 ORDER BY product_name ASC"); while($r=$res->fetch_assoc()) $products[]=$r; $res->free(); } }catch(Throwable $e){}
 try{ if(jc_table_exists($conn,'printing_types')){ $res=$conn->query("SELECT id,printing_name,COALESCE(printing_key,'') printing_key,LOWER(REPLACE(REPLACE(COALESCE(printing_key,printing_name),' ','_'),'-','_')) normalized_key FROM printing_types WHERE is_active=1 ORDER BY sort_order ASC,printing_name ASC"); while($r=$res->fetch_assoc()) $printingTypes[]=$r; $res->free(); } }catch(Throwable $e){}
 try{ if(jc_table_exists($conn,'printing_sub_types')){ $res=$conn->query("SELECT id,printing_type_id,sub_type_name FROM printing_sub_types WHERE is_active=1 ORDER BY sort_order ASC,sub_type_name ASC"); while($r=$res->fetch_assoc()) $printingSubTypes[]=$r; $res->free(); } }catch(Throwable $e){}
-try{ if(jc_table_exists($conn,'job_card_statuses')){ $name=jc_col($conn,'job_card_statuses','status_name')?'status_name':'name'; $res=$conn->query("SELECT id,{$name} status_name FROM job_card_statuses ORDER BY id ASC"); while($r=$res->fetch_assoc()) $statuses[]=$r; $res->free(); } }catch(Throwable $e){}
+try{ if(jc_table_exists($conn,'job_card_statuses')){ $name=jc_col($conn,'job_card_statuses','status_name')?'status_name':'name'; $res=$conn->query("SELECT id,{$name} status_name FROM job_card_statuses ORDER BY id ASC"); while($r=$res->fetch_assoc()) $statuses[]=$r; $res->free(); } }catch(Throwable $e){}try{ if(jc_table_exists($conn,'delay_reasons')){ $res=$conn->query("SELECT id,reason_name FROM delay_reasons WHERE is_active=1 ORDER BY id ASC"); while($r=$res->fetch_assoc()) $delayReasons[]=$r; $res->free(); } }catch(Throwable $e){}
 try{ if(jc_table_exists($conn,'workflow_steps')){ $res=$conn->query("SELECT id,step_name,step_key,order_type FROM workflow_steps WHERE is_active=1 ORDER BY order_type ASC,sort_order ASC"); while($r=$res->fetch_assoc()) $workflowSteps[]=$r; $res->free(); } }catch(Throwable $e){}
 try{
     if(jc_table_exists($conn,'proforma_bills')){
@@ -290,6 +290,8 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
         color: var(--text-main)
     }
 
+    .delay-box{border:1px dashed var(--danger-color,#dc2626);border-radius:16px;padding:14px;background:color-mix(in srgb,var(--danger-color,#dc2626) 7%,var(--card-bg));}.delay-box small{font-weight:800;color:var(--danger-color,#dc2626)}
+
     .requirement-box strong {
         display: block;
         font-size: 14px;
@@ -421,8 +423,8 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
         white-space: nowrap;
     }
 
-    #dataTable td.text-end > button,
-    #dataTable td.text-end > form {
+    #dataTable td.text-end>button,
+    #dataTable td.text-end>form {
         margin-left: 6px;
     }
 
@@ -437,7 +439,7 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
             border-radius: 20px !important;
         }
 
-        .mobile-card > .d-flex.justify-content-between {
+        .mobile-card>.d-flex.justify-content-between {
             align-items: flex-start !important;
             gap: 12px !important;
         }
@@ -479,7 +481,6 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
             height: 18px !important;
         }
     }
-
     </style>
 </head>
 
@@ -583,11 +584,39 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
                                     <td><span
                                             class="status-pill <?= e($rowStatus) ?>"><?= e($row['display_status']??'Active') ?></span>
                                     </td>
-                                    <td class="text-end"><button type="button" title="View" aria-label="View" class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-record btn-action-icon" data-bs-toggle="modal" data-bs-target="#viewModal" data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2.25 12s3.5-6.75 9.75-6.75S21.75 12 21.75 12 18.25 18.75 12 18.75 2.25 12 2.25 12Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.75" fill="none" stroke="currentColor" stroke-width="2"/></svg></button><button type="button" title="Edit" aria-label="Edit" class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon" data-bs-toggle="modal" data-bs-target="#recordModal" data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 20h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button><?php if($rowStatus!=='inactive'): ?>
-                                        <form method="post" action="api/job_cards.php" class="d-inline js-api-disable-form" onsubmit="return false;">
+                                    <td class="text-end"><a title="View" aria-label="View" href="job_card_view.php?id=<?= e($row['id']) ?>" target="_blank"
+                                            class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon"><svg
+                                                viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                                <path
+                                                    d="M2.25 12s3.5-6.75 9.75-6.75S21.75 12 21.75 12 18.25 18.75 12 18.75 2.25 12 2.25 12Z"
+                                                    fill="none" stroke="currentColor" stroke-width="2"
+                                                    stroke-linecap="round" stroke-linejoin="round" />
+                                                <circle cx="12" cy="12" r="2.75" fill="none" stroke="currentColor"
+                                                    stroke-width="2" />
+                                            </svg></a><button type="button" title="Edit" aria-label="Edit"
+                                            class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
+                                            data-bs-toggle="modal" data-bs-target="#recordModal"
+                                            data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'><svg
+                                                viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                                <path d="M12 20h9" fill="none" stroke="currentColor" stroke-width="2"
+                                                    stroke-linecap="round" />
+                                                <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z"
+                                                    fill="none" stroke="currentColor" stroke-width="2"
+                                                    stroke-linecap="round" stroke-linejoin="round" />
+                                            </svg></button><?php if($rowStatus!=='inactive'): ?>
+                                        <form method="post" action="api/job_cards.php"
+                                            class="d-inline js-api-disable-form" onsubmit="return false;">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>"><input
                                                 type="hidden" name="action" value="delete_record"><input type="hidden"
-                                                name="id" value="<?= e($row['id']) ?>"><button type="submit" title="Disable" aria-label="Disable" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 9l6 6M15 9l-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+                                                name="id" value="<?= e($row['id']) ?>"><button type="submit"
+                                                title="Disable" aria-label="Disable"
+                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><svg
+                                                    viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                                    <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor"
+                                                        stroke-width="2" />
+                                                    <path d="M9 9l6 6M15 9l-6 6" fill="none" stroke="currentColor"
+                                                        stroke-width="2" stroke-linecap="round" />
+                                                </svg></button>
                                         </form><?php endif; ?>
                                     </td>
                                 </tr><?php endforeach; ?>
@@ -613,7 +642,22 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
                                 </div><span
                                     class="status-pill <?= e($rowStatus) ?>"><?= e($row['display_status']??'Active') ?></span>
                             </div>
-                            <div class="mobile-card-actions"><button type="button" title="Edit" aria-label="Edit" class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon" data-bs-toggle="modal" data-bs-target="#recordModal" data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 20h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                            <div class="mobile-card-actions"><a title="View" aria-label="View" href="job_card_view.php?id=<?= e($row['id']) ?>" target="_blank"
+                                    class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon"><svg
+                                        viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                        <path d="M2.25 12s3.5-6.75 9.75-6.75S21.75 12 21.75 12 18.25 18.75 12 18.75 2.25 12 2.25 12Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                                        <circle cx="12" cy="12" r="2.75" fill="none" stroke="currentColor" stroke-width="2" />
+                                    </svg></a><button type="button" title="Edit" aria-label="Edit"
+                                    class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
+                                    data-bs-toggle="modal" data-bs-target="#recordModal"
+                                    data-row='<?= e(json_encode($row, JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_HEX_AMP)) ?>'><svg
+                                        viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                        <path d="M12 20h9" fill="none" stroke="currentColor" stroke-width="2"
+                                            stroke-linecap="round" />
+                                        <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" fill="none"
+                                            stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                            stroke-linejoin="round" />
+                                    </svg></button>
                             </div>
                         </div><?php endforeach; ?>
                     </div>
@@ -624,11 +668,11 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
     </div>
     <div class="modal fade" id="recordModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-xl">
-            <form method="post" action="api/job_cards.php" class="modal-content" id="jobCardForm"><input type="hidden" name="csrf_token"
-                    value="<?= e($csrfToken) ?>"><input type="hidden" name="action" value="save_record"><input
-                    type="hidden" name="id" id="id"><input type="hidden" name="quotation_id" id="quotation_id"><input
-                    type="hidden" name="customer_id" id="customer_id"><input type="hidden" name="function_type_id"
-                    id="function_type_id">
+            <form method="post" action="api/job_cards.php" class="modal-content" id="jobCardForm"><input type="hidden"
+                    name="csrf_token" value="<?= e($csrfToken) ?>"><input type="hidden" name="action"
+                    value="save_record"><input type="hidden" name="id" id="id"><input type="hidden" name="quotation_id"
+                    id="quotation_id"><input type="hidden" name="customer_id" id="customer_id"><input type="hidden"
+                    name="function_type_id" id="function_type_id">
                 <div class="modal-header">
                     <div>
                         <h5 class="modal-title fw-bold" id="recordModalTitle">Create Job Card</h5><small
@@ -792,6 +836,19 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
                                     value="<?= e($st['id']) ?>"><?= e($st['status_name']) ?></option>
                                 <?php endforeach; ?>
                             </select></div>
+                        <div class="col-12">
+                            <div class="delay-box">
+                                <label class="form-label fw-bold">Delay Reason</label>
+                                <select name="delay_reason_id" id="delay_reason_id" class="form-select select2-autotype mb-2">
+                                    <option value="">Select delay reason if this job/status is delayed</option>
+                                    <?php foreach($delayReasons as $reason): ?>
+                                    <option value="<?= e($reason['id']) ?>"><?= e($reason['reason_name']) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <textarea name="delay_remarks" id="delay_remarks" rows="2" class="form-control" placeholder="Enter delay remarks if the selected stage/status is delayed"></textarea>
+                                <small>This is required when the selected job status/stage is delayed.</small>
+                            </div>
+                        </div>
                         <div class="col-12"><label class="form-label fw-bold">Remarks / Notes</label><textarea
                                 name="notes" id="notes" rows="3" class="form-control"></textarea></div>
                     </div>
@@ -1232,19 +1289,21 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
             const formData = new FormData(form);
 
             fetch('api/job_cards.php', {
-                method: 'POST',
-                body: formData,
-                credentials: 'same-origin'
-            })
-            .then(response => response.json())
-            .then(data => {
-                showToast(data.message || (data.status ? 'Job card saved successfully.' : 'Job card save failed.'), data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'same-origin'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    showToast(data.message || (data.status ? 'Job card saved successfully.' :
+                            'Job card save failed.'), data.status ? 'success' : 'danger', data
+                        .status ? 'Success' : 'Failed');
 
-                if (data.status) {
-                    setTimeout(() => window.location.reload(), 900);
-                }
-            })
-            .catch(() => showToast('Request failed. Please try again.', 'danger', 'Failed'));
+                    if (data.status) {
+                        setTimeout(() => window.location.reload(), 900);
+                    }
+                })
+                .catch(() => showToast('Request failed. Please try again.', 'danger', 'Failed'));
         });
 
         document.querySelectorAll('.js-api-disable-form').forEach(function(disableForm) {
@@ -1259,19 +1318,23 @@ $totalRows=count($rows); $activeRows=0; $customizedRows=0; $readymadeRows=0; for
                 const formData = new FormData(disableForm);
 
                 fetch('api/job_cards.php', {
-                    method: 'POST',
-                    body: formData,
-                    credentials: 'same-origin'
-                })
-                .then(response => response.json())
-                .then(data => {
-                    showToast(data.message || (data.status ? 'Job card disabled successfully.' : 'Job card disable failed.'), data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+                        method: 'POST',
+                        body: formData,
+                        credentials: 'same-origin'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        showToast(data.message || (data.status ?
+                                'Job card disabled successfully.' :
+                                'Job card disable failed.'), data.status ? 'success' :
+                            'danger', data.status ? 'Success' : 'Failed');
 
-                    if (data.status) {
-                        setTimeout(() => window.location.reload(), 900);
-                    }
-                })
-                .catch(() => showToast('Request failed. Please try again.', 'danger', 'Failed'));
+                        if (data.status) {
+                            setTimeout(() => window.location.reload(), 900);
+                        }
+                    })
+                    .catch(() => showToast('Request failed. Please try again.', 'danger',
+                        'Failed'));
             });
         });
 
