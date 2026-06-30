@@ -778,6 +778,22 @@ function apiQuotationList(mysqli $conn): array
 try {
     $action = (string)($_REQUEST['action'] ?? '');
 
+    $permissionMap = [
+        'list' => 'can_view',
+        'view' => 'can_view',
+        'create' => 'can_create',
+        'update' => 'can_edit',
+        'save_record' => ((int)($_POST['id'] ?? 0) > 0 ? 'can_edit' : 'can_create'),
+        'delete' => 'can_delete',
+        'cancel_record' => 'can_delete',
+        'log_manual_whatsapp' => 'can_send_whatsapp',
+        'send_whatsapp_api' => 'can_send_whatsapp',
+    ];
+
+    if (isset($permissionMap[$action]) && !permission_allowed($conn, $permissionMap[$action], 'quotations.php')) {
+        apiResponse(false, 'Permission denied.');
+    }
+
     if ($action === '') {
         apiResponse(false, 'Action is required.');
     }

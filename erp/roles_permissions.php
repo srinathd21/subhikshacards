@@ -486,18 +486,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             $items = rp_get_sidebar_items($conn);
-            $sidebarPost = $_POST['sidebar'] ?? [];
-            $permissionPost = $_POST['perm'] ?? [];
+
+            /*
+             | IMPORTANT FIX
+             | Old page had both desktop and mobile permission inputs with the same names.
+             | When many modules exist, PHP max_input_vars can truncate POST data.
+             | Now the visible permission UI is converted to one JSON field before submit.
+             */
+            $permissionPayload = [];
+            $permissionsJson = trim((string)($_POST['permissions_json'] ?? ''));
+
+            if ($permissionsJson !== '') {
+                $decoded = json_decode($permissionsJson, true);
+                if (!is_array($decoded)) {
+                    throw new RuntimeException('Invalid permission payload. Please refresh and save again.');
+                }
+
+                $permissionPayload['sidebar'] = is_array($decoded['sidebar'] ?? null) ? $decoded['sidebar'] : [];
+                $permissionPayload['perm'] = is_array($decoded['perm'] ?? null) ? $decoded['perm'] : [];
+            } else {
+                // Fallback for old browsers / JS disabled.
+                $permissionPayload['sidebar'] = is_array($_POST['sidebar'] ?? null) ? $_POST['sidebar'] : [];
+                $permissionPayload['perm'] = is_array($_POST['perm'] ?? null) ? $_POST['perm'] : [];
+            }
+
+            $sidebarPost = $permissionPayload['sidebar'];
+            $permissionPost = $permissionPayload['perm'];
+
+            $conn->begin_transaction();
 
             foreach ($items as $item) {
                 $sidebarItemId = (int)$item['id'];
-                $canShow = isset($sidebarPost[$sidebarItemId]) ? 1 : 0;
+                $itemKey = (string)$sidebarItemId;
+
+                $canShow = !empty($sidebarPost[$itemKey]) || !empty($sidebarPost[$sidebarItemId]) ? 1 : 0;
 
                 rp_upsert_sidebar_permission($conn, $roleId, $sidebarItemId, $canShow);
 
+                $postedValues = [];
+                if (isset($permissionPost[$itemKey]) && is_array($permissionPost[$itemKey])) {
+                    $postedValues = $permissionPost[$itemKey];
+                } elseif (isset($permissionPost[$sidebarItemId]) && is_array($permissionPost[$sidebarItemId])) {
+                    $postedValues = $permissionPost[$sidebarItemId];
+                }
+
                 $values = [];
                 foreach ($permissionColumns as $column => $label) {
-                    $values[$column] = isset($permissionPost[$sidebarItemId][$column]) ? 1 : 0;
+                    $values[$column] = !empty($postedValues[$column]) ? 1 : 0;
                 }
 
                 if ($canShow === 1) {
@@ -507,9 +542,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 rp_upsert_page_permission($conn, $roleId, $sidebarItemId, $values, $permissionColumns);
             }
 
+            $conn->commit();
+
             rp_redirect('msg=permissions_saved&role_id=' . $roleId);
         }
     } catch (Throwable $e) {
+        if (isset($conn) && $conn instanceof mysqli) {
+            try { $conn->rollback(); } catch (Throwable $ignore) {}
+        }
         $message = $e->getMessage();
         $messageType = 'danger';
     }
@@ -872,11 +912,190 @@ $totalPages = count($items);
             width: 100%;
         }
     }
+
+
+    /* =========================================================
+       NEAT UI POLISH + TOAST MESSAGE
+       ========================================================= */
+
+    .roles-page .roles-head {
+        position: relative;
+        overflow: hidden;
+        background:
+            radial-gradient(circle at top right, color-mix(in srgb, var(--brand-1) 18%, transparent), transparent 34%),
+            linear-gradient(135deg, color-mix(in srgb, var(--card-bg) 92%, var(--brand-1)), var(--card-bg));
+        border: 1px solid color-mix(in srgb, var(--brand-1) 16%, var(--border-soft));
+    }
+
+    .roles-page .roles-head::after {
+        content: "";
+        position: absolute;
+        width: 210px;
+        height: 210px;
+        right: -70px;
+        top: -90px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--brand-1) 10%, transparent);
+        pointer-events: none;
+    }
+
+    .rp-card,
+    .rp-stat-card {
+        border: 1px solid color-mix(in srgb, var(--brand-1) 10%, var(--border-soft));
+    }
+
+    .permission-table tbody tr {
+        transition: background .16s ease, box-shadow .16s ease;
+    }
+
+    .permission-table tbody tr:hover {
+        background: color-mix(in srgb, var(--brand-1) 5%, var(--card-bg));
+    }
+
+    .permission-table tbody tr:hover td:first-child {
+        background: color-mix(in srgb, var(--brand-1) 5%, var(--card-bg));
+    }
+
+    .rp-check {
+        accent-color: var(--brand-1);
+        transform: scale(1.05);
+    }
+
+    .rp-route {
+        max-width: 320px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .rp-muted-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--border-soft);
+        background: color-mix(in srgb, var(--card-bg) 92%, var(--body-bg));
+        border-radius: 999px;
+        padding: 7px 12px;
+        font-size: 12px;
+        font-weight: 900;
+        color: var(--text-muted);
+    }
+
+    .toast-wrap {
+        position: fixed;
+        top: 22px;
+        right: 22px;
+        z-index: 99999;
+        display: grid;
+        gap: 10px;
+        width: min(420px, calc(100vw - 28px));
+    }
+
+    .custom-toast {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        color: #fff;
+        border-radius: 18px;
+        padding: 15px 16px;
+        box-shadow: 0 20px 45px rgba(15, 23, 42, .22);
+        animation: toastSlideIn .24s ease-out;
+        overflow: hidden;
+        position: relative;
+    }
+
+    .custom-toast::after {
+        content: "";
+        position: absolute;
+        inset: auto 0 0 0;
+        height: 3px;
+        background: rgba(255, 255, 255, .35);
+    }
+
+    .custom-toast.success {
+        background: linear-gradient(135deg, #16a34a, #22c55e);
+    }
+
+    .custom-toast.error,
+    .custom-toast.danger {
+        background: linear-gradient(135deg, #dc2626, #ef4444);
+    }
+
+    .custom-toast.warning {
+        background: linear-gradient(135deg, #f59e0b, #f97316);
+    }
+
+    .custom-toast.info {
+        background: linear-gradient(135deg, #2563eb, #0ea5e9);
+    }
+
+    .toast-icon {
+        width: 34px;
+        height: 34px;
+        border-radius: 12px;
+        display: grid;
+        place-items: center;
+        background: rgba(255, 255, 255, .18);
+        flex: 0 0 auto;
+    }
+
+    .toast-title {
+        font-weight: 900;
+        line-height: 1.2;
+    }
+
+    .toast-message {
+        font-size: 13px;
+        font-weight: 700;
+        opacity: .96;
+        margin-top: 2px;
+    }
+
+    .toast-close {
+        margin-left: auto;
+        background: transparent;
+        border: 0;
+        color: #fff;
+        font-size: 20px;
+        line-height: 1;
+        cursor: pointer;
+        opacity: .9;
+    }
+
+    .toast-close:hover {
+        opacity: 1;
+    }
+
+    @keyframes toastSlideIn {
+        from {
+            opacity: 0;
+            transform: translateY(-8px) translateX(12px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0) translateX(0);
+        }
+    }
+
+    @media (max-width: 767.98px) {
+        .toast-wrap {
+            top: 12px;
+            right: 14px;
+            left: 14px;
+            width: auto;
+        }
+
+        .permission-table th:first-child,
+        .permission-table td:first-child {
+            position: static;
+        }
+    }
     </style>
 </head>
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
     <div id="mobileOverlay"></div>
+    <div class="toast-wrap" id="toastWrap"></div>
 
     <div class="app-shell">
         <?php include __DIR__ . '/includes/sidebar.php'; ?>
@@ -907,11 +1126,7 @@ $totalPages = count($items);
                     </div>
                 </div>
 
-                <?php if ($message !== ''): ?>
-                <div class="alert alert-<?= e($messageType) ?> rounded-4 fw-bold">
-                    <?= e($message) ?>
-                </div>
-                <?php endif; ?>
+                <?php /* Toast message rendered by JavaScript below */ ?>
 
                 <div class="row g-3 mb-3">
                     <div class="col-12 col-md-4">
@@ -1010,8 +1225,7 @@ $totalPages = count($items);
                                         </button>
 
                                         <?php if (strtolower((string)$role['role_key']) !== 'admin' && (int)$role['is_active'] === 1): ?>
-                                        <form method="post" class="d-inline"
-                                            onsubmit="return confirm('Disable this role?')">
+                                        <form method="post" class="d-inline js-confirm-disable">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                             <input type="hidden" name="action" value="disable_role">
                                             <input type="hidden" name="role_id" value="<?= e($role['id']) ?>">
@@ -1064,8 +1278,7 @@ $totalPages = count($items);
                                 </button>
 
                                 <?php if (strtolower((string)$role['role_key']) !== 'admin' && (int)$role['is_active'] === 1): ?>
-                                <form method="post" class="d-inline flex-fill"
-                                    onsubmit="return confirm('Disable this role?')">
+                                <form method="post" class="d-inline flex-fill js-confirm-disable">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="disable_role">
                                     <input type="hidden" name="role_id" value="<?= e($role['id']) ?>">
@@ -1086,9 +1299,15 @@ $totalPages = count($items);
                         class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
                         <div>
                             <h2 class="rp-section-title mb-1">Permission Matrix</h2>
-                            <p class="text-muted-custom mb-0">
+                            <p class="text-muted-custom mb-2">
                                 Select a role and control sidebar visibility plus page actions.
                             </p>
+                            <?php if ($selectedRole): ?>
+                            <span class="rp-muted-chip">
+                                <i data-lucide="shield-check" style="width:14px"></i>
+                                Current Role: <?= e($selectedRole['role_name']) ?>
+                            </span>
+                            <?php endif; ?>
                         </div>
 
                         <form method="get" class="d-flex gap-2 align-items-center permission-role-select-wrap">
@@ -1106,10 +1325,11 @@ $totalPages = count($items);
                     <?php if (!$selectedRole): ?>
                     <div class="text-muted-custom">Please create/select a role.</div>
                     <?php else: ?>
-                    <form method="post">
+                    <form method="post" id="permissionForm">
                         <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                         <input type="hidden" name="action" value="save_permissions">
                         <input type="hidden" name="role_id" value="<?= e($selectedRoleId) ?>">
+                        <input type="hidden" name="permissions_json" id="permissions_json" value="">
 
                         <div class="alert alert-info rounded-4">
                             Editing permissions for:
@@ -1134,7 +1354,7 @@ $totalPages = count($items);
                                             $parentPage = $rolePermissions['page'][$parentId] ?? [];
                                             $parentSidebar = isset($rolePermissions['sidebar'][$parentId])
                                                 ? (int)$rolePermissions['sidebar'][$parentId] === 1
-                                                : strtolower((string)$selectedRole['role_key']) === 'admin';
+                                                : false;
                                             ?>
                                     <tr>
                                         <td class="rp-menu-name">
@@ -1153,7 +1373,7 @@ $totalPages = count($items);
                                         <?php
                                                     $checked = isset($parentPage[$column])
                                                         ? (int)$parentPage[$column] === 1
-                                                        : (strtolower((string)$selectedRole['role_key']) === 'admin' || $column === 'can_view');
+                                                        : false;
                                                     ?>
                                         <td class="text-center">
                                             <input class="form-check-input rp-check js-row-permission" type="checkbox"
@@ -1169,7 +1389,7 @@ $totalPages = count($items);
                                                 $childPage = $rolePermissions['page'][$childId] ?? [];
                                                 $childSidebar = isset($rolePermissions['sidebar'][$childId])
                                                     ? (int)$rolePermissions['sidebar'][$childId] === 1
-                                                    : strtolower((string)$selectedRole['role_key']) === 'admin';
+                                                    : false;
                                                 ?>
                                     <tr>
                                         <td class="rp-menu-name rp-child">
@@ -1188,7 +1408,7 @@ $totalPages = count($items);
                                         <?php
                                                         $checked = isset($childPage[$column])
                                                             ? (int)$childPage[$column] === 1
-                                                            : (strtolower((string)$selectedRole['role_key']) === 'admin' || $column === 'can_view');
+                                                            : false;
                                                         ?>
                                         <td class="text-center">
                                             <input class="form-check-input rp-check js-row-permission" type="checkbox"
@@ -1210,7 +1430,7 @@ $totalPages = count($items);
                                     $parentPage = $rolePermissions['page'][$parentId] ?? [];
                                     $parentSidebar = isset($rolePermissions['sidebar'][$parentId])
                                         ? (int)$rolePermissions['sidebar'][$parentId] === 1
-                                        : strtolower((string)$selectedRole['role_key']) === 'admin';
+                                        : false;
                                     ?>
                             <div class="mobile-card-item">
                                 <div class="mobile-card-top">
@@ -1236,7 +1456,7 @@ $totalPages = count($items);
                                     <?php
                                                 $checked = isset($parentPage[$column])
                                                     ? (int)$parentPage[$column] === 1
-                                                    : (strtolower((string)$selectedRole['role_key']) === 'admin' || $column === 'can_view');
+                                                    : false;
                                                 ?>
                                     <label class="mobile-permission-check">
                                         <input class="form-check-input rp-check js-row-permission" type="checkbox"
@@ -1254,7 +1474,7 @@ $totalPages = count($items);
                                         $childPage = $rolePermissions['page'][$childId] ?? [];
                                         $childSidebar = isset($rolePermissions['sidebar'][$childId])
                                             ? (int)$rolePermissions['sidebar'][$childId] === 1
-                                            : strtolower((string)$selectedRole['role_key']) === 'admin';
+                                            : false;
                                         ?>
                             <div class="mobile-card-item">
                                 <div class="mobile-card-top">
@@ -1280,7 +1500,7 @@ $totalPages = count($items);
                                     <?php
                                                     $checked = isset($childPage[$column])
                                                         ? (int)$childPage[$column] === 1
-                                                        : (strtolower((string)$selectedRole['role_key']) === 'admin' || $column === 'can_view');
+                                                        : false;
                                                     ?>
                                     <label class="mobile-permission-check">
                                         <input class="form-check-input rp-check js-row-permission" type="checkbox"
@@ -1358,7 +1578,66 @@ $totalPages = count($items);
     <?php include __DIR__ . '/includes/script.php'; ?>
 
     <script>
+    function showToast(type, message) {
+        const wrap = document.getElementById('toastWrap');
+        if (!wrap || !message) return;
+
+        let finalType = type || 'info';
+        if (finalType === 'danger') finalType = 'error';
+
+        const titleMap = {
+            success: 'Success',
+            error: 'Error',
+            warning: 'Warning',
+            info: 'Info'
+        };
+
+        const iconMap = {
+            success: 'check',
+            error: 'x',
+            warning: 'triangle-alert',
+            info: 'info'
+        };
+
+        const toast = document.createElement('div');
+        toast.className = 'custom-toast ' + finalType;
+        toast.innerHTML = `
+            <div class="toast-icon"><i data-lucide="${iconMap[finalType] || 'info'}"></i></div>
+            <div style="min-width:0">
+                <div class="toast-title">${titleMap[finalType] || 'Message'}</div>
+                <div class="toast-message"></div>
+            </div>
+            <button type="button" class="toast-close" aria-label="Close">&times;</button>
+        `;
+
+        toast.querySelector('.toast-message').textContent = message;
+        wrap.appendChild(toast);
+
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+            window.lucide.createIcons();
+        }
+
+        toast.querySelector('.toast-close').addEventListener('click', function() {
+            toast.remove();
+        });
+
+        setTimeout(function() {
+            if (toast.parentNode) {
+                toast.remove();
+            }
+        }, 4500);
+    }
+
     (function() {
+        const pageToast = {
+            type: <?= json_encode($messageType, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>,
+            message: <?= json_encode($message, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>
+        };
+
+        if (pageToast.message) {
+            showToast(pageToast.type, pageToast.message);
+        }
+
         const roleModalTitle = document.getElementById('roleModalTitle');
         const roleSubmitBtn = document.getElementById('roleSubmitBtn');
         const roleId = document.getElementById('role_id');
@@ -1398,12 +1677,40 @@ $totalPages = count($items);
             });
         });
 
+        document.querySelectorAll('.js-confirm-disable').forEach(function(form) {
+            form.addEventListener('submit', function(event) {
+                if (!confirm('Disable this role?')) {
+                    event.preventDefault();
+                    showToast('warning', 'Role disable cancelled.');
+                }
+            });
+        });
+
+        function rpPermissionScope(element) {
+            return element.closest('tr') || element.closest('.mobile-card-item');
+        }
+
+        function rpVisiblePermissionContainer() {
+            const desktop = document.querySelector('.desktop-permission-table');
+            const mobile = document.querySelector('.mobile-permission-cards');
+
+            if (desktop && window.getComputedStyle(desktop).display !== 'none') {
+                return desktop;
+            }
+
+            if (mobile && window.getComputedStyle(mobile).display !== 'none') {
+                return mobile;
+            }
+
+            return document.getElementById('permissionForm');
+        }
+
         document.querySelectorAll('.js-row-sidebar').forEach(function(checkbox) {
             checkbox.addEventListener('change', function() {
-                const row = checkbox.closest('tr');
-                if (!row) return;
+                const scope = rpPermissionScope(checkbox);
+                if (!scope) return;
 
-                const viewPermission = row.querySelector('input[name*="[can_view]"]');
+                const viewPermission = scope.querySelector('input[name*="[can_view]"]');
 
                 if (checkbox.checked && viewPermission) {
                     viewPermission.checked = true;
@@ -1413,11 +1720,11 @@ $totalPages = count($items);
 
         document.querySelectorAll('.js-row-permission').forEach(function(checkbox) {
             checkbox.addEventListener('change', function() {
-                const row = checkbox.closest('tr');
-                if (!row) return;
+                const scope = rpPermissionScope(checkbox);
+                if (!scope) return;
 
-                const sidebar = row.querySelector('.js-row-sidebar');
-                const viewPermission = row.querySelector('input[name*="[can_view]"]');
+                const sidebar = scope.querySelector('.js-row-sidebar');
+                const viewPermission = scope.querySelector('input[name*="[can_view]"]');
 
                 if (checkbox.checked && sidebar) {
                     sidebar.checked = true;
@@ -1427,6 +1734,66 @@ $totalPages = count($items);
                     viewPermission.checked = true;
                 }
             });
+        });
+
+        document.getElementById('permissionForm')?.addEventListener('submit', function() {
+            const form = this;
+            const visibleContainer = rpVisiblePermissionContainer();
+            const payload = {
+                sidebar: {},
+                perm: {}
+            };
+
+            visibleContainer.querySelectorAll('.js-row-sidebar').forEach(function(input) {
+                const match = (input.name || '').match(/^sidebar\[(\d+)\]$/);
+                if (!match) return;
+
+                const sidebarItemId = match[1];
+                payload.sidebar[sidebarItemId] = input.checked ? 1 : 0;
+
+                if (!payload.perm[sidebarItemId]) {
+                    payload.perm[sidebarItemId] = {};
+                }
+            });
+
+            visibleContainer.querySelectorAll('.js-row-permission').forEach(function(input) {
+                const match = (input.name || '').match(/^perm\[(\d+)\]\[(can_[a-z_]+)\]$/);
+                if (!match) return;
+
+                const sidebarItemId = match[1];
+                const permission = match[2];
+
+                if (!payload.perm[sidebarItemId]) {
+                    payload.perm[sidebarItemId] = {};
+                }
+
+                payload.perm[sidebarItemId][permission] = input.checked ? 1 : 0;
+            });
+
+            Object.keys(payload.sidebar).forEach(function(sidebarItemId) {
+                if (payload.sidebar[sidebarItemId] === 1) {
+                    if (!payload.perm[sidebarItemId]) {
+                        payload.perm[sidebarItemId] = {};
+                    }
+                    payload.perm[sidebarItemId].can_view = 1;
+                }
+            });
+
+            document.getElementById('permissions_json').value = JSON.stringify(payload);
+
+            const submitButton = form.querySelector('button[type="submit"]');
+            if (submitButton) {
+                submitButton.disabled = true;
+                submitButton.innerHTML =
+                    '<span class="spinner-border spinner-border-sm me-2"></span>Saving Permissions...';
+            }
+
+            // Prevent duplicate desktop + mobile checkbox names and max_input_vars truncation.
+            form.querySelectorAll(
+                    'input[type="checkbox"][name^="sidebar["], input[type="checkbox"][name^="perm["]')
+                .forEach(function(input) {
+                    input.disabled = true;
+                });
         });
 
         if (window.lucide && typeof window.lucide.createIcons === 'function') {

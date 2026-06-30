@@ -10,6 +10,7 @@ header('Content-Type: application/json; charset=utf-8');
 require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/auth.php';
 require_permission($conn, 'can_view', 'enquiries.php');
+$currentPage = 'enquiries.php';
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -641,6 +642,13 @@ function apiResponse(bool $status, string $message = '', array $extra = []): voi
     exit;
 }
 
+function apiRequirePagePermission(mysqli $conn, string $permission, string $page): void
+{
+    if (!permission_allowed($conn, $permission, $page)) {
+        apiResponse(false, 'You do not have permission for this action.');
+    }
+}
+
 function apiCsrf(): void
 {
     if (
@@ -739,6 +747,14 @@ try {
     }
 
     if (in_array($action, ['create', 'update', 'save_record'], true)) {
+        $postedIdForPermission = enqInt($_POST['id'] ?? 0);
+
+        if ($action === 'create' || $postedIdForPermission <= 0) {
+            apiRequirePagePermission($conn, 'can_create', $currentPage);
+        } else {
+            apiRequirePagePermission($conn, 'can_edit', $currentPage);
+        }
+
         if (!enqTableExists($conn, 'enquiries')) {
             throw new RuntimeException('enquiries table is missing.');
         }
@@ -908,6 +924,8 @@ try {
     }
 
     if ($action === 'log_manual_whatsapp') {
+        apiRequirePagePermission($conn, 'can_send_whatsapp', $currentPage);
+
         $id = enqInt($_POST['id'] ?? 0);
 
         if ($id <= 0) {
@@ -919,6 +937,8 @@ try {
     }
 
     if ($action === 'send_whatsapp_api') {
+        apiRequirePagePermission($conn, 'can_send_whatsapp', $currentPage);
+
         $id = enqInt($_POST['id'] ?? 0);
 
         if ($id <= 0) {
@@ -944,6 +964,8 @@ try {
     }
 
     if (in_array($action, ['delete', 'close_record'], true)) {
+        apiRequirePagePermission($conn, 'can_delete', $currentPage);
+
         $id = enqInt($_POST['id'] ?? 0);
 
         if ($id <= 0) {

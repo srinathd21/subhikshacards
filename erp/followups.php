@@ -21,6 +21,14 @@ if (empty($_SESSION['followups_csrf'])) {
 }
 
 $csrfToken = $_SESSION['followups_csrf'];
+
+$currentPage = 'followups.php';
+$canView = can_view($conn, $currentPage);
+$canCreate = can_create($conn, $currentPage);
+$canEdit = can_edit($conn, $currentPage);
+$canDelete = can_delete($conn, $currentPage);
+$canUpdate = can_update($conn, $currentPage);
+
 $message = '';
 $messageType = 'success';
 $toastTitle = 'Info';
@@ -732,10 +740,12 @@ $nowLocal = date('Y-m-d\TH:i');
                                 callbacks.</p>
                         </div>
 
+                        <?php if ($canCreate): ?>
                         <button type="button" class="btn btn-primary rounded-pill px-4 fw-bold" id="newRecordBtn"
                             data-bs-toggle="modal" data-bs-target="#recordModal">
                             Add Follow-up
                         </button>
+                        <?php endif; ?>
                     </div>
                 </div>
 
@@ -926,6 +936,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                     data-followup-status="<?= e($row['followup_status'] ?: 'Follow-up') ?>"
                                     data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i data-lucide="eye"></i></button>
 
+                                <?php if ($canEdit): ?>
                                 <button title="Edit" aria-label="Edit" type="button"
                                     class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                     data-bs-toggle="modal" data-bs-target="#recordModal" data-id="<?= e($row['id']) ?>"
@@ -935,7 +946,9 @@ $nowLocal = date('Y-m-d\TH:i');
                                     data-customer-response="<?= e($row['customer_response'] ?? '') ?>"
                                     data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
                                     data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i data-lucide="pencil"></i></button>
+                                <?php endif; ?>
 
+                                <?php if ($canDelete): ?>
                                 <form method="post" action="api/followups.php" class="d-inline js-api-delete-form"
                                     onsubmit="return false;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
@@ -943,6 +956,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                     <input type="hidden" name="id" value="<?= e($row['id']) ?>">
                                     <button title="Delete" aria-label="Delete" type="submit" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i data-lucide="trash-2"></i></button>
                                 </form>
+                                <?php endif; ?>
                             </div>
                         </div>
                         <?php endforeach; ?>
@@ -955,6 +969,7 @@ $nowLocal = date('Y-m-d\TH:i');
         <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
     </div>
 
+    <?php if ($canCreate || $canEdit): ?>
     <div class="modal fade" id="recordModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-lg">
             <form method="post" action="api/followups.php" class="modal-content" id="followupForm">
@@ -1033,6 +1048,7 @@ $nowLocal = date('Y-m-d\TH:i');
             </form>
         </div>
     </div>
+    <?php endif; ?>
 
 
 
@@ -1125,6 +1141,14 @@ $nowLocal = date('Y-m-d\TH:i');
     </div>
 
     <?php include __DIR__ . '/includes/script.php'; ?>
+
+    <script>
+    window.followupsPermissions = {
+        canCreate: <?= $canCreate ? 'true' : 'false' ?>,
+        canEdit: <?= $canEdit ? 'true' : 'false' ?>,
+        canDelete: <?= $canDelete ? 'true' : 'false' ?>
+    };
+    </script>
 
     <script>
     (function() {
