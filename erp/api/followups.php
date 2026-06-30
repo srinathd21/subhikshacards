@@ -136,6 +136,14 @@ function apiCsrf(): void
     }
 }
 
+
+function apiRequireRolePermission(mysqli $conn, string $permission, string $message): void
+{
+    if (!permission_allowed($conn, $permission, 'followups.php')) {
+        apiResponse(false, $message);
+    }
+}
+
 function apiFollowupRow(mysqli $conn, int $id): ?array
 {
     if ($id <= 0 || !fuTableExists($conn, 'enquiry_followups')) {
@@ -214,10 +222,12 @@ try {
     }
 
     if ($action === 'list') {
+        apiRequireRolePermission($conn, 'can_view', 'You do not have permission to view follow-ups.');
         apiResponse(true, 'Follow-ups loaded successfully.', ['data' => apiFollowupList($conn)]);
     }
 
     if ($action === 'view') {
+        apiRequireRolePermission($conn, 'can_view', 'You do not have permission to view follow-ups.');
         $id = fuInt($_REQUEST['id'] ?? 0);
         $row = apiFollowupRow($conn, $id);
 
@@ -238,6 +248,13 @@ try {
         }
 
         $id = fuInt($_POST['id'] ?? 0);
+
+        if ($id > 0) {
+            apiRequireRolePermission($conn, 'can_edit', 'You do not have permission to edit follow-ups.');
+        } else {
+            apiRequireRolePermission($conn, 'can_create', 'You do not have permission to create follow-ups.');
+        }
+
         $enquiryId = fuInt($_POST['enquiry_id'] ?? 0);
         $followupAt = fuDateTimeValue(fuPost('followup_at'));
         $callRemarks = fuPost('call_remarks');
@@ -380,6 +397,7 @@ try {
     }
 
     if (in_array($action, ['delete', 'delete_record'], true)) {
+        apiRequireRolePermission($conn, 'can_delete', 'You do not have permission to delete follow-ups.');
         $id = fuInt($_POST['id'] ?? 0);
 
         if ($id <= 0) {

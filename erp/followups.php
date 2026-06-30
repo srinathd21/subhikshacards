@@ -873,6 +873,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                             data-followup-status="<?= e($row['followup_status'] ?: 'Follow-up') ?>"
                                             data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i data-lucide="eye"></i></button>
 
+                                        <?php if ($canEdit): ?>
                                         <button title="Edit" aria-label="Edit" type="button"
                                             class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                             data-bs-toggle="modal" data-bs-target="#recordModal"
@@ -883,7 +884,9 @@ $nowLocal = date('Y-m-d\TH:i');
                                             data-customer-response="<?= e($row['customer_response'] ?? '') ?>"
                                             data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
                                             data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i data-lucide="pencil"></i></button>
+                                        <?php endif; ?>
 
+                                        <?php if ($canDelete): ?>
                                         <form method="post" action="api/followups.php"
                                             class="d-inline js-api-delete-form" onsubmit="return false;">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
@@ -892,6 +895,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                             <button title="Delete" aria-label="Delete" type="submit"
                                                 class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i data-lucide="trash-2"></i></button>
                                         </form>
+                                        <?php endif; ?>
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
@@ -1302,6 +1306,17 @@ $nowLocal = date('Y-m-d\TH:i');
 
             const form = this;
             const formData = new FormData(form);
+            const recordId = String(formData.get('id') || '').trim();
+
+            if (recordId === '' && !window.followupsPermissions.canCreate) {
+                showToast('You do not have permission to create follow-ups.', 'danger', 'Access Denied');
+                return;
+            }
+
+            if (recordId !== '' && !window.followupsPermissions.canEdit) {
+                showToast('You do not have permission to edit follow-ups.', 'danger', 'Access Denied');
+                return;
+            }
 
             fetch('api/followups.php', {
                     method: 'POST',
@@ -1326,6 +1341,11 @@ $nowLocal = date('Y-m-d\TH:i');
             });
 
             form.querySelector('button[type="submit"]')?.addEventListener('click', function() {
+                if (!window.followupsPermissions.canDelete) {
+                    showToast('You do not have permission to delete follow-ups.', 'danger', 'Access Denied');
+                    return;
+                }
+
                 const ok = confirm('Delete this follow-up?');
                 if (!ok) return;
 
