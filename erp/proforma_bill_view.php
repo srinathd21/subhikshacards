@@ -632,9 +632,9 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
         .tracking-status-badge.pending{background:#fef3c7;color:#92400e}
         .tracking-status-badge.delayed{background:#fee2e2;color:#991b1b}
         .tracking-row-hidden{display:none!important}
-        .tracking-update-form{min-width:220px}.tracking-update-form .form-select{min-height:36px;border-radius:12px}.tracking-update-form .btn{min-height:36px;border-radius:12px}.role-lock-text{font-size:11px;font-weight:900;color:var(--text-muted)}.delay-required-box{display:none;margin-top:8px}.tracking-update-form.delay-visible .delay-required-box{display:block}.delay-info{font-size:11px;font-weight:800;color:#991b1b}.planned-date-old{text-decoration:line-through;color:#991b1b;font-weight:900}.planned-date-new{color:#166534;font-weight:900;margin-left:7px}.delay-meta{font-size:11px;font-weight:800;color:var(--text-muted)}
+        .delay-info{font-size:11px;font-weight:800;color:#991b1b}.planned-date-old{display:inline-block;text-decoration:line-through;color:#dc2626;font-weight:900}.planned-date-new{display:block;color:#166534;font-weight:900;margin-top:4px}.delay-meta{font-size:11px;font-weight:800;color:var(--text-muted)}.tracking-timeline{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:18px}.stage-card{position:relative;border:1px solid var(--border-soft);border-radius:18px;padding:15px;background:var(--card-bg);overflow:hidden;min-height:128px}.stage-card.completed{border-color:#bbf7d0;background:linear-gradient(135deg,#f0fdf4,#fff)}.stage-card.in_progress{border-color:#bfdbfe;background:linear-gradient(135deg,#eff6ff,#fff)}.stage-card.delayed{border-color:#fecaca;background:linear-gradient(135deg,#fff1f2,#fff)}.stage-card.pending{background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg))}.stage-card.in_progress::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(37,99,235,.12),transparent);animation:trackingShimmer 1.6s infinite}.stage-top{display:flex;align-items:center;justify-content:space-between;gap:10px;position:relative;z-index:1}.stage-order{width:32px;height:32px;border-radius:999px;display:grid;place-items:center;font-weight:900;background:#e5e7eb;color:#374151}.stage-card.completed .stage-order{background:#dcfce7;color:#166534}.stage-card.in_progress .stage-order{background:#dbeafe;color:#1d4ed8}.stage-card.delayed .stage-order{background:#fee2e2;color:#991b1b}.stage-title{font-size:14px;font-weight:900;color:var(--text-main);margin-top:12px;position:relative;z-index:1}.stage-dept{font-size:11px;font-weight:800;color:var(--text-muted);margin-top:4px;position:relative;z-index:1}.live-loader{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:900;color:#1d4ed8;position:relative;z-index:1}.live-dot{width:8px;height:8px;border-radius:999px;background:#2563eb;box-shadow:0 0 0 0 rgba(37,99,235,.45);animation:trackingPulse 1.2s infinite}.tracking-info-btn{width:34px;height:34px;border-radius:999px;border:0;background:#eef2ff;color:#3730a3;font-weight:900}.tracking-info-btn:hover{background:#3730a3;color:#fff}.remark-modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:15000;display:none;align-items:center;justify-content:center;padding:18px}.remark-modal-backdrop.show{display:flex}.remark-modal-card{width:min(560px,100%);background:var(--card-bg);border-radius:22px;padding:22px;box-shadow:0 24px 70px rgba(15,23,42,.28)}.remark-modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}.remark-modal-title{font-size:18px;font-weight:900;color:var(--text-main)}.remark-close{border:0;background:#f1f5f9;border-radius:999px;width:34px;height:34px;font-weight:900}.remark-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.remark-box{border:1px solid var(--border-soft);border-radius:14px;padding:12px;background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg))}.remark-box small{display:block;font-size:10px;font-weight:900;color:var(--text-muted);text-transform:uppercase;margin-bottom:5px}.remark-box strong,.remark-box div{font-size:13px;font-weight:800;color:var(--text-main);word-break:break-word}@keyframes trackingPulse{0%{box-shadow:0 0 0 0 rgba(37,99,235,.45)}70%{box-shadow:0 0 0 12px rgba(37,99,235,0)}100%{box-shadow:0 0 0 0 rgba(37,99,235,0)}}@keyframes trackingShimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
         @media print{#sidebar,#mobileOverlay,#settingsOverlay,.no-print,nav,.app-shell>aside,.tracking-filter-wrap{display:none!important}main{margin:0!important}.view-card,.page-head{box-shadow:none!important;border:1px solid #ddd!important}}
-        @media(max-width:767.98px){.view-page .page-head{padding:18px}.view-page .page-head h1{font-size:23px}.view-card{padding:16px}}
+        @media(max-width:767.98px){.view-page .page-head{padding:18px}.view-page .page-head h1{font-size:23px}.view-card{padding:16px}.tracking-timeline{grid-template-columns:1fr}.remark-grid{grid-template-columns:1fr}.table-view th,.table-view td{font-size:12px}.stage-card{min-height:auto}}
     </style>
 </head>
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -858,12 +858,62 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
                         </div>
                     </div>
 
+                    <div class="tracking-timeline" id="trackingTimeline">
+                        <?php if (!$tracking): ?>
+                            <div class="text-muted-custom fw-bold">No tracking steps found.</div>
+                        <?php endif; ?>
+                        <?php foreach ($tracking as $trk): ?>
+                        <?php
+                            $trkStatus = trim((string)($trk['status'] ?? 'pending'));
+                            if ($trkStatus === '') $trkStatus = 'pending';
+                            $delayDays = 0;
+                            if (!empty($trk['planned_completion_date'])) {
+                                try {
+                                    $planned = new DateTime(date('Y-m-d', strtotime((string)$trk['planned_completion_date'])));
+                                    $today = new DateTime(date('Y-m-d'));
+                                    if ($today > $planned) $delayDays = (int)$planned->diff($today)->days;
+                                } catch (Throwable $e) {}
+                            }
+                            $isDelayed = (int)($trk['is_delayed'] ?? 0) === 1 || $delayDays > 0;
+                            $badgeClass = $isDelayed ? 'delayed' : $trkStatus;
+                            $displayStatus = $isDelayed ? 'Delayed' : pbv_status_label($trkStatus);
+                            $plannedDate = pbv_date($trk['planned_completion_date'] ?? '');
+                            $revisedDate = pbv_date($trk['revised_completion_date'] ?? '');
+                            $hasNextDate = !empty($trk['revised_completion_date']) && !empty($trk['planned_completion_date']) && $trk['revised_completion_date'] !== $trk['planned_completion_date'];
+                        ?>
+                        <div class="stage-card <?= e($badgeClass) ?> tracking-row" data-status="<?= e($trkStatus) ?>" data-delayed="<?= $isDelayed ? '1' : '0' ?>">
+                            <div class="stage-top">
+                                <span class="stage-order"><?= e($trk['sort_order'] ?? '-') ?></span>
+                                <span class="tracking-status-badge <?= e($badgeClass) ?>"><?= e($displayStatus) ?></span>
+                            </div>
+                            <div class="stage-title"><?= e($trk['step_name'] ?? '-') ?></div>
+                            <div class="stage-dept"><?= e($trk['role_name'] ?? '-') ?></div>
+                            <?php if ($trkStatus === 'in_progress' && !$isDelayed): ?>
+                            <div class="live-loader mt-3"><span class="live-dot"></span>Live tracking in progress</div>
+                            <?php elseif ($isDelayed): ?>
+                            <div class="delay-info mt-3"><strong><?= e((int)($trk['delay_days'] ?? $delayDays)) ?> day(s) delayed</strong></div>
+                            <?php endif; ?>
+                        </div>
+                        <?php endforeach; ?>
+                    </div>
+
                     <div class="table-responsive">
                         <table class="table table-view" id="trackingTable">
-                            <thead><tr><th>Order</th><th>Step</th><th>Status</th><th>Assigned Dept</th><th>Updated By</th><th>Updated Dept</th><th>Planned / Revised</th><th>Delay Details</th><th class="no-print">Update</th></tr></thead>
+                            <thead>
+                                <tr>
+                                    <th>Order</th>
+                                    <th>Step</th>
+                                    <th>Status</th>
+                                    <th>Assigned Dept</th>
+                                    <th>Updated By</th>
+                                    <th>Planned / Next Date</th>
+                                    <th>Delay</th>
+                                    <th class="no-print">Info</th>
+                                </tr>
+                            </thead>
                             <tbody>
                                 <?php if (!$tracking): ?>
-                                <tr><td colspan="9" class="text-center text-muted-custom">No tracking steps found.</td></tr>
+                                <tr><td colspan="8" class="text-center text-muted-custom">No tracking steps found.</td></tr>
                                 <?php endif; ?>
                                 <?php foreach ($tracking as $trk): ?>
                                 <?php
@@ -878,8 +928,14 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
                                         } catch (Throwable $e) {}
                                     }
                                     $isDelayed = (int)($trk['is_delayed'] ?? 0) === 1 || $delayDays > 0;
-                                    $needsDelayReason = $delayDays > 0 && empty($trk['delay_reason_id']) && trim((string)($trk['delay_remarks'] ?? '')) === '';
                                     $badgeClass = $isDelayed ? 'delayed' : $trkStatus;
+                                    $displayStatus = $isDelayed ? 'Delayed' : pbv_status_label($trkStatus);
+                                    $plannedDate = pbv_date($trk['planned_completion_date'] ?? '');
+                                    $revisedDate = pbv_date($trk['revised_completion_date'] ?? '');
+                                    $hasNextDate = !empty($trk['revised_completion_date']) && !empty($trk['planned_completion_date']) && $trk['revised_completion_date'] !== $trk['planned_completion_date'];
+                                    $infoRemarks = trim((string)($trk['last_action_remarks'] ?? ''));
+                                    if ($infoRemarks === '') $infoRemarks = trim((string)($trk['delay_remarks'] ?? ''));
+                                    if ($infoRemarks === '') $infoRemarks = '-';
                                 ?>
                                 <tr class="tracking-row" data-status="<?= e($trkStatus) ?>" data-delayed="<?= $isDelayed ? '1' : '0' ?>">
                                     <td><?= e($trk['sort_order'] ?? '-') ?></td>
@@ -888,81 +944,78 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
                                         <small class="d-block text-muted-custom"><?= e($trk['step_key'] ?? '') ?></small>
                                     </td>
                                     <td>
-                                        <span class="tracking-status-badge <?= e($badgeClass) ?>"><?= e($isDelayed ? 'Delayed' : pbv_status_label($trkStatus)) ?></span>
-                                        <?php if ($isDelayed): ?>
-                                        <small class="d-block delay-info">
-                                            <?= e($trk['delay_reason_name'] ?? 'Delay reason pending') ?>
-                                            <?php if (!empty($trk['delay_remarks'])): ?> - <?= e($trk['delay_remarks']) ?><?php endif; ?>
-                                        </small>
+                                        <span class="tracking-status-badge <?= e($badgeClass) ?>"><?= e($displayStatus) ?></span>
+                                        <?php if ($trkStatus === 'in_progress' && !$isDelayed): ?>
+                                            <small class="live-loader mt-2"><span class="live-dot"></span>Processing</small>
                                         <?php endif; ?>
                                     </td>
                                     <td><?= e($trk['role_name'] ?? '-') ?></td>
                                     <td>
                                         <strong><?= e($trk['updated_by_name'] ?? '-') ?></strong>
-                                        <?php if (!empty($trk['last_action_remarks'])): ?>
-                                        <small class="d-block text-muted-custom"><?= e($trk['last_action_remarks']) ?></small>
-                                        <?php endif; ?>
-                                    </td>
-                                    <td><?= e($trk['updated_by_department'] ?? '-') ?></td>
-                                    <td>
-                                        <?php if (!empty($trk['revised_completion_date']) && !empty($trk['planned_completion_date']) && $trk['revised_completion_date'] !== $trk['planned_completion_date']): ?>
-                                            Planned:
-                                            <span class="planned-date-old"><?= e(pbv_date($trk['planned_completion_date'])) ?></span>
-                                            <span class="planned-date-new"><?= e(pbv_date($trk['revised_completion_date'])) ?></span>
-                                        <?php else: ?>
-                                            <?= e(pbv_date($trk['planned_completion_date'] ?? '')) ?>
-                                        <?php endif; ?>
+                                        <small class="d-block delay-meta">Dept: <?= e($trk['updated_by_department'] ?? '-') ?></small>
                                         <small class="d-block delay-meta">Updated: <?= e(pbv_datetime($trk['last_updated_at'] ?? '')) ?></small>
                                     </td>
                                     <td>
                                         <?php if ($isDelayed): ?>
-                                            <strong><?= e((int)($trk['delay_days'] ?? $delayDays)) ?> day(s) delayed</strong>
-                                            <small class="d-block delay-meta">Started: <?= e(pbv_datetime($trk['delay_started_at'] ?? '')) ?></small>
-                                            <small class="d-block delay-meta">Completed: <?= e(pbv_datetime($trk['actual_completed_at'] ?? '')) ?></small>
+                                            Planned: <span class="planned-date-old"><?= e($plannedDate) ?></span>
+                                            <span class="planned-date-new">Next expected: <?= e($revisedDate !== '-' ? $revisedDate : '-') ?></span>
+                                        <?php elseif ($hasNextDate): ?>
+                                            Planned: <span class="planned-date-old"><?= e($plannedDate) ?></span>
+                                            <span class="planned-date-new">Next expected: <?= e($revisedDate) ?></span>
+                                        <?php else: ?>
+                                            <?= e($plannedDate) ?>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <?php if ($isDelayed): ?>
+                                            <strong class="delay-info"><?= e((int)($trk['delay_days'] ?? $delayDays)) ?> day(s) delayed</strong>
                                             <small class="d-block delay-info">Reason: <?= e($trk['delay_reason_name'] ?? '-') ?></small>
-                                            <?php if (!empty($trk['delay_remarks'])): ?><small class="d-block delay-info"><?= e($trk['delay_remarks']) ?></small><?php endif; ?>
                                         <?php else: ?>
                                             -
                                         <?php endif; ?>
                                     </td>
                                     <td class="no-print">
-                                        <?php if (pbv_can_update_tracking($conn, $trk)): ?>
-                                        <form class="tracking-update-form js-tracking-update-form <?= $needsDelayReason ? 'delay-visible' : '' ?>" method="post" action="api/job_cards.php" data-delay-required="<?= $needsDelayReason ? '1' : '0' ?>">
-                                            <input type="hidden" name="csrf_token" value="<?= e($jobCardsCsrfToken) ?>">
-                                            <input type="hidden" name="action" value="update_tracking_status">
-                                            <input type="hidden" name="tracking_id" value="<?= e($trk['id'] ?? '') ?>">
-                                            <div class="d-flex gap-2 align-items-center">
-                                                <select name="status" class="form-select form-select-sm js-status-select">
-                                                    <option value="pending" <?= $trkStatus === 'pending' ? 'selected' : '' ?>>Pending</option>
-                                                    <option value="in_progress" <?= $trkStatus === 'in_progress' ? 'selected' : '' ?>>In Progress</option>
-                                                    <option value="completed" <?= $trkStatus === 'completed' ? 'selected' : '' ?>>Completed</option>
-                                                </select>
-                                                <button type="submit" class="btn btn-sm btn-primary fw-bold">Update</button>
-                                            </div>
-                                            <div class="delay-required-box">
-                                                <select name="delay_reason_id" class="form-select form-select-sm mb-2 js-delay-reason">
-                                                    <option value="">Select Delay Reason</option>
-                                                    <?php foreach ($delayReasons as $reason): ?>
-                                                    <option value="<?= e($reason['id']) ?>" <?= (int)($trk['delay_reason_id'] ?? 0) === (int)$reason['id'] ? 'selected' : '' ?>><?= e($reason['reason_name']) ?></option>
-                                                    <?php endforeach; ?>
-                                                </select>
-                                                <textarea name="delay_remarks" class="form-control form-control-sm js-delay-remarks" rows="2" placeholder="Enter delay remarks"><?= e($trk['delay_remarks'] ?? '') ?></textarea>
-                                                <small class="delay-info">Delay reason is required before updating this delayed status.</small>
-                                            </div>
-                                        </form>
-                                        <?php else: ?>
-                                            <span class="role-lock-text">Role restricted</span>
-                                        <?php endif; ?>
+                                        <button type="button" class="tracking-info-btn js-remark-info"
+                                            data-step="<?= e($trk['step_name'] ?? '-') ?>"
+                                            data-status="<?= e($displayStatus) ?>"
+                                            data-dept="<?= e($trk['role_name'] ?? '-') ?>"
+                                            data-updated-by="<?= e($trk['updated_by_name'] ?? '-') ?>"
+                                            data-updated-at="<?= e(pbv_datetime($trk['last_updated_at'] ?? '')) ?>"
+                                            data-planned="<?= e($plannedDate) ?>"
+                                            data-next="<?= e($revisedDate) ?>"
+                                            data-reason="<?= e($trk['delay_reason_name'] ?? '-') ?>"
+                                            data-remarks="<?= e($infoRemarks) ?>">i</button>
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
                                 <tr id="trackingNoResultRow" class="d-none">
-                                    <td colspan="9" class="text-center text-muted-custom py-3">No tracking steps found for selected status.</td>
+                                    <td colspan="8" class="text-center text-muted-custom py-3">No tracking steps found for selected status.</td>
                                 </tr>
                             </tbody>
                         </table>
                     </div>
                 <?php endif; ?>
+            </div>
+
+            <div class="remark-modal-backdrop no-print" id="trackingRemarkModal" aria-hidden="true">
+                <div class="remark-modal-card">
+                    <div class="remark-modal-head">
+                        <div>
+                            <div class="remark-modal-title" id="remarkStepTitle">Tracking Details</div>
+                            <div class="text-muted-custom fw-bold" id="remarkStatusText">-</div>
+                        </div>
+                        <button type="button" class="remark-close" id="remarkModalClose">×</button>
+                    </div>
+                    <div class="remark-grid">
+                        <div class="remark-box"><small>Assigned Department</small><strong id="remarkDept">-</strong></div>
+                        <div class="remark-box"><small>Updated By</small><strong id="remarkUpdatedBy">-</strong></div>
+                        <div class="remark-box"><small>Updated At</small><strong id="remarkUpdatedAt">-</strong></div>
+                        <div class="remark-box"><small>Planned Date</small><strong id="remarkPlanned">-</strong></div>
+                        <div class="remark-box"><small>Next Expected Date</small><strong id="remarkNext">-</strong></div>
+                        <div class="remark-box"><small>Delay Reason</small><strong id="remarkReason">-</strong></div>
+                        <div class="remark-box" style="grid-column:1/-1"><small>Remark Details</small><div id="remarkDetails">-</div></div>
+                    </div>
+                </div>
             </div>
             <?php endif; ?>
         </section>
@@ -975,7 +1028,7 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
 <script>
 (function(){
     function applyTrackingFilter(status){
-        const rows = Array.from(document.querySelectorAll('#trackingTable .tracking-row'));
+        const rows = Array.from(document.querySelectorAll('.tracking-row'));
         let visibleCount = 0;
 
         rows.forEach(function(row){
@@ -1012,83 +1065,55 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
 </script>
 
 
+
+
 <script>
 (function(){
-    function showProgressToast(message,type='success',title='Success'){
-        const old = document.getElementById('progressToastWrap');
-        if(old) old.remove();
+    const modal = document.getElementById('trackingRemarkModal');
+    if(!modal) return;
 
-        const wrap = document.createElement('div');
-        wrap.id = 'progressToastWrap';
-        wrap.className = 'toast-container position-fixed top-0 end-0 p-3';
-        wrap.style.zIndex = '12000';
-        wrap.innerHTML = `<div id="progressToast" class="toast toast-ui ${type}" role="alert" data-bs-delay="4200">
-            <div class="d-flex">
-                <div class="toast-body">
-                    <div class="toast-title">${title}</div>
-                    <div class="toast-message">${message}</div>
-                </div>
-                <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"></button>
-            </div>
-        </div>`;
-        document.body.appendChild(wrap);
+    const fields = {
+        title: document.getElementById('remarkStepTitle'),
+        status: document.getElementById('remarkStatusText'),
+        dept: document.getElementById('remarkDept'),
+        updatedBy: document.getElementById('remarkUpdatedBy'),
+        updatedAt: document.getElementById('remarkUpdatedAt'),
+        planned: document.getElementById('remarkPlanned'),
+        next: document.getElementById('remarkNext'),
+        reason: document.getElementById('remarkReason'),
+        remarks: document.getElementById('remarkDetails')
+    };
 
-        if(window.bootstrap){
-            new bootstrap.Toast(document.getElementById('progressToast')).show();
-        }else{
-            alert(message);
-        }
+    function setText(el, value){
+        if(el) el.textContent = value && value.trim() ? value : '-';
     }
 
-    document.querySelectorAll('.js-tracking-update-form').forEach(function(form){
-        const statusSelect = form.querySelector('.js-status-select');
-        if(statusSelect){
-            statusSelect.addEventListener('change', function(){
-                const delayRequired = form.getAttribute('data-delay-required') === '1' && ['in_progress','completed'].includes(statusSelect.value);
-                form.classList.toggle('delay-visible', delayRequired);
-            });
-        }
+    function openRemark(btn){
+        setText(fields.title, btn.dataset.step || 'Tracking Details');
+        setText(fields.status, btn.dataset.status || '-');
+        setText(fields.dept, btn.dataset.dept || '-');
+        setText(fields.updatedBy, btn.dataset.updatedBy || '-');
+        setText(fields.updatedAt, btn.dataset.updatedAt || '-');
+        setText(fields.planned, btn.dataset.planned || '-');
+        setText(fields.next, btn.dataset.next || '-');
+        setText(fields.reason, btn.dataset.reason || '-');
+        setText(fields.remarks, btn.dataset.remarks || '-');
+        modal.classList.add('show');
+        modal.setAttribute('aria-hidden','false');
+    }
 
-        form.addEventListener('submit', function(event){
-            event.preventDefault();
+    function closeRemark(){
+        modal.classList.remove('show');
+        modal.setAttribute('aria-hidden','true');
+    }
 
-            const statusSelect = form.querySelector('.js-status-select');
-            const statusValue = statusSelect ? statusSelect.value : '';
-            const delayRequired = form.getAttribute('data-delay-required') === '1' && ['in_progress','completed'].includes(statusValue);
-            const delayReason = form.querySelector('.js-delay-reason');
-            const delayRemarks = form.querySelector('.js-delay-remarks');
-
-            if(delayRequired && (!delayReason || !delayReason.value || !delayRemarks || !delayRemarks.value.trim())){
-                form.classList.add('delay-visible');
-                showProgressToast('Please enter delay reason and delay remarks before updating this delayed job status.', 'danger', 'Delay Reason Required');
-                return;
-            }
-
-            const btn = form.querySelector('button[type="submit"]');
-            const oldText = btn ? btn.textContent : '';
-            if(btn){ btn.disabled = true; btn.textContent = 'Updating...'; }
-
-            fetch('api/job_cards.php', {
-                method: 'POST',
-                body: new FormData(form),
-                credentials: 'same-origin'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if(data.status){
-                    showProgressToast(data.message || 'Tracking status updated successfully.', 'success', 'Success');
-                    setTimeout(() => window.location.reload(), 800);
-                }else{
-                    showProgressToast(data.message || 'Tracking status update failed.', 'danger', 'Failed');
-                    if(btn){ btn.disabled = false; btn.textContent = oldText || 'Update'; }
-                }
-            })
-            .catch(() => {
-                showProgressToast('API request failed.', 'danger', 'Failed');
-                if(btn){ btn.disabled = false; btn.textContent = oldText || 'Update'; }
-            });
-        });
+    document.querySelectorAll('.js-remark-info').forEach(function(btn){
+        btn.addEventListener('click', function(){ openRemark(btn); });
     });
+
+    document.getElementById('remarkModalClose')?.addEventListener('click', closeRemark);
+    modal.addEventListener('click', function(event){ if(event.target === modal) closeRemark(); });
+    document.addEventListener('keydown', function(event){ if(event.key === 'Escape') closeRemark(); });
 })();
 </script>
 

@@ -1,24 +1,11 @@
 <?php
-/**
- * job_card_view.php
- * Subhiksha Cards ERP - Full Job Card Details + Role Based Tracking Update.
- */
 
-require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';
-
-if (function_exists('require_permission')) {
-    require_permission($conn, 'can_view', 'job_cards.php');
-}
+require_permission($conn, 'can_view', 'job_cards.php');
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
-
-if (empty($_SESSION['job_cards_csrf'])) {
-    $_SESSION['job_cards_csrf'] = bin2hex(random_bytes(32));
-}
-$csrfToken = $_SESSION['job_cards_csrf'];
 
 if (!function_exists('e')) {
     function e($value): string
@@ -27,688 +14,1759 @@ if (!function_exists('e')) {
     }
 }
 
-function jcv_table_exists(mysqli $conn, string $table): bool
+function jcvTableExists(mysqli $conn, string $table): bool
 {
     try {
         $table = $conn->real_escape_string($table);
         $res = $conn->query("SHOW TABLES LIKE '{$table}'");
         $ok = $res && $res->num_rows > 0;
-        if ($res) $res->free();
+
+        if ($res) {
+            $res->free();
+        }
+
         return $ok;
     } catch (Throwable $e) {
         return false;
     }
 }
 
-function jcv_col(mysqli $conn, string $table, string $col): bool
+function jcvDate($value): string
 {
-    static $cache = [];
-    $key = $table . '.' . $col;
-    if (isset($cache[$key])) return $cache[$key];
+    return !empty($value) ? date('d-m-Y', strtotime($value)) : '-';
+}
 
+function jcvDateTime($value): string
+{
+    return !empty($value) ? date('d-m-Y h:i A', strtotime($value)) : '-';
+}
+
+function jcvMoney($value): string
+{
+    return '₹' . number_format((float)$value, 2);
+}
+
+function jcvRoleLabel(string $roleKey): string
+{
+    $labels = [
+        'admin' => 'Admin',
+        'sales' => 'Sales',
+        'designing_proofing' => 'Designing / Proofing',
+        'offset_printing' => 'Offset Printing',
+        'screen_printing' => 'Screen Printing',
+        'digital_printing' => 'Digital Printing',
+        'multicolor_offset_printing' => 'Multicolor Offset Printing',
+        'printing' => 'Printing'
+    ];
+
+    return $labels[$roleKey] ?? ucfirst(str_replace('_', ' ', $roleKey));
+}
+
+function jcvOrderBadgeClass(string $orderType): string
+{
+    return strtolower($orderType) === 'customized' ? 'customized' : 'readymade';
+}
+
+function jcvStatusClass(string $status): string
+{
+    $status = strtolower(trim($status));
+
+    if ($status === 'completed') {
+        return 'completed';
+    }
+
+    if (in_array($status, ['in_progress', 'progress'], true)) {
+        return 'progress';
+    }
+
+    if (in_array($status, ['delayed', 'cancelled'], true)) {
+        return 'danger';
+    }
+
+    return 'pending';
+}
+
+function jcvCanUpdateStep(
+    string $roleKey,
+    ?string $stepRoleKey,
+    ?string $jobPrintingRoleKey,
+    ?string $jobPrintingTypeRoleKey,
+    bool $canUpdateJob,
+    string $stepStatus
+): bool {
+    $roleKey = strtolower(trim($roleKey));
+    $stepRoleKey = strtolower(trim((string)$stepRoleKey));
+    $jobPrintingRoleKey = strtolower(trim((string)$jobPrintingRoleKey));
+    $jobPrintingTypeRoleKey = strtolower(trim((string)$jobPrintingTypeRoleKey));
+    $stepStatus = strtolower(trim($stepStatus));
+
+    if (!$canUpdateJob) {
+        return false;
+    }
+
+    if ($roleKey === 'admin') {
+        return true;
+    }
+
+    if (in_array($stepStatus, ['completed', 'cancelled'], true)) {
+        return false;
+    }
+
+    if ($stepRoleKey === $roleKey) {
+        return true;
+    }
+
+    $printingRoles = [
+        'offset_printing',
+        'screen_printing',
+        'digital_printing',
+        'multicolor_offset_printing'
+    ];
+
+    if (in_array($roleKey, $printingRoles, true)) {
+        if ($stepRoleKey === 'printing') {
+            return $jobPrintingRoleKey === $roleKey || $jobPrintingTypeRoleKey === $roleKey;
+        }
+
+        return $stepRoleKey === $roleKey;
+    }
+
+    if ($roleKey === 'printing') {
+        return $stepRoleKey === 'printing' || in_array($stepRoleKey, $printingRoles, true);
+    }
+
+    return false;
+}
+
+function jcvIsApprovalStage(array $step): bool
+{
+    $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
+    return (int)($step['is_approval_step'] ?? 0) === 1
+        || in_array($stepKey, ['proofing_approval', 'design_approval'], true);
+}
+
+function jcvApprovalTypeForStep(array $step): string
+{
+    $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
+
+    if ($stepKey === 'proofing_approval') {
+        return 'proof_approval';
+    }
+
+    if ($stepKey === 'design_approval') {
+        return 'design_approval';
+    }
+
+    return 'confirmation';
+}
+
+function jcvApprovalIsDone(?array $approval): bool
+{
+    if (!$approval) {
+        return false;
+    }
+
+    return strtolower((string)($approval['status'] ?? '')) === 'approved'
+        || (int)($approval['approved_by_customer'] ?? 0) === 1
+        || (int)($approval['approved_by_call'] ?? 0) === 1;
+}
+
+function jcvRandomToken(): string
+{
     try {
-        $tableEsc = $conn->real_escape_string($table);
-        $colEsc = $conn->real_escape_string($col);
-        $res = $conn->query("SHOW COLUMNS FROM `{$tableEsc}` LIKE '{$colEsc}'");
-        $ok = $res && $res->num_rows > 0;
-        if ($res) $res->free();
-        return $cache[$key] = $ok;
+        return bin2hex(random_bytes(24));
     } catch (Throwable $e) {
-        return $cache[$key] = false;
+        return sha1(uniqid('approval_', true) . mt_rand());
     }
 }
 
-function jcv_bind_type($v): string
+function jcvGetCustomerApproval(mysqli $conn, int $jobId, int $workflowStepId, string $approvalType): ?array
 {
-    return is_int($v) ? 'i' : (is_float($v) ? 'd' : 's');
+    if (!jcvTableExists($conn, 'customer_approvals')) {
+        return null;
+    }
+
+    $stmt = $conn->prepare("
+        SELECT *
+        FROM customer_approvals
+        WHERE job_card_id = ?
+          AND workflow_step_id = ?
+          AND approval_type = ?
+        ORDER BY id DESC
+        LIMIT 1
+    ");
+    $stmt->bind_param('iis', $jobId, $workflowStepId, $approvalType);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return $row ?: null;
 }
 
-function jcv_update(mysqli $conn, string $table, array $data, int $id): void
-{
-    $filtered = [];
-    foreach ($data as $key => $value) {
-        if (jcv_col($conn, $table, $key)) $filtered[$key] = $value;
+function jcvSaveManualCustomerApproval(
+    mysqli $conn,
+    int $jobId,
+    int $workflowStepId,
+    string $approvalType,
+    string $customerName,
+    string $mobile,
+    int $userId,
+    string $remarks
+): void {
+    if (!jcvTableExists($conn, 'customer_approvals')) {
+        throw new RuntimeException('customer_approvals table is missing.');
     }
-    if (!$filtered) return;
 
-    $sets = [];
-    $types = '';
-    $values = [];
-    foreach ($filtered as $key => $value) {
-        $sets[] = "`{$key}`=?";
-        $types .= jcv_bind_type($value);
-        $values[] = $value;
+    $existing = jcvGetCustomerApproval($conn, $jobId, $workflowStepId, $approvalType);
+
+    if ($existing) {
+        $approvalId = (int)$existing['id'];
+        $stmt = $conn->prepare("
+            UPDATE customer_approvals
+            SET
+                status = 'approved',
+                approved_by_call = 1,
+                call_confirmed_by = ?,
+                internal_remarks = ?,
+                approved_at = COALESCE(approved_at, NOW()),
+                updated_at = NOW()
+            WHERE id = ?
+        ");
+        $stmt->bind_param('isi', $userId, $remarks, $approvalId);
+        $stmt->execute();
+        $stmt->close();
+        return;
     }
-    $types .= 'i';
-    $values[] = $id;
 
-    $stmt = $conn->prepare("UPDATE {$table} SET " . implode(',', $sets) . " WHERE id=?");
-    $stmt->bind_param($types, ...$values);
+    $token = jcvRandomToken();
+    $stmt = $conn->prepare("
+        INSERT INTO customer_approvals
+        (
+            job_card_id,
+            workflow_step_id,
+            approval_type,
+            approval_token,
+            customer_name,
+            mobile,
+            status,
+            approved_by_customer,
+            approved_by_call,
+            call_confirmed_by,
+            internal_remarks,
+            approved_at,
+            created_at
+        )
+        VALUES
+        (?, ?, ?, ?, ?, ?, 'approved', 0, 1, ?, ?, NOW(), NOW())
+    ");
+    $stmt->bind_param('iissssis', $jobId, $workflowStepId, $approvalType, $token, $customerName, $mobile, $userId, $remarks);
     $stmt->execute();
     $stmt->close();
 }
 
-function jcv_money($value): string { return '₹' . number_format((float)$value, 2); }
-function jcv_date($value): string { return !empty($value) ? date('d-m-Y', strtotime((string)$value)) : '-'; }
-function jcv_datetime($value): string { return !empty($value) ? date('d-m-Y h:i A', strtotime((string)$value)) : '-'; }
-function jcv_yes_no($value): string { return ((int)$value === 1) ? 'Yes' : 'No'; }
-function jcv_status_label($status): string { $status = trim((string)$status); return $status === '' ? 'Pending' : ucwords(str_replace('_', ' ', $status)); }
+$roleKey = strtolower((string)($_SESSION['role_key'] ?? ''));
 
-function jcv_delay_days_from_planned($plannedDate): int
-{
-    if (empty($plannedDate)) return 0;
-    try {
-        $planned = new DateTime(date('Y-m-d', strtotime((string)$plannedDate)));
-        $today = new DateTime(date('Y-m-d'));
-        if ($today <= $planned) return 0;
-        return (int)$planned->diff($today)->days;
-    } catch (Throwable $e) {
-        return 0;
-    }
+$allAccessRoles = [
+    'admin',
+    'sales',
+    'designing_proofing'
+];
+
+$printingRoleKeys = [
+    'offset_printing',
+    'screen_printing',
+    'digital_printing',
+    'multicolor_offset_printing'
+];
+
+$hasAllJobCardAccess = in_array($roleKey, $allAccessRoles, true);
+$isSpecificPrintingRole = in_array($roleKey, $printingRoleKeys, true);
+$isGeneralPrintingRole = $roleKey === 'printing';
+
+$canUpdateJob = false;
+$canManualCustomerApproval = in_array($roleKey, ['admin', 'sales'], true);
+
+try {
+    $canUpdateJob = is_admin_user() || can_update($conn, 'job_cards.php');
+} catch (Throwable $e) {
+    $canUpdateJob = is_admin_user();
 }
 
-function jcv_next_expected_date($plannedDate): ?string
-{
-    if (empty($plannedDate)) return null;
-    try {
-        $dt = new DateTime(date('Y-m-d', strtotime((string)$plannedDate)));
-        $dt->modify('+1 day');
-        return $dt->format('Y-m-d');
-    } catch (Throwable $e) {
-        return null;
-    }
+$jobId = (int)($_GET['id'] ?? 0);
+$message = '';
+$messageType = 'danger';
+$job = null;
+$trackingRows = [];
+$delayReasons = [];
+
+if (($_GET['msg'] ?? '') === 'status_updated') {
+    $message = 'Job status updated successfully.';
+    $messageType = 'success';
 }
 
-function jcv_default_delay_reason_id(mysqli $conn): ?int
-{
-    if (!jcv_table_exists($conn, 'delay_reasons')) return null;
-    try {
-        if (jcv_col($conn, 'delay_reasons', 'reason_key')) {
-            $key = 'other';
-            $stmt = $conn->prepare("SELECT id FROM delay_reasons WHERE reason_key = ? AND is_active = 1 LIMIT 1");
-            $stmt->bind_param('s', $key);
-            $stmt->execute();
-            $row = $stmt->get_result()->fetch_assoc();
-            $stmt->close();
-            if ($row) return (int)$row['id'];
-        }
-        $stmt = $conn->prepare("SELECT id FROM delay_reasons WHERE is_active = 1 ORDER BY id DESC LIMIT 1");
-        $stmt->execute();
-        $row = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
-        return $row ? (int)$row['id'] : null;
-    } catch (Throwable $e) {
-        return null;
-    }
-}
-
-function jcv_history_insert(mysqli $conn, int $trackingId, int $jobCardId, int $workflowStepId, string $oldStatus, string $newStatus, string $remarks): void
-{
-    if (!jcv_table_exists($conn, 'job_tracking_history')) return;
-    try {
-        $changedBy = 0;
-        $now = date('Y-m-d H:i:s');
-        $stmt = $conn->prepare("
-            INSERT INTO job_tracking_history
-                (job_tracking_id, job_card_id, workflow_step_id, old_status, new_status, action_remarks, changed_by, changed_at)
-            VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?)
+try {
+    if (jcvTableExists($conn, 'delay_reasons')) {
+        $res = $conn->query("
+            SELECT id, reason_name
+            FROM delay_reasons
+            WHERE is_active = 1
+            ORDER BY id ASC, reason_name ASC
         ");
-        $stmt->bind_param('iiisssis', $trackingId, $jobCardId, $workflowStepId, $oldStatus, $newStatus, $remarks, $changedBy, $now);
-        $stmt->execute();
-        $stmt->close();
-    } catch (Throwable $e) {}
-}
-
-function jcv_auto_mark_overdue_tracking(mysqli $conn, int $jobCardId): void
-{
-    if ($jobCardId <= 0 || !jcv_table_exists($conn, 'job_tracking')) return;
-
-    $today = date('Y-m-d');
-    $defaultReasonId = jcv_default_delay_reason_id($conn);
-
-    try {
-        $stmt = $conn->prepare("
-            SELECT *
-            FROM job_tracking
-            WHERE job_card_id = ?
-              AND status NOT IN ('completed','cancelled','skipped')
-              AND planned_completion_date IS NOT NULL
-              AND planned_completion_date < ?
-        ");
-        $stmt->bind_param('is', $jobCardId, $today);
-        $stmt->execute();
-        $res = $stmt->get_result();
 
         while ($row = $res->fetch_assoc()) {
-            $trackingId = (int)$row['id'];
-            $plannedDate = (string)($row['planned_completion_date'] ?? '');
-            $nextExpectedDate = !empty($row['revised_completion_date']) ? (string)$row['revised_completion_date'] : jcv_next_expected_date($plannedDate);
-            $delayDays = jcv_delay_days_from_planned($plannedDate);
-            $oldStatus = (string)($row['status'] ?? 'pending');
-
-            $data = [
-                'status' => 'delayed',
-                'is_delayed' => 1,
-                'delay_days' => max(1, $delayDays),
-                'updated_at' => date('Y-m-d H:i:s')
-            ];
-            if (empty($row['delay_started_at'])) $data['delay_started_at'] = date('Y-m-d H:i:s');
-            if (empty($row['revised_completion_date'])) $data['revised_completion_date'] = $nextExpectedDate;
-            if (empty($row['delay_reason_id']) && $defaultReasonId) $data['delay_reason_id'] = $defaultReasonId;
-            if (trim((string)($row['delay_remarks'] ?? '')) === '') $data['delay_remarks'] = 'Auto marked delayed because planned date was missed.';
-
-            jcv_update($conn, 'job_tracking', $data, $trackingId);
-            jcv_history_insert($conn, $trackingId, (int)$row['job_card_id'], (int)$row['workflow_step_id'], $oldStatus, 'delayed', 'Auto marked delayed. Original planned date: ' . $plannedDate . '. Next expected date: ' . ($nextExpectedDate ?: '-') . '.');
+            $delayReasons[] = $row;
         }
-        $stmt->close();
-    } catch (Throwable $e) {}
+
+        $res->free();
+    }
+} catch (Throwable $e) {
+    $delayReasons = [];
 }
 
-function jcv_progress_percent(array $tracking): int
-{
-    $total = count($tracking);
-    if ($total <= 0) return 0;
-    $completed = 0;
-    foreach ($tracking as $row) {
-        if ((string)($row['status'] ?? '') === 'completed') $completed++;
-    }
-    return (int)round(($completed / $total) * 100);
-}
-
-function jcv_progress_counts(array $tracking): array
-{
-    $counts = ['total'=>count($tracking), 'completed'=>0, 'in_progress'=>0, 'pending'=>0, 'delayed'=>0, 'other'=>0];
-    foreach ($tracking as $row) {
-        $status = (string)($row['status'] ?? 'pending');
-        if (isset($counts[$status])) $counts[$status]++; else $counts['other']++;
-        if ((int)($row['is_delayed'] ?? 0) === 1) $counts['delayed']++;
-    }
-    return $counts;
-}
-
-function jcv_current_role_ids(mysqli $conn): array
-{
-    $ids = [];
-    foreach (['role_id', 'current_role_id'] as $key) {
-        if (!empty($_SESSION[$key])) $ids[] = (int)$_SESSION[$key];
-    }
-    if (!empty($_SESSION['roles']) && is_array($_SESSION['roles'])) {
-        foreach ($_SESSION['roles'] as $role) {
-            if (is_array($role) && !empty($role['id'])) $ids[] = (int)$role['id'];
-            elseif (is_numeric($role)) $ids[] = (int)$role;
-        }
-    }
-    return array_values(array_unique(array_filter($ids)));
-}
-
-function jcv_current_role_keys(mysqli $conn): array
-{
-    $keys = [];
-    foreach (['role_key', 'current_role_key'] as $key) {
-        if (!empty($_SESSION[$key])) $keys[] = strtolower((string)$_SESSION[$key]);
-    }
-    $roleIds = jcv_current_role_ids($conn);
-    if ($roleIds && jcv_table_exists($conn, 'roles')) {
-        try {
-            $placeholders = implode(',', array_fill(0, count($roleIds), '?'));
-            $types = str_repeat('i', count($roleIds));
-            $stmt = $conn->prepare("SELECT role_key FROM roles WHERE id IN ({$placeholders})");
-            $stmt->bind_param($types, ...$roleIds);
-            $stmt->execute();
-            $res = $stmt->get_result();
-            while ($row = $res->fetch_assoc()) $keys[] = strtolower((string)$row['role_key']);
-            $stmt->close();
-        } catch (Throwable $e) {}
-    }
-    return array_values(array_unique(array_filter($keys)));
-}
-
-function jcv_is_admin_user(mysqli $conn): bool
-{
-    if (function_exists('is_super_admin') && is_super_admin()) return true;
-    if (!empty($_SESSION['is_super_admin'])) return true;
-    foreach (jcv_current_role_keys($conn) as $key) {
-        if (in_array($key, ['super_admin', 'admin', 'business_admin'], true)) return true;
-    }
-    return false;
-}
-
-function jcv_can_update_tracking(mysqli $conn, array $trackingRow): bool
-{
-    if (jcv_is_admin_user($conn)) return true;
-    $responsibleRoleId = (int)($trackingRow['responsible_role_id'] ?? 0);
-    return $responsibleRoleId > 0 && in_array($responsibleRoleId, jcv_current_role_ids($conn), true);
-}
-
-$id = (int)($_GET['id'] ?? 0);
-$job = null;
-$item = null;
-$tracking = [];
-$delayReasons = [];
-$error = '';
-
-if ($id <= 0) {
-    $error = 'Invalid Job Card.';
+if ($jobId <= 0) {
+    $message = 'Invalid job card.';
+    $messageType = 'danger';
+} elseif (!jcvTableExists($conn, 'job_cards')) {
+    $message = 'job_cards table is missing.';
+    $messageType = 'danger';
 } else {
-    jcv_auto_mark_overdue_tracking($conn, $id);
-
     try {
-        $stmt = $conn->prepare("
+        $where = ['jc.id = ?'];
+        $params = [$jobId];
+        $types = 'i';
+
+        if (!$hasAllJobCardAccess) {
+            if ($isSpecificPrintingRole) {
+                $where[] = "(pt.role_key = ? OR rprint.role_key = ?)";
+                $params[] = $roleKey;
+                $params[] = $roleKey;
+                $types .= 'ss';
+            } elseif ($isGeneralPrintingRole) {
+                $where[] = "(
+                    pt.role_key IN ('offset_printing','screen_printing','digital_printing','multicolor_offset_printing')
+                    OR rprint.role_key IN ('offset_printing','screen_printing','digital_printing','multicolor_offset_printing')
+                )";
+            } else {
+                $where[] = "1 = 0";
+            }
+        }
+
+        $whereSql = 'WHERE ' . implode(' AND ', $where);
+
+        $sql = "
             SELECT
                 jc.*,
-                jcs.status_name AS job_status_name,
-                ws.step_name AS current_step_name,
-                pt.printing_name,
-                pst.sub_type_name,
+
                 ft.function_name,
-                pb.proforma_no,
-                q.quotation_no,
-                e.enquiry_no,
-                cb.name AS created_by_name,
-                cr.role_name AS created_by_department,
-                apr.role_name AS assigned_printing_department,
-                au.name AS assigned_printing_user_name,
-                du.name AS assigned_design_user_name,
-                su.name AS assigned_sales_user_name
+
+                pt.printing_name,
+                pt.printing_key,
+                pt.role_key AS printing_role_key,
+
+                pst.sub_type_name,
+
+                jcs.status_name,
+                jcs.status_key,
+                jcs.color_code,
+
+                ws.step_name AS current_step_name,
+                ws.step_key AS current_step_key,
+
+                sales.username AS sales_person,
+                designer.username AS designer_name,
+                printer.username AS printer_name,
+
+                rprint.role_name AS assigned_printing_role_name,
+                rprint.role_key AS assigned_printing_role_key,
+
+                creator.username AS created_by_name,
+
+                COALESCE(track.total_steps, 0) AS total_steps,
+                COALESCE(track.completed_steps, 0) AS completed_steps,
+                COALESCE(track.delayed_steps, 0) AS delayed_steps
+
             FROM job_cards jc
-            LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id
-            LEFT JOIN workflow_steps ws ON ws.id = jc.current_workflow_step_id
-            LEFT JOIN printing_types pt ON pt.id = jc.printing_type_id
-            LEFT JOIN printing_sub_types pst ON pst.id = jc.printing_sub_type_id
-            LEFT JOIN function_types ft ON ft.id = jc.function_type_id
-            LEFT JOIN proforma_bills pb ON pb.id = jc.proforma_bill_id
-            LEFT JOIN quotations q ON q.id = jc.quotation_id
-            LEFT JOIN enquiries e ON e.id = jc.enquiry_id
-            LEFT JOIN users cb ON cb.id = jc.created_by
-            LEFT JOIN roles cr ON cr.id = cb.role_id
-            LEFT JOIN roles apr ON apr.id = jc.assigned_printing_role_id
-            LEFT JOIN users au ON au.id = jc.assigned_printing_user_id
-            LEFT JOIN users du ON du.id = jc.assigned_design_user_id
-            LEFT JOIN users su ON su.id = jc.assigned_sales_user_id
-            WHERE jc.id = ?
+
+            LEFT JOIN function_types ft
+                ON ft.id = jc.function_type_id
+
+            LEFT JOIN printing_types pt
+                ON pt.id = jc.printing_type_id
+
+            LEFT JOIN printing_sub_types pst
+                ON pst.id = jc.printing_sub_type_id
+
+            LEFT JOIN job_card_statuses jcs
+                ON jcs.id = jc.job_card_status_id
+
+            LEFT JOIN workflow_steps ws
+                ON ws.id = jc.current_workflow_step_id
+
+            LEFT JOIN users sales
+                ON sales.id = jc.assigned_sales_user_id
+
+            LEFT JOIN users designer
+                ON designer.id = jc.assigned_design_user_id
+
+            LEFT JOIN users printer
+                ON printer.id = jc.assigned_printing_user_id
+
+            LEFT JOIN roles rprint
+                ON rprint.id = jc.assigned_printing_role_id
+
+            LEFT JOIN users creator
+                ON creator.id = jc.created_by
+
+            LEFT JOIN (
+                SELECT
+                    job_card_id,
+                    COUNT(*) AS total_steps,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_steps,
+                    SUM(CASE WHEN status = 'delayed' OR is_delayed = 1 THEN 1 ELSE 0 END) AS delayed_steps
+                FROM job_tracking
+                GROUP BY job_card_id
+            ) track
+                ON track.job_card_id = jc.id
+
+            {$whereSql}
+
             LIMIT 1
-        ");
-        $stmt->bind_param('i', $id);
+        ";
+
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param($types, ...$params);
         $stmt->execute();
         $job = $stmt->get_result()->fetch_assoc();
         $stmt->close();
-        if (!$job) $error = 'Job Card not found.';
+
+        if (!$job) {
+            $message = 'Job card not found or you do not have permission to view this job.';
+            $messageType = 'danger';
+        }
     } catch (Throwable $e) {
-        $error = $e->getMessage();
+        $message = 'Job card query error: ' . $e->getMessage();
+        $messageType = 'danger';
+        $job = null;
+    }
+}
+
+if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'update_step_status') {
+    $trackingId = (int)($_POST['tracking_id'] ?? 0);
+    $newStatus = strtolower(trim((string)($_POST['status'] ?? '')));
+    $remarks = trim((string)($_POST['remarks'] ?? ''));
+    $delayReasonId = (int)($_POST['delay_reason_id'] ?? 0);
+    $delayDays = max(0, (int)($_POST['delay_days'] ?? 0));
+
+    $allowedStatus = [
+        'pending',
+        'in_progress',
+        'completed',
+        'delayed',
+        'skipped',
+        'cancelled'
+    ];
+
+    if ($trackingId <= 0 || !in_array($newStatus, $allowedStatus, true)) {
+        $message = 'Invalid status update request.';
+        $messageType = 'danger';
+    } elseif ($newStatus === 'delayed' && $remarks === '') {
+        $message = 'Delay remark is required.';
+        $messageType = 'danger';
+    } elseif ($newStatus === 'delayed' && $delayReasonId <= 0) {
+        $message = 'Delay reason is required.';
+        $messageType = 'danger';
+    } else {
+        try {
+            $stmt = $conn->prepare("
+                SELECT
+                    jt.*,
+                    rr.role_key AS responsible_role_key,
+                    ws.default_owner_role_key,
+                    ws.step_key,
+                    ws.step_name,
+                    ws.is_approval_step
+                FROM job_tracking jt
+                LEFT JOIN roles rr
+                    ON rr.id = jt.responsible_role_id
+                LEFT JOIN workflow_steps ws
+                    ON ws.id = jt.workflow_step_id
+                WHERE jt.id = ?
+                  AND jt.job_card_id = ?
+                LIMIT 1
+            ");
+            $stmt->bind_param('ii', $trackingId, $jobId);
+            $stmt->execute();
+            $stepRow = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if (!$stepRow) {
+                $message = 'Tracking stage not found.';
+                $messageType = 'danger';
+            } else {
+                $stepRoleKey = $stepRow['responsible_role_key'] ?: $stepRow['default_owner_role_key'];
+                $oldStepStatus = strtolower((string)($stepRow['status'] ?? 'pending'));
+
+                $canUpdateThisStep = jcvCanUpdateStep(
+                    $roleKey,
+                    $stepRoleKey,
+                    $job['assigned_printing_role_key'] ?? '',
+                    $job['printing_role_key'] ?? '',
+                    $canUpdateJob,
+                    $oldStepStatus
+                );
+
+                if (!$canUpdateThisStep) {
+                    $message = 'You do not have permission to update this stage.';
+                    $messageType = 'danger';
+                } else {
+                    $userId = (int)($_SESSION['user_id'] ?? 0);
+
+                    $isApprovalStage = jcvIsApprovalStage($stepRow);
+
+                    if ($newStatus === 'completed' && $isApprovalStage) {
+                        $approvalType = jcvApprovalTypeForStep($stepRow);
+                        $approval = jcvGetCustomerApproval($conn, $jobId, (int)$stepRow['workflow_step_id'], $approvalType);
+
+                        if (!jcvApprovalIsDone($approval)) {
+                            $manualConfirm = isset($_POST['manual_customer_approved']) ? 1 : 0;
+                            $approvalRemarks = trim((string)($_POST['approval_remarks'] ?? ''));
+
+                            if (!$canManualCustomerApproval) {
+                                throw new RuntimeException('Customer approval is required before completing this stage. Admin or Sales can manually confirm if the customer approved by call.');
+                            }
+
+                            if ($manualConfirm !== 1) {
+                                throw new RuntimeException('Customer approval confirmation is required for this approval stage.');
+                            }
+
+                            if ($approvalRemarks === '') {
+                                throw new RuntimeException('Customer approval remark is required.');
+                            }
+
+                            jcvSaveManualCustomerApproval(
+                                $conn,
+                                $jobId,
+                                (int)$stepRow['workflow_step_id'],
+                                $approvalType,
+                                (string)($job['customer_name'] ?? ''),
+                                (string)($job['mobile'] ?? ''),
+                                $userId,
+                                $approvalRemarks
+                            );
+                        }
+                    }
+
+                    if ($newStatus === 'completed') {
+                        $stmt = $conn->prepare("
+                            UPDATE job_tracking
+                            SET
+                                status = ?,
+                                remarks = ?,
+                                actual_start_at = COALESCE(actual_start_at, NOW()),
+                                actual_completed_at = NOW(),
+                                completed_by = ?,
+                                updated_at = NOW()
+                            WHERE id = ?
+                              AND job_card_id = ?
+                        ");
+                        $stmt->bind_param('ssiii', $newStatus, $remarks, $userId, $trackingId, $jobId);
+                        $stmt->execute();
+                        $stmt->close();
+                    } elseif ($newStatus === 'in_progress') {
+                        $stmt = $conn->prepare("
+                            UPDATE job_tracking
+                            SET
+                                status = ?,
+                                remarks = ?,
+                                actual_start_at = COALESCE(actual_start_at, NOW()),
+                                updated_at = NOW()
+                            WHERE id = ?
+                              AND job_card_id = ?
+                        ");
+                        $stmt->bind_param('ssii', $newStatus, $remarks, $trackingId, $jobId);
+                        $stmt->execute();
+                        $stmt->close();
+                    } elseif ($newStatus === 'delayed') {
+                        $delayReasonValue = $delayReasonId;
+
+                        $stmt = $conn->prepare("
+                            UPDATE job_tracking
+                            SET
+                                status = ?,
+                                remarks = ?,
+                                is_delayed = 1,
+                                delay_started_at = COALESCE(delay_started_at, NOW()),
+                                delay_days = ?,
+                                delay_reason_id = ?,
+                                delay_remarks = ?,
+                                updated_at = NOW()
+                            WHERE id = ?
+                              AND job_card_id = ?
+                        ");
+
+                        $stmt->bind_param(
+                            'ssiisii',
+                            $newStatus,
+                            $remarks,
+                            $delayDays,
+                            $delayReasonValue,
+                            $remarks,
+                            $trackingId,
+                            $jobId
+                        );
+
+                        $stmt->execute();
+                        $stmt->close();
+                    } else {
+                        $stmt = $conn->prepare("
+                            UPDATE job_tracking
+                            SET
+                                status = ?,
+                                remarks = ?,
+                                updated_at = NOW()
+                            WHERE id = ?
+                              AND job_card_id = ?
+                        ");
+                        $stmt->bind_param('ssii', $newStatus, $remarks, $trackingId, $jobId);
+                        $stmt->execute();
+                        $stmt->close();
+                    }
+
+                    $summary = [
+                        'total_steps' => 0,
+                        'completed_steps' => 0,
+                        'open_steps' => 0,
+                        'progress_steps' => 0,
+                        'delayed_steps' => 0,
+                        'delay_history_steps' => 0
+                    ];
+
+                    $stmt = $conn->prepare("
+                        SELECT
+                            COUNT(*) AS total_steps,
+                            SUM(CASE WHEN status IN ('completed','skipped') THEN 1 ELSE 0 END) AS completed_steps,
+                            SUM(CASE WHEN status NOT IN ('completed','skipped','cancelled') THEN 1 ELSE 0 END) AS open_steps,
+                            SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) AS progress_steps,
+                            SUM(CASE WHEN status = 'delayed' THEN 1 ELSE 0 END) AS delayed_steps,
+                            SUM(CASE WHEN is_delayed = 1 THEN 1 ELSE 0 END) AS delay_history_steps
+                        FROM job_tracking
+                        WHERE job_card_id = ?
+                    ");
+                    $stmt->bind_param('i', $jobId);
+                    $stmt->execute();
+                    $summaryRow = $stmt->get_result()->fetch_assoc();
+                    $stmt->close();
+
+                    if ($summaryRow) {
+                        $summary = array_merge($summary, $summaryRow);
+                    }
+
+                    $currentWorkflowStepId = null;
+
+                    $stmt = $conn->prepare("
+                        SELECT jt.workflow_step_id
+                        FROM job_tracking jt
+                        LEFT JOIN workflow_steps ws
+                            ON ws.id = jt.workflow_step_id
+                        WHERE jt.job_card_id = ?
+                          AND jt.status NOT IN ('completed','skipped','cancelled')
+                        ORDER BY ws.sort_order ASC, jt.id ASC
+                        LIMIT 1
+                    ");
+                    $stmt->bind_param('i', $jobId);
+                    $stmt->execute();
+                    $currentRow = $stmt->get_result()->fetch_assoc();
+                    $stmt->close();
+
+                    if ($currentRow) {
+                        $currentWorkflowStepId = (int)$currentRow['workflow_step_id'];
+                    }
+
+                    $jobStatusKey = 'in_progress';
+
+                    if ((int)($summary['delayed_steps'] ?? 0) > 0) {
+                        $jobStatusKey = 'delayed';
+                    } elseif ((int)($summary['open_steps'] ?? 0) === 0 && (int)($summary['total_steps'] ?? 0) > 0) {
+                        $jobStatusKey = 'completed';
+                    } elseif ((int)($summary['progress_steps'] ?? 0) > 0) {
+                        $jobStatusKey = 'in_progress';
+                    } else {
+                        $jobStatusKey = 'pending';
+                    }
+
+                    $jobStatusId = null;
+
+                    $stmt = $conn->prepare("
+                        SELECT id
+                        FROM job_card_statuses
+                        WHERE status_key = ?
+                        LIMIT 1
+                    ");
+                    $stmt->bind_param('s', $jobStatusKey);
+                    $stmt->execute();
+                    $statusRow = $stmt->get_result()->fetch_assoc();
+                    $stmt->close();
+
+                    if ($statusRow) {
+                        $jobStatusId = (int)$statusRow['id'];
+                    }
+
+                    $isDelayed = ((int)($summary['delay_history_steps'] ?? 0) > 0 || $jobStatusKey === 'delayed') ? 1 : 0;
+
+                    if ($jobStatusId && $currentWorkflowStepId) {
+                        $stmt = $conn->prepare("
+                            UPDATE job_cards
+                            SET
+                                current_workflow_step_id = ?,
+                                job_card_status_id = ?,
+                                is_delayed = ?,
+                                completed_at = CASE
+                                    WHEN ? = 'completed' THEN COALESCE(completed_at, NOW())
+                                    ELSE completed_at
+                                END,
+                                updated_by = ?,
+                                updated_at = NOW()
+                            WHERE id = ?
+                        ");
+                        $stmt->bind_param(
+                            'iiisii',
+                            $currentWorkflowStepId,
+                            $jobStatusId,
+                            $isDelayed,
+                            $jobStatusKey,
+                            $userId,
+                            $jobId
+                        );
+                        $stmt->execute();
+                        $stmt->close();
+                    } elseif ($jobStatusId) {
+                        $stmt = $conn->prepare("
+                            UPDATE job_cards
+                            SET
+                                job_card_status_id = ?,
+                                is_delayed = ?,
+                                completed_at = CASE
+                                    WHEN ? = 'completed' THEN COALESCE(completed_at, NOW())
+                                    ELSE completed_at
+                                END,
+                                updated_by = ?,
+                                updated_at = NOW()
+                            WHERE id = ?
+                        ");
+                        $stmt->bind_param(
+                            'iisii',
+                            $jobStatusId,
+                            $isDelayed,
+                            $jobStatusKey,
+                            $userId,
+                            $jobId
+                        );
+                        $stmt->execute();
+                        $stmt->close();
+                    }
+
+                    header('Location: job_card_view.php?id=' . $jobId . '&msg=status_updated');
+                    exit;
+                }
+            }
+        } catch (Throwable $e) {
+            $message = 'Status update failed: ' . $e->getMessage();
+            $messageType = 'danger';
+        }
     }
 }
 
 if ($job) {
     try {
-        $stmt = $conn->prepare("
-            SELECT *
-            FROM job_card_items
-            WHERE job_card_id = ?
-            ORDER BY id ASC
-            LIMIT 1
-        ");
-        $stmt->bind_param('i', $id);
-        $stmt->execute();
-        $item = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
-    } catch (Throwable $e) {}
-
-    try {
-        $historyJoin = '';
-        $historySelect = "NULL AS updated_by_name, NULL AS updated_by_department, NULL AS last_updated_at, NULL AS last_action_remarks";
-        if (jcv_table_exists($conn, 'job_tracking_history')) {
-            $historyJoin = "
+        if (jcvTableExists($conn, 'job_tracking')) {
+            $stmt = $conn->prepare("
+                SELECT
+                    jt.*,
+                    ws.step_name,
+                    ws.step_key,
+                    ws.sort_order,
+                    ws.default_owner_role_key,
+                    ws.is_approval_step,
+                    rr.role_name AS responsible_role_name,
+                    rr.role_key AS responsible_role_key,
+                    ru.username AS responsible_user_name,
+                    cu.username AS completed_by_name,
+                    dr.reason_name AS delay_reason_name,
+                    ca.id AS approval_id,
+                    ca.job_card_id AS approval_job_card_id,
+                    ca.workflow_step_id AS approval_workflow_step_id,
+                    ca.approval_type,
+                    ca.approval_token,
+                    ca.customer_name AS approval_customer_name,
+                    ca.mobile AS approval_mobile,
+                    ca.status AS approval_status,
+                    ca.approved_by_customer,
+                    ca.approved_by_call,
+                    ca.call_confirmed_by,
+                    ca.customer_remarks,
+                    ca.internal_remarks,
+                    ca.approved_at,
+                    ca.rejected_at,
+                    ca.expires_at,
+                    ca.ip_address,
+                    ca.user_agent,
+                    ca.link_sent_at,
+                    ca.link_sent_by,
+                    ca.created_at AS approval_created_at,
+                    ca.updated_at AS approval_updated_at,
+                    call_user.username AS call_confirmed_by_name,
+                    sent_user.username AS link_sent_by_name
+                FROM job_tracking jt
+                LEFT JOIN workflow_steps ws
+                    ON ws.id = jt.workflow_step_id
+                LEFT JOIN roles rr
+                    ON rr.id = jt.responsible_role_id
+                LEFT JOIN users ru
+                    ON ru.id = jt.responsible_user_id
+                LEFT JOIN users cu
+                    ON cu.id = jt.completed_by
+                LEFT JOIN delay_reasons dr
+                    ON dr.id = jt.delay_reason_id
                 LEFT JOIN (
-                    SELECT h1.*
-                    FROM job_tracking_history h1
+                    SELECT ca1.*
+                    FROM customer_approvals ca1
                     INNER JOIN (
-                        SELECT job_tracking_id, MAX(id) AS max_id
-                        FROM job_tracking_history
-                        WHERE COALESCE(action_remarks, '') NOT LIKE '%job card creation%'
-                          AND COALESCE(action_remarks, '') NOT LIKE 'Pending after%'
-                        GROUP BY job_tracking_id
-                    ) hx ON hx.max_id = h1.id
-                ) jth ON jth.job_tracking_id = jt.id
-                LEFT JOIN users hu ON hu.id = jth.changed_by
-                LEFT JOIN roles hur ON hur.id = hu.role_id
-            ";
-            $historySelect = "
-                CASE WHEN jth.id IS NOT NULL THEN hu.name WHEN jt.completed_by IS NOT NULL THEN cu.name ELSE NULL END AS updated_by_name,
-                CASE WHEN jth.id IS NOT NULL THEN hur.role_name WHEN jt.completed_by IS NOT NULL THEN cur.role_name ELSE NULL END AS updated_by_department,
-                CASE WHEN jth.id IS NOT NULL THEN jth.changed_at WHEN jt.completed_by IS NOT NULL THEN jt.actual_completed_at ELSE NULL END AS last_updated_at,
-                CASE WHEN jth.id IS NOT NULL THEN jth.action_remarks ELSE NULL END AS last_action_remarks
-            ";
-        } else {
-            $historySelect = "
-                CASE WHEN jt.completed_by IS NOT NULL THEN cu.name ELSE NULL END AS updated_by_name,
-                CASE WHEN jt.completed_by IS NOT NULL THEN cur.role_name ELSE NULL END AS updated_by_department,
-                CASE WHEN jt.completed_by IS NOT NULL THEN jt.actual_completed_at ELSE NULL END AS last_updated_at,
-                NULL AS last_action_remarks
-            ";
+                        SELECT job_card_id, workflow_step_id, MAX(id) AS max_id
+                        FROM customer_approvals
+                        GROUP BY job_card_id, workflow_step_id
+                    ) latest_ca
+                        ON latest_ca.max_id = ca1.id
+                ) ca
+                    ON ca.job_card_id = jt.job_card_id
+                   AND ca.workflow_step_id = jt.workflow_step_id
+                LEFT JOIN users call_user
+                    ON call_user.id = ca.call_confirmed_by
+                LEFT JOIN users sent_user
+                    ON sent_user.id = ca.link_sent_by
+                WHERE jt.job_card_id = ?
+                ORDER BY ws.sort_order ASC, jt.id ASC
+            ");
+            $stmt->bind_param('i', $jobId);
+            $stmt->execute();
+            $res = $stmt->get_result();
+
+            while ($row = $res->fetch_assoc()) {
+                $trackingRows[] = $row;
+            }
+
+            $stmt->close();
         }
-
-        $stmt = $conn->prepare("
-            SELECT jt.*, ws.step_name, ws.step_key, ws.sort_order, r.role_name, dr.reason_name AS delay_reason_name,
-                   {$historySelect}
-            FROM job_tracking jt
-            LEFT JOIN workflow_steps ws ON ws.id = jt.workflow_step_id
-            LEFT JOIN roles r ON r.id = jt.responsible_role_id
-            LEFT JOIN delay_reasons dr ON dr.id = jt.delay_reason_id
-            LEFT JOIN users cu ON cu.id = jt.completed_by
-            LEFT JOIN roles cur ON cur.id = cu.role_id
-            {$historyJoin}
-            WHERE jt.job_card_id = ?
-            ORDER BY ws.sort_order ASC, jt.id ASC
-        ");
-        $stmt->bind_param('i', $id);
-        $stmt->execute();
-        $res = $stmt->get_result();
-        while ($row = $res->fetch_assoc()) $tracking[] = $row;
-        $stmt->close();
-    } catch (Throwable $e) {}
-
-    if (jcv_table_exists($conn, 'delay_reasons')) {
-        try {
-            $res = $conn->query("SELECT id, reason_name FROM delay_reasons WHERE is_active = 1 ORDER BY id ASC");
-            while ($row = $res->fetch_assoc()) $delayReasons[] = $row;
-            $res->free();
-        } catch (Throwable $e) {}
+    } catch (Throwable $e) {
+        $trackingRows = [];
     }
 }
 
-$progressPercent = jcv_progress_percent($tracking);
-$progressCounts = jcv_progress_counts($tracking);
-$pageTitle = $job ? 'Job Card - ' . ($job['job_card_no'] ?? '') : 'Job Card';
+$totalSteps = $job ? (int)($job['total_steps'] ?? 0) : 0;
+$completedSteps = $job ? (int)($job['completed_steps'] ?? 0) : 0;
+$progressPercent = $totalSteps > 0 ? round(($completedSteps / $totalSteps) * 100) : 0;
+$progressPercent = max(0, min(100, $progressPercent));
+
+$orderType = $job ? strtolower((string)($job['order_type'] ?? 'readymade')) : '';
+$statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
+
 ?>
 <!doctype html>
 <html lang="en">
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title><?= e($pageTitle) ?> - Subhiksha Cards</title>
+    <title>View Job Card - Subhiksha Cards</title>
+
     <?php include __DIR__ . '/includes/links.php'; ?>
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
+
     <style>
-        .job-view .page-head{padding:24px 28px;margin-bottom:18px}
-        .job-view .page-head h1{font-size:30px;font-weight:900;color:var(--text-main)}
-        .view-card{padding:24px;border-radius:20px;margin-bottom:18px}
-        .view-section-title{font-size:17px;font-weight:900;color:var(--text-main);margin-bottom:14px}
-        .info-box{border:1px solid var(--border-soft);border-radius:16px;padding:14px;background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg));height:100%}
-        .info-box small{display:block;font-size:11px;text-transform:uppercase;color:var(--text-muted);font-weight:900;margin-bottom:5px}
-        .info-box strong{display:block;font-size:15px;color:var(--text-main);font-weight:900;word-break:break-word}
-        .status-chip{display:inline-flex;align-items:center;border-radius:999px;padding:6px 12px;font-weight:900;font-size:12px;background:#dbeafe;color:#1d4ed8}
-        .progress-panel{border:1px solid var(--border-soft);border-radius:20px;padding:18px;background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg))}
-        .progress-main-value{font-size:38px;font-weight:900;color:var(--text-main);line-height:1}
-        .progress-track{height:14px;border-radius:999px;background:color-mix(in srgb,var(--text-muted) 16%,transparent);overflow:hidden}
-        .progress-track span{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#2563eb,#22c55e)}
-        .progress-stat{border:1px solid var(--border-soft);border-radius:16px;padding:12px;background:var(--card-bg);height:100%}
-        .progress-stat small{display:block;font-size:10px;font-weight:900;text-transform:uppercase;color:var(--text-muted)}
-        .progress-stat strong{display:block;font-size:22px;font-weight:900;color:var(--text-main)}
-        .tracking-status-badge{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:900;background:#e5e7eb;color:#374151}
-        .tracking-status-badge.completed{background:#dcfce7;color:#166534}
-        .tracking-status-badge.in_progress{background:#dbeafe;color:#1d4ed8}
-        .tracking-status-badge.pending{background:#fef3c7;color:#92400e}
-        .tracking-status-badge.delayed{background:#fee2e2;color:#991b1b}
-        .planned-date-old{text-decoration:line-through;color:#991b1b;font-weight:900}
-        .planned-date-new{color:#166534;font-weight:900;margin-left:7px}
-        .delay-info{font-size:11px;font-weight:800;color:#991b1b}
-        .delay-meta{font-size:11px;font-weight:800;color:var(--text-muted)}
-        .delay-required-box{display:none;margin-top:8px}
-        .tracking-update-form.delay-visible .delay-required-box{display:block}
-        .role-lock-text{font-size:11px;font-weight:900;color:var(--text-muted)}
-        .toast-ui{border:0;border-radius:18px;box-shadow:0 18px 45px rgba(15,23,42,.18);overflow:hidden;min-width:320px;max-width:420px}
-        .toast-ui.success{background:#dcfce7;color:#14532d}.toast-ui.danger{background:#fee2e2;color:#7f1d1d}
-        .toast-title{font-size:14px;font-weight:900}.toast-message{font-size:13px;font-weight:800;line-height:1.45}
-        @media print{#sidebar,#mobileOverlay,#settingsOverlay,.no-print,nav,.app-shell>aside{display:none!important}main{margin:0!important}.view-card,.page-head{box-shadow:none!important;border:1px solid #ddd!important}}
-    </style>
-</head>
-<body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
-<div id="mobileOverlay"></div>
-<div class="app-shell">
-    <?php include __DIR__ . '/includes/sidebar.php'; ?>
-    <main id="main">
-        <?php include __DIR__ . '/includes/nav.php'; ?>
-
-        <section class="page-section job-view">
-            <div class="card-ui page-head">
-                <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
-                    <div>
-                        <h1 class="mb-1">Job Card Details</h1>
-                        <p class="text-muted-custom mb-0">Complete job card, assignment, planned dates, delay status and role based progress update.</p>
-                    </div>
-                    <div class="d-flex gap-2 no-print">
-                        <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold" onclick="window.print()">Print</button>
-                        <a href="job_cards.php" class="btn btn-primary rounded-pill px-4 fw-bold">Back to Job Cards</a>
-                    </div>
-                </div>
-            </div>
-
-            <?php if ($error !== ''): ?>
-            <div class="card-ui view-card"><div class="alert alert-danger mb-0"><?= e($error) ?></div></div>
-            <?php endif; ?>
-
-            <?php if ($job): ?>
-            <div class="card-ui view-card">
-                <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-3">
-                    <div>
-                        <div class="view-section-title mb-1"><?= e($job['job_card_no'] ?? '-') ?></div>
-                        <div class="text-muted-custom">
-                            Enquiry: <?= e($job['enquiry_no'] ?? '-') ?> |
-                            Quotation: <?= e($job['quotation_no'] ?? '-') ?> |
-                            Proforma: <?= e($job['proforma_no'] ?? '-') ?>
-                        </div>
-                    </div>
-                    <span class="status-chip"><?= e($job['job_status_name'] ?? '-') ?></span>
-                </div>
-
-                <div class="row g-3">
-                    <div class="col-md-3"><div class="info-box"><small>Customer</small><strong><?= e($job['customer_name'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Mobile</small><strong><?= e($job['mobile'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Function</small><strong><?= e($job['function_name'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Order Type</small><strong><?= e(ucfirst((string)($job['order_type'] ?? '-'))) ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Product</small><strong><?= e($job['product_name'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Printing Type</small><strong><?= e($job['printing_name'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Screen Sub Type</small><strong><?= e($job['sub_type_name'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Delivery Date</small><strong><?= e(jcv_date($job['delivery_date'] ?? '')) ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Advance</small><strong><?= e(jcv_money($job['advance_amount'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Balance</small><strong><?= e(jcv_money($job['balance_amount'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Assigned Department</small><strong><?= e($job['assigned_printing_department'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Current Stage</small><strong><?= e($job['current_step_name'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Created By</small><strong><?= e($job['created_by_name'] ?? '-') ?></strong><small><?= e($job['created_by_department'] ?? '') ?></small></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Created Date/Time</small><strong><?= e(jcv_datetime($job['created_at'] ?? '')) ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Delay Status</small><strong><?= ((int)($job['is_delayed'] ?? 0) === 1 || ($progressCounts['delayed'] ?? 0) > 0) ? 'Delayed' : 'On Track' ?></strong></div></div>
-                </div>
-            </div>
-
-            <div class="card-ui view-card">
-                <div class="view-section-title">Product / Requirement Details</div>
-                <div class="row g-3">
-                    <div class="col-md-3"><div class="info-box"><small>Item Name</small><strong><?= e($item['item_name'] ?? $job['product_name'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Qty</small><strong><?= e(number_format((float)($item['qty'] ?? 0), 2)) ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Rate</small><strong><?= e(jcv_money($item['rate'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Amount</small><strong><?= e(jcv_money($item['amount'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Size</small><strong><?= e($item['size_text'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>GSM Thickness</small><strong><?= e($item['gsm_thickness'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Lamination Status</small><strong><?= e(jcv_yes_no($item['lamination_required'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Lamination Type</small><strong><?= e($item['lamination_type'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Printing Side</small><strong><?= e($item['printing_side'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Screening Type</small><strong><?= e($item['screening_type'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Finishing Details</small><strong><?= e(jcv_yes_no($item['finishing_required'] ?? 0)) ?></strong></div></div>
-                    <div class="col-12"><div class="info-box"><small>Description / Notes</small><strong><?= e($item['description'] ?? $job['notes'] ?? '-') ?></strong></div></div>
-                </div>
-            </div>
-
-            <div class="card-ui view-card">
-                <div class="view-section-title">Job Progress Status</div>
-                <div class="progress-panel mb-3">
-                    <div class="row g-3 align-items-center">
-                        <div class="col-lg-3">
-                            <small class="text-muted-custom fw-bold text-uppercase">Overall Progress</small>
-                            <div class="progress-main-value"><?= e($progressPercent) ?>%</div>
-                        </div>
-                        <div class="col-lg-9">
-                            <div class="d-flex justify-content-between gap-2 mb-2">
-                                <strong><?= e($job['current_step_name'] ?? '-') ?></strong>
-                                <span class="status-chip"><?= e($job['job_status_name'] ?? '-') ?></span>
-                            </div>
-                            <div class="progress-track"><span style="width:<?= e($progressPercent) ?>%"></span></div>
-                        </div>
-                    </div>
-                </div>
-                <div class="row g-3">
-                    <div class="col-6 col-md-2"><div class="progress-stat"><small>Total</small><strong><?= e($progressCounts['total']) ?></strong></div></div>
-                    <div class="col-6 col-md-2"><div class="progress-stat"><small>Completed</small><strong><?= e($progressCounts['completed']) ?></strong></div></div>
-                    <div class="col-6 col-md-2"><div class="progress-stat"><small>In Progress</small><strong><?= e($progressCounts['in_progress']) ?></strong></div></div>
-                    <div class="col-6 col-md-2"><div class="progress-stat"><small>Pending</small><strong><?= e($progressCounts['pending']) ?></strong></div></div>
-                    <div class="col-6 col-md-2"><div class="progress-stat"><small>Delayed</small><strong><?= e($progressCounts['delayed']) ?></strong></div></div>
-                    <div class="col-6 col-md-2"><div class="progress-stat"><small>Other</small><strong><?= e($progressCounts['other']) ?></strong></div></div>
-                </div>
-            </div>
-
-            <div class="card-ui view-card">
-                <div class="view-section-title">Planned Tracking Dates / Role Based Status Update</div>
-                <div class="table-responsive">
-                    <table class="table table-hover align-middle">
-                        <thead>
-                            <tr>
-                                <th>Order</th>
-                                <th>Stage</th>
-                                <th>Status</th>
-                                <th>Responsible</th>
-                                <th>Updated By</th>
-                                <th>Planned / Revised</th>
-                                <th>Delay Details</th>
-                                <th class="no-print">Update</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (!$tracking): ?>
-                            <tr><td colspan="8" class="text-center text-muted-custom py-4">No tracking steps found.</td></tr>
-                            <?php endif; ?>
-                            <?php foreach ($tracking as $trk): ?>
-                            <?php
-                                $trkStatus = trim((string)($trk['status'] ?? 'pending'));
-                                if ($trkStatus === '') $trkStatus = 'pending';
-                                $delayDays = jcv_delay_days_from_planned($trk['planned_completion_date'] ?? null);
-                                $isDelayed = (int)($trk['is_delayed'] ?? 0) === 1 || $delayDays > 0 || $trkStatus === 'delayed';
-                                $needsDelayReason = $delayDays > 0 && empty($trk['delay_reason_id']) && trim((string)($trk['delay_remarks'] ?? '')) === '';
-                                $badgeClass = $isDelayed ? 'delayed' : $trkStatus;
-                            ?>
-                            <tr>
-                                <td><?= e($trk['sort_order'] ?? '-') ?></td>
-                                <td><strong><?= e($trk['step_name'] ?? '-') ?></strong><small class="d-block text-muted-custom"><?= e($trk['step_key'] ?? '') ?></small></td>
-                                <td>
-                                    <span class="tracking-status-badge <?= e($badgeClass) ?>"><?= e($isDelayed ? 'Delayed' : jcv_status_label($trkStatus)) ?></span>
-                                    <?php if ($isDelayed): ?><small class="d-block delay-info"><?= e($trk['delay_reason_name'] ?? 'Delay reason pending') ?></small><?php endif; ?>
-                                </td>
-                                <td><strong><?= e($trk['role_name'] ?? '-') ?></strong></td>
-                                <td>
-                                    <strong><?= e($trk['updated_by_name'] ?? '-') ?></strong>
-                                    <small class="d-block text-muted-custom"><?= e($trk['updated_by_department'] ?? '-') ?></small>
-                                    <small class="d-block text-muted-custom"><?= e(jcv_datetime($trk['last_updated_at'] ?? '')) ?></small>
-                                </td>
-                                <td>
-                                    <?php if (!empty($trk['revised_completion_date']) && !empty($trk['planned_completion_date']) && $trk['revised_completion_date'] !== $trk['planned_completion_date']): ?>
-                                        Planned:
-                                        <span class="planned-date-old"><?= e(jcv_date($trk['planned_completion_date'])) ?></span>
-                                        <span class="planned-date-new"><?= e(jcv_date($trk['revised_completion_date'])) ?></span>
-                                    <?php else: ?>
-                                        <?= e(jcv_date($trk['planned_completion_date'] ?? '')) ?>
-                                    <?php endif; ?>
-                                </td>
-                                <td>
-                                    <?php if ($isDelayed): ?>
-                                        <strong><?= e((int)($trk['delay_days'] ?? $delayDays)) ?> day(s)</strong>
-                                        <small class="d-block delay-meta">Started: <?= e(jcv_datetime($trk['delay_started_at'] ?? '')) ?></small>
-                                        <small class="d-block delay-meta">Completed: <?= e(jcv_datetime($trk['actual_completed_at'] ?? '')) ?></small>
-                                        <small class="d-block delay-info"><?= e($trk['delay_remarks'] ?? '-') ?></small>
-                                    <?php else: ?>
-                                        -
-                                    <?php endif; ?>
-                                </td>
-                                <td class="no-print">
-                                    <?php if (jcv_can_update_tracking($conn, $trk)): ?>
-                                    <form class="tracking-update-form js-tracking-update-form <?= $needsDelayReason ? 'delay-visible' : '' ?>" method="post" action="api/job_cards.php" data-delay-required="<?= $needsDelayReason ? '1' : '0' ?>">
-                                        <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
-                                        <input type="hidden" name="action" value="update_tracking_status">
-                                        <input type="hidden" name="tracking_id" value="<?= e($trk['id'] ?? '') ?>">
-                                        <div class="d-flex gap-2 align-items-center">
-                                            <select name="status" class="form-select form-select-sm js-status-select">
-                                                <option value="pending" <?= $trkStatus === 'pending' ? 'selected' : '' ?>>Pending</option>
-                                                <option value="in_progress" <?= $trkStatus === 'in_progress' ? 'selected' : '' ?>>In Progress</option>
-                                                <option value="completed" <?= $trkStatus === 'completed' ? 'selected' : '' ?>>Completed</option>
-                                            </select>
-                                            <button type="submit" class="btn btn-sm btn-primary fw-bold">Update</button>
-                                        </div>
-                                        <div class="delay-required-box">
-                                            <select name="delay_reason_id" class="form-select form-select-sm mb-2 js-delay-reason">
-                                                <option value="">Select Delay Reason</option>
-                                                <?php foreach ($delayReasons as $reason): ?>
-                                                <option value="<?= e($reason['id']) ?>" <?= (int)($trk['delay_reason_id'] ?? 0) === (int)$reason['id'] ? 'selected' : '' ?>><?= e($reason['reason_name']) ?></option>
-                                                <?php endforeach; ?>
-                                            </select>
-                                            <textarea name="delay_remarks" class="form-control form-control-sm js-delay-remarks" rows="2" placeholder="Enter delay remarks"><?= e($trk['delay_remarks'] ?? '') ?></textarea>
-                                            <small class="delay-info">Delay reason is required before updating delayed status.</small>
-                                        </div>
-                                    </form>
-                                    <?php else: ?>
-                                    <span class="role-lock-text">Role restricted</span>
-                                    <?php endif; ?>
-                                </td>
-                            </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            <?php endif; ?>
-        </section>
-    </main>
-    <div id="settingsOverlay"></div>
-    <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
-</div>
-<?php include __DIR__ . '/includes/script.php'; ?>
-<script>
-(function(){
-    function showToast(message,type='success',title='Success'){
-        const old=document.getElementById('jobViewToastWrap'); if(old)old.remove();
-        const wrap=document.createElement('div'); wrap.id='jobViewToastWrap'; wrap.className='toast-container position-fixed top-0 end-0 p-3'; wrap.style.zIndex='12000';
-        wrap.innerHTML=`<div id="jobViewToast" class="toast toast-ui ${type}" role="alert" data-bs-delay="4200"><div class="d-flex"><div class="toast-body"><div class="toast-title">${title}</div><div class="toast-message">${message}</div></div><button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"></button></div></div>`;
-        document.body.appendChild(wrap); if(window.bootstrap)new bootstrap.Toast(document.getElementById('jobViewToast')).show(); else alert(message);
+    .module-page .page-head {
+        padding: 24px 28px;
+        margin-bottom: 18px;
     }
 
-    document.querySelectorAll('.js-tracking-update-form').forEach(function(form){
-        const statusSelect=form.querySelector('.js-status-select');
-        if(statusSelect){
-            statusSelect.addEventListener('change',function(){
-                const delayRequired=form.getAttribute('data-delay-required')==='1' && ['in_progress','completed'].includes(statusSelect.value);
-                form.classList.toggle('delay-visible',delayRequired);
-            });
+    .module-page .page-head h1 {
+        font-size: 30px;
+        font-weight: 900;
+        color: var(--text-main);
+    }
+
+    .module-card {
+        padding: 24px;
+    }
+
+    .module-title {
+        font-size: 18px;
+        font-weight: 900;
+        color: var(--text-main);
+        margin: 0;
+    }
+
+    .info-card {
+        border: 1px solid var(--border-soft);
+        border-radius: 18px;
+        padding: 16px;
+        background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg));
+        height: 100%;
+    }
+
+    .info-card small {
+        display: block;
+        color: var(--text-muted);
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+        margin-bottom: 5px;
+    }
+
+    .info-card strong,
+    .info-card span {
+        display: block;
+        color: var(--text-main);
+        font-weight: 900;
+        word-break: break-word;
+        white-space: pre-wrap;
+    }
+
+    .order-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border-radius: 999px;
+        padding: 7px 12px;
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: .02em;
+    }
+
+    .order-badge.readymade {
+        color: #92400e;
+        background: #fef3c7;
+    }
+
+    .order-badge.customized {
+        color: #075985;
+        background: #e0f2fe;
+    }
+
+    .status-pill {
+        font-size: 11px;
+        font-weight: 900;
+        border-radius: 999px;
+        padding: 6px 10px;
+        display: inline-flex;
+        align-items: center;
+        white-space: nowrap;
+    }
+
+    .status-pill.completed {
+        color: #166534;
+        background: #dcfce7;
+    }
+
+    .status-pill.progress {
+        color: #1d4ed8;
+        background: #dbeafe;
+    }
+
+    .status-pill.pending {
+        color: #92400e;
+        background: #fef3c7;
+    }
+
+    .status-pill.danger {
+        color: #991b1b;
+        background: #fee2e2;
+    }
+
+    .progress-wrap {
+        width: 100%;
+        height: 12px;
+        background: color-mix(in srgb, var(--border-soft) 80%, transparent);
+        border-radius: 999px;
+        overflow: hidden;
+    }
+
+    .progress-bar-mini {
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(135deg, #2563eb, #22c55e);
+    }
+
+    .timeline {
+        display: grid;
+        gap: 12px;
+    }
+
+    .timeline-item {
+        border: 1px solid var(--border-soft);
+        border-radius: 16px;
+        padding: 12px;
+        background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg));
+    }
+
+    .timeline-item.delayed-history {
+        border-color: #fecaca;
+        background: color-mix(in srgb, #fee2e2 34%, var(--card-bg));
+        box-shadow: 0 10px 24px rgba(220, 38, 38, .08);
+    }
+
+    .delay-history-note {
+        border: 1px solid #fca5a5;
+        background: #fef2f2;
+        color: #991b1b;
+        border-radius: 14px;
+        padding: 10px 12px;
+        font-weight: 900;
+        font-size: 12px;
+    }
+
+    .delay-card {
+        border-color: #fca5a5 !important;
+        background: #fef2f2 !important;
+    }
+
+    .delay-card small,
+    .delay-card strong,
+    .delay-card span {
+        color: #991b1b !important;
+    }
+
+    .timeline-title {
+        font-size: 15px;
+        font-weight: 900;
+        color: var(--text-main);
+        margin: 0;
+    }
+
+    .timeline-meta {
+        color: var(--text-muted);
+        font-size: 12px;
+        font-weight: 700;
+        margin-top: 4px;
+    }
+
+    .amount-card {
+        padding: 12px 14px;
+        border-radius: 14px;
+        background: linear-gradient(135deg, rgba(37, 99, 235, .10), rgba(34, 197, 94, .10));
+        border: 1px solid var(--border-soft);
+    }
+
+    .amount-card small {
+        display: block;
+        font-size: 12px;
+        color: var(--text-muted);
+        font-weight: 900;
+        text-transform: uppercase;
+    }
+
+    .amount-card strong {
+        display: block;
+        margin-top: 3px;
+        font-size: 18px;
+        font-weight: 900;
+        color: var(--text-main);
+    }
+
+    .timeline-item .info-card {
+        padding: 10px 12px;
+        border-radius: 12px;
+    }
+
+    .timeline-item .info-card small {
+        font-size: 10px;
+        margin-bottom: 3px;
+    }
+
+    .timeline-item .info-card strong,
+    .timeline-item .info-card span {
+        font-size: 13px;
+        line-height: 1.35;
+    }
+
+    .stage-update-form {
+        border: 1px dashed var(--border-soft);
+        background: color-mix(in srgb, var(--card-bg) 92%, #dbeafe);
+    }
+
+    .stage-update-form textarea {
+        min-height: 46px;
+    }
+
+    .delay-field {
+        display: none;
+    }
+
+    .stage-update-form.is-delay .delay-field {
+        display: block;
+    }
+
+    .required-star {
+        color: #dc2626;
+        font-weight: 900;
+    }
+
+    .approval-field {
+        display: none;
+    }
+
+    .stage-update-form.needs-approval .approval-field {
+        display: block;
+    }
+
+    .approval-box {
+        border: 1px solid #f59e0b;
+        background: #fffbeb;
+        color: #78350f;
+        border-radius: 16px;
+        padding: 14px 16px;
+    }
+
+    .approval-box.success {
+        border-color: #22c55e;
+        background: #f0fdf4;
+        color: #14532d;
+    }
+
+    .approval-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 10px;
+    }
+
+    .approval-mini {
+        border: 1px solid rgba(120, 53, 15, .18);
+        border-radius: 12px;
+        padding: 8px 10px;
+        background: rgba(255, 255, 255, .55);
+        min-width: 0;
+    }
+
+    .approval-box.success .approval-mini {
+        border-color: rgba(20, 83, 45, .16);
+    }
+
+    .approval-mini small {
+        display: block;
+        font-size: 9px;
+        font-weight: 900;
+        text-transform: uppercase;
+        opacity: .75;
+        margin-bottom: 2px;
+    }
+
+    .approval-mini strong,
+    .approval-mini span {
+        display: block;
+        font-size: 12px;
+        font-weight: 900;
+        word-break: break-word;
+    }
+
+    @media(max-width:991.98px) {
+        .approval-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
         }
-        form.addEventListener('submit',function(event){
-            event.preventDefault();
-            const statusValue=statusSelect?statusSelect.value:'';
-            const delayRequired=form.getAttribute('data-delay-required')==='1' && ['in_progress','completed'].includes(statusValue);
-            const delayReason=form.querySelector('.js-delay-reason');
-            const delayRemarks=form.querySelector('.js-delay-remarks');
-            if(delayRequired && (!delayReason || !delayReason.value || !delayRemarks || !delayRemarks.value.trim())){
-                form.classList.add('delay-visible');
-                showToast('Please enter delay reason and delay remarks before updating this delayed job status.','danger','Delay Reason Required');
-                return;
+    }
+
+    @media(max-width:767.98px) {
+        .module-page .page-head {
+            padding: 18px;
+            border-radius: 18px;
+        }
+
+        .module-page .page-head h1 {
+            font-size: 24px;
+        }
+
+        .module-card {
+            padding: 16px;
+            border-radius: 18px;
+        }
+    }
+    </style>
+</head>
+
+<body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
+    <div id="mobileOverlay"></div>
+
+    <div class="app-shell">
+        <?php include __DIR__ . '/includes/sidebar.php'; ?>
+
+        <main id="main">
+            <?php include __DIR__ . '/includes/nav.php'; ?>
+
+            <section class="page-section module-page">
+                <div class="card-ui page-head">
+                    <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
+                        <div>
+                            <h1 class="mb-1">View Job Card</h1>
+                            <p class="text-muted-custom mb-0">
+                                <?= $job ? e($job['job_card_no']) : 'Job card details' ?>
+                            </p>
+                        </div>
+
+                        <a href="job_cards.php" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">
+                            Back to Job Cards
+                        </a>
+                    </div>
+                </div>
+
+                <?php if ($message !== ''): ?>
+                <div class="alert alert-<?= e($messageType === 'success' ? 'success' : 'danger') ?> rounded-4 fw-bold">
+                    <?= e($message) ?>
+                </div>
+                <?php endif; ?>
+
+                <?php if (!$job): ?>
+                <div class="card-ui module-card">
+                    <div class="alert alert-danger rounded-4 fw-bold mb-0">
+                        <?= e($message ?: 'Job card not found.') ?>
+                    </div>
+                </div>
+                <?php else: ?>
+
+                <div class="row g-3 mb-3">
+                    <div class="col-12 col-md-4">
+                        <div class="amount-card">
+                            <small>Final Amount</small>
+                            <strong><?= e(jcvMoney($job['final_amount'] ?? 0)) ?></strong>
+                        </div>
+                    </div>
+
+                    <div class="col-12 col-md-4">
+                        <div class="amount-card">
+                            <small>Advance Amount</small>
+                            <strong><?= e(jcvMoney($job['advance_amount'] ?? 0)) ?></strong>
+                        </div>
+                    </div>
+
+                    <div class="col-12 col-md-4">
+                        <div class="amount-card">
+                            <small>Balance Amount</small>
+                            <strong><?= e(jcvMoney($job['balance_amount'] ?? 0)) ?></strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card-ui module-card mb-3">
+                    <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-4">
+                        <div>
+                            <h2 class="module-title"><?= e($job['job_card_no']) ?></h2>
+                            <p class="text-muted-custom mb-0">
+                                Created on <?= e(jcvDateTime($job['created_at'] ?? null)) ?>
+                            </p>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2">
+                            <span class="order-badge <?= e(jcvOrderBadgeClass($orderType)) ?>">
+                                <?= e($orderType === 'customized' ? 'Customized' : 'Readymade') ?>
+                            </span>
+
+                            <span class="status-pill <?= e(jcvStatusClass($statusKey)) ?>">
+                                <?= e($job['status_name'] ?? 'Status') ?>
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <div class="info-card">
+                                <small>Customer</small>
+                                <strong><?= e($job['customer_name']) ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="info-card">
+                                <small>Mobile</small>
+                                <strong><?= e($job['mobile']) ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="info-card">
+                                <small>Delivery Date</small>
+                                <strong><?= e(jcvDate($job['delivery_date'] ?? null)) ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="info-card">
+                                <small>Function / Product Type</small>
+                                <strong><?= e($job['function_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="info-card">
+                                <small>Product Name</small>
+                                <strong><?= e($job['product_name'] ?: '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="info-card">
+                                <small>Printing Type</small>
+                                <strong><?= e($job['printing_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="info-card">
+                                <small>Printing Sub Type</small>
+                                <strong><?= e($job['sub_type_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="info-card">
+                                <small>Current Stage</small>
+                                <strong><?= e($job['current_step_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="info-card">
+                                <small>Assigned Printing Role</small>
+                                <strong><?= e($job['assigned_printing_role_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-3">
+                            <div class="info-card">
+                                <small>Sales Person</small>
+                                <strong><?= e($job['sales_person'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-3">
+                            <div class="info-card">
+                                <small>Designer</small>
+                                <strong><?= e($job['designer_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-3">
+                            <div class="info-card">
+                                <small>Printer</small>
+                                <strong><?= e($job['printer_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-md-3">
+                            <div class="info-card">
+                                <small>Created By</small>
+                                <strong><?= e($job['created_by_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card-ui module-card mb-3">
+                    <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-3">
+                        <div>
+                            <h2 class="module-title">Progress</h2>
+                            <p class="text-muted-custom mb-0">
+                                <?= number_format($completedSteps) ?> completed out of <?= number_format($totalSteps) ?>
+                                stages.
+                            </p>
+                        </div>
+
+                        <strong class="fs-4"><?= (int)$progressPercent ?>%</strong>
+                    </div>
+
+                    <div class="progress-wrap">
+                        <div class="progress-bar-mini" style="width:<?= (int)$progressPercent ?>%"></div>
+                    </div>
+                </div>
+
+                <div class="card-ui module-card">
+                    <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-3">
+                        <div>
+                            <h2 class="module-title">Workflow Tracking</h2>
+                            <p class="text-muted-custom mb-0">
+                                Stage-wise production tracking details.
+                            </p>
+                        </div>
+                    </div>
+
+                    <?php if (!$trackingRows): ?>
+                    <div class="alert alert-warning rounded-4 fw-bold mb-0">
+                        No tracking stages found for this job card.
+                    </div>
+                    <?php else: ?>
+                    <div class="timeline">
+                        <?php foreach ($trackingRows as $step): ?>
+                        <?php
+                            $stepStatus = strtolower((string)($step['status'] ?? 'pending'));
+                            $statusClass = jcvStatusClass($stepStatus);
+                            $stepOwnerRoleKey = $step['responsible_role_key'] ?: ($step['default_owner_role_key'] ?? '');
+                            $canUpdateThisStep = jcvCanUpdateStep(
+                                $roleKey,
+                                $stepOwnerRoleKey,
+                                $job['assigned_printing_role_key'] ?? '',
+                                $job['printing_role_key'] ?? '',
+                                $canUpdateJob,
+                                $stepStatus
+                            );
+                            $stageWasDelayed = (int)($step['is_delayed'] ?? 0) === 1
+                                || !empty($step['delay_started_at'])
+                                || !empty($step['delay_reason_id'])
+                                || trim((string)($step['delay_remarks'] ?? '')) !== '';
+                            $stageDelayedCompleted = $stageWasDelayed && $stepStatus === 'completed';
+                        ?>
+                        <div class="timeline-item <?= $stageWasDelayed ? 'delayed-history' : '' ?>">
+                            <div class="d-flex flex-column flex-lg-row justify-content-between gap-2">
+                                <div>
+                                    <h3 class="timeline-title"><?= e($step['step_name'] ?? '-') ?></h3>
+                                    <div class="timeline-meta">
+                                        Role:
+                                        <?= e($step['responsible_role_name'] ?? jcvRoleLabel($stepOwnerRoleKey)) ?>
+                                        |
+                                        User:
+                                        <?= e($step['responsible_user_name'] ?? '-') ?>
+                                    </div>
+                                </div>
+
+                                <div class="d-flex flex-column flex-lg-row align-items-lg-center gap-2">
+                                    <span class="status-pill <?= e($statusClass) ?>">
+                                        <?= e(ucwords(str_replace('_', ' ', $stepStatus))) ?>
+                                    </span>
+
+                                    <?php if ($stageDelayedCompleted): ?>
+                                    <span class="status-pill danger">Delayed & Completed</span>
+                                    <?php elseif ($stageWasDelayed && $stepStatus !== 'delayed'): ?>
+                                    <span class="status-pill danger">Delayed History</span>
+                                    <?php endif; ?>
+
+                                    <?php if ($canUpdateThisStep): ?>
+                                    <button type="button"
+                                        class="btn btn-sm btn-primary rounded-pill px-3 fw-bold"
+                                        data-bs-toggle="collapse"
+                                        data-bs-target="#updateStage<?= (int)$step['id'] ?>">
+                                        Update Status
+                                    </button>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+
+                            <div class="row g-3 mt-2">
+                                <div class="col-md-3">
+                                    <div class="info-card">
+                                        <small>Planned Start</small>
+                                        <strong><?= e(jcvDate($step['planned_start_date'] ?? null)) ?></strong>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-3">
+                                    <div class="info-card">
+                                        <small>Planned Completion</small>
+                                        <strong><?= e(jcvDate($step['planned_completion_date'] ?? null)) ?></strong>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-3">
+                                    <div class="info-card">
+                                        <small>Actual Start</small>
+                                        <strong><?= e(jcvDateTime($step['actual_start_at'] ?? null)) ?></strong>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-3">
+                                    <div class="info-card">
+                                        <small>Actual Completed</small>
+                                        <strong><?= e(jcvDateTime($step['actual_completed_at'] ?? null)) ?></strong>
+                                    </div>
+                                </div>
+
+                                <?php if ($stageWasDelayed): ?>
+                                <div class="col-12">
+                                    <div class="delay-history-note">
+                                        <?= $stageDelayedCompleted ? 'This stage was delayed and later completed.' : 'This stage has delay history.' ?>
+                                        <?= !empty($step['delay_remarks']) ? ' Remark: ' . e($step['delay_remarks']) : '' ?>
+                                    </div>
+                                </div>
+                                <?php endif; ?>
+
+                                <?php if ($stageWasDelayed || $stepStatus === 'delayed'): ?>
+                                <div class="col-md-4">
+                                    <div class="info-card delay-card">
+                                        <small>Delay Days</small>
+                                        <strong><?= e($step['delay_days'] ?? 0) ?></strong>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-4">
+                                    <div class="info-card delay-card">
+                                        <small>Delay Reason</small>
+                                        <strong><?= e($step['delay_reason_name'] ?? '-') ?></strong>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-4">
+                                    <div class="info-card delay-card">
+                                        <small>Delay Remarks</small>
+                                        <span><?= e($step['delay_remarks'] ?? '-') ?></span>
+                                    </div>
+                                </div>
+                                <?php endif; ?>
+
+                                <?php if (!empty($step['remarks'])): ?>
+                                <div class="col-12">
+                                    <div class="info-card">
+                                        <small>Remarks</small>
+                                        <span><?= e($step['remarks']) ?></span>
+                                    </div>
+                                </div>
+                                <?php endif; ?>
+
+                                <?php
+                                    $isApprovalStage = jcvIsApprovalStage($step);
+                                    $approvalRow = null;
+                                    if (!empty($step['approval_id'])) {
+                                        $approvalRow = [
+                                            'status' => $step['approval_status'] ?? '',
+                                            'approved_by_customer' => $step['approved_by_customer'] ?? 0,
+                                            'approved_by_call' => $step['approved_by_call'] ?? 0
+                                        ];
+                                    }
+                                    $approvalDone = jcvApprovalIsDone($approvalRow);
+                                ?>
+
+                                <?php if ($isApprovalStage): ?>
+                                <div class="col-12">
+                                    <div class="approval-box <?= $approvalDone ? 'success' : '' ?>">
+                                        <strong>Customer Approval: <?= $approvalDone ? 'Approved' : 'Pending' ?></strong>
+                                        <div class="small mt-1">
+                                            <?php if ($approvalDone): ?>
+                                                <?php if ((int)($step['approved_by_customer'] ?? 0) === 1): ?>
+                                                    Approved by customer link.
+                                                <?php elseif ((int)($step['approved_by_call'] ?? 0) === 1): ?>
+                                                    Manually approved by call<?= !empty($step['call_confirmed_by_name']) ? ' by ' . e($step['call_confirmed_by_name']) : '' ?>.
+                                                <?php endif; ?>
+                                                <?= !empty($step['approved_at']) ? ' Manual/customer approved time: ' . e(jcvDateTime($step['approved_at'])) : '' ?>
+                                            <?php else: ?>
+                                                This approval stage cannot be completed until the customer approves it, or Admin/Sales confirms approval by call.
+                                            <?php endif; ?>
+                                        </div>
+
+                                        <?php if (!empty($step['approval_id'])): ?>
+                                        <div class="approval-grid">
+                                            <div class="approval-mini"><small>ID</small><strong><?= e($step['approval_id']) ?></strong></div>
+                                            <div class="approval-mini"><small>Job Card ID</small><strong><?= e($step['approval_job_card_id'] ?? '-') ?></strong></div>
+                                            <div class="approval-mini"><small>Workflow Step ID</small><strong><?= e($step['approval_workflow_step_id'] ?? '-') ?></strong></div>
+                                            <div class="approval-mini"><small>Approval Type</small><strong><?= e($step['approval_type'] ?? '-') ?></strong></div>
+                                            <div class="approval-mini"><small>Approval Token</small><span><?= e($step['approval_token'] ?? '-') ?></span></div>
+                                            <div class="approval-mini"><small>Customer Name</small><strong><?= e($step['approval_customer_name'] ?? '-') ?></strong></div>
+                                            <div class="approval-mini"><small>Mobile</small><strong><?= e($step['approval_mobile'] ?? '-') ?></strong></div>
+                                            <div class="approval-mini"><small>Status</small><strong><?= e($step['approval_status'] ?? '-') ?></strong></div>
+                                            <div class="approval-mini"><small>Approved By Customer</small><strong><?= ((int)($step['approved_by_customer'] ?? 0) === 1) ? 'Yes' : 'No' ?></strong></div>
+                                            <div class="approval-mini"><small>Approved By Call</small><strong><?= ((int)($step['approved_by_call'] ?? 0) === 1) ? 'Yes' : 'No' ?></strong></div>
+                                            <div class="approval-mini"><small>Call Confirmed By</small><strong><?= e($step['call_confirmed_by_name'] ?? ($step['call_confirmed_by'] ?? '-')) ?></strong></div>
+                                            <div class="approval-mini"><small>Approved At</small><strong><?= e(jcvDateTime($step['approved_at'] ?? null)) ?></strong></div>
+                                            <div class="approval-mini"><small>Rejected At</small><strong><?= e(jcvDateTime($step['rejected_at'] ?? null)) ?></strong></div>
+                                            <div class="approval-mini"><small>Expires At</small><strong><?= e(jcvDateTime($step['expires_at'] ?? null)) ?></strong></div>
+                                            <div class="approval-mini"><small>IP Address</small><strong><?= e($step['ip_address'] ?? '-') ?></strong></div>
+                                            <div class="approval-mini"><small>Link Sent At</small><strong><?= e(jcvDateTime($step['link_sent_at'] ?? null)) ?></strong></div>
+                                            <div class="approval-mini"><small>Link Sent By</small><strong><?= e($step['link_sent_by_name'] ?? ($step['link_sent_by'] ?? '-')) ?></strong></div>
+                                            <div class="approval-mini"><small>Created At</small><strong><?= e(jcvDateTime($step['approval_created_at'] ?? null)) ?></strong></div>
+                                            <div class="approval-mini"><small>Updated At</small><strong><?= e(jcvDateTime($step['approval_updated_at'] ?? null)) ?></strong></div>
+                                            <div class="approval-mini"><small>User Agent</small><span><?= e($step['user_agent'] ?? '-') ?></span></div>
+                                        </div>
+                                        <?php endif; ?>
+
+                                        <?php if (!empty($step['customer_remarks'])): ?>
+                                        <div class="small mt-2"><strong>Customer Remarks:</strong> <?= e($step['customer_remarks']) ?></div>
+                                        <?php endif; ?>
+                                        <?php if (!empty($step['internal_remarks'])): ?>
+                                        <div class="small mt-1"><strong>Internal / Manual Approval Remarks:</strong> <?= e($step['internal_remarks']) ?></div>
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
+                                <?php endif; ?>
+
+                                <?php if ($canUpdateThisStep): ?>
+                                <div class="col-12">
+                                    <div class="collapse" id="updateStage<?= (int)$step['id'] ?>">
+                                        <form method="post" class="info-card mt-2 stage-update-form" data-approval-stage="<?= $isApprovalStage ? '1' : '0' ?>" data-approval-done="<?= $approvalDone ? '1' : '0' ?>" data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>">
+                                            <input type="hidden" name="action" value="update_step_status">
+                                            <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
+
+                                            <div class="row g-3 align-items-end">
+                                                <div class="col-md-3">
+                                                    <label class="form-label fw-bold">Update Status <span class="required-star">*</span></label>
+                                                    <select name="status" class="form-select js-stage-status" required>
+                                                        <option value="">Select Status</option>
+                                                        <option value="pending" <?= $stepStatus === 'pending' ? 'selected' : '' ?>>Pending</option>
+                                                        <option value="in_progress" <?= $stepStatus === 'in_progress' ? 'selected' : '' ?>>In Progress</option>
+                                                        <option value="completed" <?= $stepStatus === 'completed' ? 'selected' : '' ?>>Completed</option>
+                                                        <option value="delayed" <?= $stepStatus === 'delayed' ? 'selected' : '' ?>>Delayed</option>
+                                                        <option value="skipped" <?= $stepStatus === 'skipped' ? 'selected' : '' ?>>Skipped</option>
+                                                        <option value="cancelled" <?= $stepStatus === 'cancelled' ? 'selected' : '' ?>>Cancelled</option>
+                                                    </select>
+                                                </div>
+
+                                                <div class="col-md-3 delay-field">
+                                                    <label class="form-label fw-bold">Delay Reason <span class="required-star">*</span></label>
+                                                    <select name="delay_reason_id" class="form-select">
+                                                        <option value="">Select Reason</option>
+                                                        <?php foreach ($delayReasons as $reason): ?>
+                                                        <option value="<?= (int)$reason['id'] ?>"
+                                                            <?= (int)($step['delay_reason_id'] ?? 0) === (int)$reason['id'] ? 'selected' : '' ?>>
+                                                            <?= e($reason['reason_name']) ?>
+                                                        </option>
+                                                        <?php endforeach; ?>
+                                                    </select>
+                                                </div>
+
+                                                <div class="col-md-2 delay-field">
+                                                    <label class="form-label fw-bold">Delay Days <span class="required-star">*</span></label>
+                                                    <input type="number"
+                                                        name="delay_days"
+                                                        class="form-control"
+                                                        min="0"
+                                                        value="<?= e($step['delay_days'] ?? 0) ?>">
+                                                </div>
+
+                                                <div class="col-md-4">
+                                                    <label class="form-label fw-bold">Remark <span class="required-star js-remark-star d-none">*</span></label>
+                                                    <textarea name="remarks"
+                                                        class="form-control js-remark"
+                                                        rows="2"
+                                                        placeholder="Enter update remark"><?= e($step['remarks'] ?? '') ?></textarea>
+                                                </div>
+
+                                                <?php if ($isApprovalStage && !$approvalDone): ?>
+                                                <div class="col-12 approval-field">
+                                                    <?php if ($canManualCustomerApproval): ?>
+                                                    <div class="approval-box">
+                                                        <div class="form-check mb-3">
+                                                            <input class="form-check-input js-manual-approval" type="checkbox"
+                                                                name="manual_customer_approved" value="1"
+                                                                id="manualApproval<?= (int)$step['id'] ?>">
+                                                            <label class="form-check-label fw-bold" for="manualApproval<?= (int)$step['id'] ?>">
+                                                                Customer approved by call / direct confirmation
+                                                                <span class="required-star">*</span>
+                                                            </label>
+                                                        </div>
+
+                                                        <label class="form-label fw-bold">
+                                                            Approval Remark <span class="required-star">*</span>
+                                                        </label>
+                                                        <textarea name="approval_remarks"
+                                                            class="form-control js-approval-remarks"
+                                                            rows="2"
+                                                            placeholder="Example: Customer confirmed proof/design approval by phone call"><?= e($step['internal_remarks'] ?? '') ?></textarea>
+                                                    </div>
+                                                    <?php else: ?>
+                                                    <div class="approval-box">
+                                                        Customer approval is pending. Admin or Sales must confirm customer approval before this stage can be completed.
+                                                    </div>
+                                                    <?php endif; ?>
+                                                </div>
+                                                <?php endif; ?>
+
+                                                <div class="col-12 text-end">
+                                                    <button type="submit" class="btn btn-success rounded-pill px-4 fw-bold">
+                                                        Save Update
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            <small class="text-muted-custom d-block mt-2">
+                                                Delay status requires delay reason and remark. Proofing Approval / Design Approval requires customer approval before completion.
+                                            </small>
+                                        </form>
+                                    </div>
+                                </div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                    </div>
+                    <?php endif; ?>
+                </div>
+
+                <?php endif; ?>
+            </section>
+        </main>
+
+        <div id="settingsOverlay"></div>
+        <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
+    </div>
+
+    <?php include __DIR__ . '/includes/script.php'; ?>
+
+    <script>
+    (function() {
+        function refreshDelayFields(form) {
+            const select = form.querySelector('.js-stage-status');
+            const remark = form.querySelector('.js-remark');
+            const remarkStar = form.querySelector('.js-remark-star');
+            const delayReason = form.querySelector('select[name="delay_reason_id"]');
+            const delayDays = form.querySelector('input[name="delay_days"]');
+            const approvalRemarks = form.querySelector('.js-approval-remarks');
+            const manualApproval = form.querySelector('.js-manual-approval');
+
+            if (!select) return;
+
+            if (select.value === 'delayed') {
+                form.classList.add('is-delay');
+                if (remark) remark.setAttribute('required', 'required');
+                if (remarkStar) remarkStar.classList.remove('d-none');
+                if (delayReason) delayReason.setAttribute('required', 'required');
+                if (delayDays) delayDays.setAttribute('required', 'required');
+            } else {
+                form.classList.remove('is-delay');
+                if (delayReason) delayReason.removeAttribute('required');
+                if (delayDays) delayDays.removeAttribute('required');
             }
-            const btn=form.querySelector('button[type="submit"]'); const oldText=btn?btn.textContent:'';
-            if(btn){btn.disabled=true;btn.textContent='Updating...';}
-            fetch('api/job_cards.php',{method:'POST',body:new FormData(form),credentials:'same-origin'})
-            .then(r=>r.json())
-            .then(data=>{
-                if(data.status){showToast(data.message || 'Job tracking updated.','success','Success'); setTimeout(()=>window.location.reload(),800);}
-                else{showToast(data.message || 'Update failed.','danger','Failed'); if(btn){btn.disabled=false;btn.textContent=oldText||'Update';}}
-            })
-            .catch(()=>{showToast('API request failed.','danger','Failed'); if(btn){btn.disabled=false;btn.textContent=oldText||'Update';}});
+
+            const approvalStage = form.dataset.approvalStage === '1';
+            const approvalDone = form.dataset.approvalDone === '1';
+            const canManualApproval = form.dataset.canManualApproval === '1';
+            const needsApproval = approvalStage && !approvalDone && select.value === 'completed';
+
+            if (needsApproval) {
+                form.classList.add('needs-approval');
+                if (canManualApproval) {
+                    if (manualApproval) manualApproval.setAttribute('required', 'required');
+                    if (approvalRemarks) approvalRemarks.setAttribute('required', 'required');
+                }
+            } else {
+                form.classList.remove('needs-approval');
+                if (manualApproval) manualApproval.removeAttribute('required');
+                if (approvalRemarks) approvalRemarks.removeAttribute('required');
+            }
+
+            if (select.value !== 'delayed' && !needsApproval) {
+                if (remark) remark.removeAttribute('required');
+                if (remarkStar) remarkStar.classList.add('d-none');
+            }
+        }
+
+        document.querySelectorAll('.stage-update-form').forEach(function(form) {
+            refreshDelayFields(form);
+
+            const select = form.querySelector('.js-stage-status');
+            if (select) {
+                select.addEventListener('change', function() {
+                    refreshDelayFields(form);
+                });
+            }
         });
-    });
-})();
-</script>
+
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+            window.lucide.createIcons();
+        }
+    })();
+    </script>
 </body>
+
 </html>
