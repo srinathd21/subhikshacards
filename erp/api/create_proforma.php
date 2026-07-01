@@ -335,13 +335,17 @@ function cpGetProformaWhatsappRow(mysqli $conn, int $id): ?array
                 pbi.printing_side,
                 pbi.screening_type,
                 pt.printing_name,
-                pst.sub_type_name
+                pst.sub_type_name,
+                jc.id AS job_card_id,
+                jc.job_card_no,
+                jc.tracking_token
             FROM proforma_bills pb
             LEFT JOIN function_types ft ON ft.id = pb.function_type_id
             LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
             LEFT JOIN proforma_bill_items pbi ON pbi.proforma_bill_id = pb.id
             LEFT JOIN printing_types pt ON pt.id = pbi.printing_type_id
             LEFT JOIN printing_sub_types pst ON pst.id = pbi.printing_sub_type_id
+            LEFT JOIN job_cards jc ON jc.proforma_bill_id = pb.id
             WHERE pb.id = ?
             ORDER BY pbi.sort_order ASC, pbi.id ASC
             LIMIT 1
@@ -357,10 +361,71 @@ function cpGetProformaWhatsappRow(mysqli $conn, int $id): ?array
     }
 }
 
+
+function cpBaseUrl(mysqli $conn): string
+{
+    $setting = '';
+    try {
+        if (cpTableExists($conn, 'system_settings')) {
+            $stmt = $conn->prepare("SELECT setting_value FROM system_settings WHERE setting_key IN ('site_url','base_url','app_url') AND TRIM(setting_value) <> '' ORDER BY FIELD(setting_key,'site_url','base_url','app_url') LIMIT 1");
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            $setting = trim((string)($row['setting_value'] ?? ''));
+        }
+    } catch (Throwable $e) {}
+
+    if ($setting !== '') return rtrim($setting, '/');
+
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') == 443);
+    $scheme = $https ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $dir = str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? ''));
+    $dir = rtrim($dir, '/');
+    if (substr($dir, -4) === '/api') {
+        $dir = substr($dir, 0, -4);
+    }
+    if ($dir === '/' || $dir === '.') $dir = '';
+
+    return rtrim($scheme . '://' . $host . $dir, '/');
+}
+
+function cpCustomerTrackingUrl(mysqli $conn, array $row): string
+{
+    $token = trim((string)($row['tracking_token'] ?? ''));
+    if ($token === '') return '';
+    return cpBaseUrl($conn) . '/customer_tracking.php?token=' . rawurlencode($token);
+}
+
+function cpEnsureCustomerTrackingLinksTable(mysqli $conn): void
+{
+    $conn->query("
+        CREATE TABLE IF NOT EXISTS customer_tracking_links (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            job_card_id BIGINT UNSIGNED NOT NULL,
+            tracking_token VARCHAR(120) NOT NULL,
+            mobile VARCHAR(30) DEFAULT NULL,
+            is_active TINYINT(1) NOT NULL DEFAULT 1,
+            expires_at DATETIME DEFAULT NULL,
+            created_by BIGINT UNSIGNED DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_tracking_token (tracking_token),
+            KEY idx_job_card_id (job_card_id),
+            KEY idx_mobile (mobile),
+            KEY idx_active_expiry (is_active, expires_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+}
+
 function cpWhatsappMessage(array $row): string
 {
+    global $conn;
+
     $customerName = trim((string)($row['customer_name'] ?? 'Customer'));
     $proformaNo = trim((string)($row['proforma_no'] ?? '-'));
+    $jobCardNo = trim((string)($row['job_card_no'] ?? '-'));
     $orderType = ucfirst((string)($row['order_type'] ?? '-'));
     $productName = trim((string)($row['item_name'] ?? '-'));
     $qty = number_format((float)($row['total_qty'] ?? 0), 0);
@@ -368,19 +433,23 @@ function cpWhatsappMessage(array $row): string
     $advance = '₹' . number_format((float)($row['advance_amount'] ?? 0), 2);
     $balance = '₹' . number_format((float)($row['balance_amount'] ?? 0), 2);
     $delivery = !empty($row['delivery_date']) ? date('d-m-Y', strtotime($row['delivery_date'])) : '-';
+    $trackingLink = ($conn instanceof mysqli) ? cpCustomerTrackingUrl($conn, $row) : '';
 
     return "Hi {$customerName},\n\n"
         . "Greetings from Subhiksha Cards.\n\n"
         . "Your proforma bill / sales order has been created successfully.\n\n"
         . "Proforma No: {$proformaNo}\n"
+        . "Job Card No: {$jobCardNo}\n"
         . "Order Type: {$orderType}\n"
         . "Product: {$productName}\n"
         . "Quantity: {$qty}\n"
         . "Final Amount: {$finalAmount}\n"
         . "Advance Paid: {$advance}\n"
         . "Balance Amount: {$balance}\n"
-        . "Delivery Date: {$delivery}\n\n"
-        . "Our team will proceed with the next process and keep you updated.\n\n"
+        . "Expected Delivery: {$delivery}\n\n"
+        . "Track your order live here:\n"
+        . ($trackingLink !== '' ? $trackingLink : 'Tracking link will be shared shortly.') . "\n\n"
+        . "The tracking page shows each production stage one by one like shipment tracking.\n\n"
         . "Thank you,\n"
         . "Subhiksha Cards Team";
 }
@@ -427,7 +496,7 @@ function cpWhatsappLogManual(mysqli $conn, int $id): array
         $relatedModule = 'Proforma Bills';
         $relatedId = $id;
         $customerId = !empty($row['customer_id']) ? (int)$row['customer_id'] : null;
-        $jobCardId = null;
+        $jobCardId = !empty($row['job_card_id']) ? (int)$row['job_card_id'] : null;
         $messageBody = cpWhatsappMessage($row);
         $status = 'sent';
         $providerResponse = json_encode([
@@ -500,21 +569,11 @@ function cpSendWhatsappByApi(mysqli $conn, int $id): array
 
     return subhiksha_send_whatsapp($conn, [
         'mobile' => (string)($row['mobile'] ?? ''),
-        'template_key' => 'proforma_created',
-        'variables' => [
-            'customer_name' => (string)($row['customer_name'] ?? 'Customer'),
-            'proforma_no' => (string)($row['proforma_no'] ?? '-'),
-            'order_type' => ucfirst((string)($row['order_type'] ?? '-')),
-            'product_name' => (string)($row['item_name'] ?? '-'),
-            'quantity' => number_format((float)($row['total_qty'] ?? 0), 0),
-            'final_amount' => '₹' . number_format((float)($row['final_amount'] ?? 0), 2),
-            'advance_amount' => '₹' . number_format((float)($row['advance_amount'] ?? 0), 2),
-            'balance_amount' => '₹' . number_format((float)($row['balance_amount'] ?? 0), 2),
-            'delivery_date' => !empty($row['delivery_date']) ? date('d-m-Y', strtotime($row['delivery_date'])) : '-'
-        ],
+        'message' => cpWhatsappMessage($row),
         'related_module' => 'Proforma Bills',
         'related_id' => $id,
-        'customer_id' => $row['customer_id'] ?? null
+        'customer_id' => $row['customer_id'] ?? null,
+        'job_card_id' => $row['job_card_id'] ?? null
     ]);
 }
 
@@ -618,7 +677,7 @@ try {
         $printingSide = cpPost('printing_side');
         $screeningType = cpPost('screening_type');
         $autoCreateJobCard = 1; // Job card must always be created after saving proforma bill.
-        $createTrackingLink = isset($_POST['create_tracking_link']) ? 1 : 0;
+        $createTrackingLink = 1; // Always create customer tracking link after proforma/job card creation.
 
         if ($autoCreateJobCard) {
             foreach (['job_cards', 'job_card_items', 'job_tracking'] as $requiredTable) {
@@ -795,9 +854,38 @@ try {
                 }
             }
 
-            if ($createTrackingLink && cpTableExists($conn, 'customer_tracking_links')) {
+            if ($createTrackingLink) {
+                cpEnsureCustomerTrackingLinksTable($conn);
                 $expiresAt = $deliveryDate ? date('Y-m-d 23:59:59', strtotime($deliveryDate . ' +15 days')) : null;
-                $stmt = $conn->prepare("INSERT INTO customer_tracking_links (job_card_id, tracking_token, mobile, is_active, expires_at, created_by, created_at) VALUES (?, ?, ?, 1, ?, ?, NOW())");
+                $trackingHasUpdatedAt = cpColumnExists($conn, 'customer_tracking_links', 'updated_at');
+
+                if ($trackingHasUpdatedAt) {
+                    $stmt = $conn->prepare("
+                        INSERT INTO customer_tracking_links
+                            (job_card_id, tracking_token, mobile, is_active, expires_at, created_by, created_at)
+                        VALUES
+                            (?, ?, ?, 1, ?, ?, NOW())
+                        ON DUPLICATE KEY UPDATE
+                            job_card_id = VALUES(job_card_id),
+                            mobile = VALUES(mobile),
+                            is_active = 1,
+                            expires_at = VALUES(expires_at),
+                            updated_at = NOW()
+                    ");
+                } else {
+                    $stmt = $conn->prepare("
+                        INSERT INTO customer_tracking_links
+                            (job_card_id, tracking_token, mobile, is_active, expires_at, created_by, created_at)
+                        VALUES
+                            (?, ?, ?, 1, ?, ?, NOW())
+                        ON DUPLICATE KEY UPDATE
+                            job_card_id = VALUES(job_card_id),
+                            mobile = VALUES(mobile),
+                            is_active = 1,
+                            expires_at = VALUES(expires_at)
+                    ");
+                }
+
                 $stmt->bind_param('isssi', $jobCardId, $trackingToken, $mobile, $expiresAt, $userId);
                 $stmt->execute();
                 $stmt->close();

@@ -42,6 +42,114 @@ function pb_fast_status_class($balance): string
     return ((float)$balance <= 0) ? 'paid' : 'pending';
 }
 
+function pb_fast_mobile($mobile): string
+{
+    $mobile = preg_replace('/\D+/', '', (string)$mobile);
+    if ($mobile === '') {
+        return '';
+    }
+    return strlen($mobile) === 10 ? '91' . $mobile : $mobile;
+}
+
+function pb_fast_base_url(mysqli $conn): string
+{
+    $setting = '';
+    try {
+        if (pb_fast_table_exists($conn, 'system_settings')) {
+            $stmt = $conn->prepare("SELECT setting_value FROM system_settings WHERE setting_key IN ('site_url','base_url','app_url') AND TRIM(setting_value) <> '' ORDER BY FIELD(setting_key,'site_url','base_url','app_url') LIMIT 1");
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            $setting = trim((string)($row['setting_value'] ?? ''));
+        }
+    } catch (Throwable $e) {
+        $setting = '';
+    }
+
+    if ($setting !== '') {
+        return rtrim($setting, '/');
+    }
+
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') == 443);
+    $scheme = $https ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $dir = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+    return rtrim($scheme . '://' . $host . ($dir === '' || $dir === '/' ? '' : $dir), '/');
+}
+
+function pb_fast_tracking_url(mysqli $conn, array $row): string
+{
+    $token = trim((string)($row['tracking_token'] ?? ''));
+    if ($token === '') {
+        return '';
+    }
+    return pb_fast_base_url($conn) . '/customer_tracking.php?token=' . rawurlencode($token);
+}
+
+function pb_fast_whatsapp_url(mysqli $conn, array $row): string
+{
+    $mobile = pb_fast_mobile($row['mobile'] ?? '');
+    if ($mobile === '') {
+        return '#';
+    }
+
+    $customer = trim((string)($row['customer_name'] ?? 'Customer')) ?: 'Customer';
+    $proformaNo = trim((string)($row['proforma_no'] ?? '-')) ?: '-';
+    $jobCardNo = trim((string)($row['job_card_no'] ?? '-')) ?: '-';
+    $functionName = trim((string)($row['function_name'] ?? '-')) ?: '-';
+    $orderType = ucfirst((string)($row['order_type'] ?? '-'));
+    $finalAmount = pb_fast_money($row['final_amount'] ?? 0);
+    $advanceAmount = pb_fast_money($row['advance_amount'] ?? 0);
+    $balanceAmount = pb_fast_money($row['balance_amount'] ?? 0);
+    $trackingUrl = pb_fast_tracking_url($conn, $row);
+
+    $message = "Hi {$customer},
+
+"
+        . "Greetings from Subhiksha Cards.
+
+"
+        . "Your proforma bill / sales order has been created.
+
+"
+        . "Proforma No: {$proformaNo}
+"
+        . "Job Card No: {$jobCardNo}
+"
+        . "Function/Product: {$functionName}
+"
+        . "Order Type: {$orderType}
+"
+        . "Final Amount: {$finalAmount}
+"
+        . "Advance Paid: {$advanceAmount}
+"
+        . "Balance Amount: {$balanceAmount}
+
+";
+
+    if ($trackingUrl !== '') {
+        $message .= "Track your order here:
+{$trackingUrl}
+
+";
+    } else {
+        $message .= "Tracking link will be shared once job card tracking is ready.
+
+";
+    }
+
+    $message .= "Thank you,
+Subhiksha Cards";
+
+    return 'https://wa.me/' . $mobile . '?text=' . rawurlencode($message);
+}
+
+function pb_fast_whatsapp_svg(): string
+{
+    return '<svg viewBox="0 0 32 32" width="17" height="17" aria-hidden="true" focusable="false"><path fill="currentColor" d="M16.04 3C8.85 3 3 8.73 3 15.78c0 2.26.61 4.47 1.77 6.41L3 29l7.02-1.8a13.3 13.3 0 0 0 6.02 1.43C23.23 28.63 29 22.9 29 15.85S23.23 3 16.04 3Zm0 23.45c-1.9 0-3.76-.5-5.39-1.45l-.39-.23-4.16 1.07 1.11-4.01-.26-.41a11.05 11.05 0 0 1-1.73-5.64c0-5.84 4.85-10.6 10.82-10.6 5.96 0 10.81 4.76 10.81 10.67 0 5.84-4.85 10.6-10.81 10.6Zm5.93-7.95c-.32-.16-1.9-.92-2.2-1.03-.3-.11-.52-.16-.74.16-.22.32-.85 1.03-1.04 1.24-.19.22-.38.24-.7.08-.32-.16-1.36-.49-2.59-1.55-.96-.84-1.61-1.88-1.8-2.2-.19-.32-.02-.49.14-.65.14-.14.32-.38.49-.57.16-.19.22-.32.32-.54.11-.22.05-.41-.03-.57-.08-.16-.74-1.76-1.01-2.41-.27-.65-.54-.54-.74-.55h-.63c-.22 0-.57.08-.87.41-.3.32-1.14 1.09-1.14 2.68s1.17 3.12 1.33 3.34c.16.22 2.3 3.46 5.58 4.85.78.33 1.39.53 1.86.68.78.24 1.49.21 2.05.13.63-.09 1.9-.76 2.17-1.49.27-.73.27-1.36.19-1.49-.08-.13-.3-.21-.62-.37Z"/></svg>';
+}
+
 if (empty($_SESSION['proforma_csrf'])) {
     $_SESSION['proforma_csrf'] = bin2hex(random_bytes(32));
 }
@@ -88,12 +196,13 @@ try {
             pb.advance_amount,
             COALESCE(ps.status_name, '-') AS status_name,
             COALESCE(ft.function_name, '-') AS function_name,
-            jc.job_card_no
+            jc.job_card_no,
+            jc.tracking_token
         FROM proforma_bills pb
         LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
         LEFT JOIN function_types ft ON ft.id = pb.function_type_id
         LEFT JOIN (
-            SELECT proforma_bill_id, MAX(job_card_no) AS job_card_no
+            SELECT proforma_bill_id, MAX(job_card_no) AS job_card_no, MAX(tracking_token) AS tracking_token
             FROM job_cards
             GROUP BY proforma_bill_id
         ) jc ON jc.proforma_bill_id = pb.id
@@ -122,9 +231,9 @@ try {
     <style>
     .toast-ui{border:0;border-radius:18px;box-shadow:0 18px 45px rgba(15,23,42,.18);overflow:hidden;min-width:320px;max-width:420px}.toast-ui.success{background:#dcfce7;color:#14532d}.toast-ui.danger{background:#fee2e2;color:#7f1d1d}.toast-title{font-size:14px;font-weight:900}.toast-message{font-size:13px;font-weight:800;line-height:1.45}
     .proforma-page .page-head{padding:24px 28px;margin-bottom:18px}.proforma-page .page-head h1{font-size:30px;font-weight:900;color:var(--text-main)}.card-pad{padding:24px}.section-title{font-size:18px;font-weight:900;color:var(--text-main);margin-bottom:6px}
-    .proforma-list-table{table-layout:fixed;width:100%;min-width:1040px}.proforma-list-table th,.proforma-list-table td{vertical-align:middle!important}.proforma-list-table th{font-size:12px;text-transform:uppercase;color:var(--text-muted)}.proforma-list-table th:nth-child(1),.proforma-list-table td:nth-child(1){width:15%}.proforma-list-table th:nth-child(2),.proforma-list-table td:nth-child(2){width:20%}.proforma-list-table th:nth-child(3),.proforma-list-table td:nth-child(3){width:16%}.proforma-list-table th:nth-child(4),.proforma-list-table td:nth-child(4){width:10%}.proforma-list-table th:nth-child(5),.proforma-list-table td:nth-child(5){width:12%}.proforma-list-table th:nth-child(6),.proforma-list-table td:nth-child(6){width:12%}.proforma-list-table th:nth-child(7),.proforma-list-table td:nth-child(7){width:15%}
-    .status-pill{font-size:11px;font-weight:900;border-radius:999px;padding:6px 10px;background:#dbeafe;color:#1d4ed8;display:inline-flex;align-items:center;justify-content:center;line-height:1.2}.status-pill.paid{background:#dcfce7;color:#166534}.status-pill.pending{background:#fef3c7;color:#92400e}.balance-text{font-weight:900;color:#991b1b}.balance-text.paid{color:#166534}.action-buttons{display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:wrap}.btn-action-icon,.btn-delete-icon{width:36px!important;height:36px!important;min-width:36px!important;max-width:36px!important;padding:0!important;border-radius:50%!important;display:inline-flex!important;align-items:center!important;justify-content:center!important}.btn-action-icon svg,.btn-delete-icon svg{width:16px!important;height:16px!important;stroke-width:2.5!important}.mobile-cards{display:none}.mobile-card{border:1px solid var(--border-soft);border-radius:18px;padding:16px;margin-bottom:12px;background:var(--card-bg)}
-    @media(max-width:767.98px){.proforma-page .page-head{padding:18px;border-radius:18px}.proforma-page .page-head h1{font-size:24px}.card-pad{padding:16px;border-radius:18px}.desktop-table{display:none!important}.mobile-cards{display:block}.mobile-actions{display:grid;grid-template-columns:repeat(4,42px);gap:8px;margin-top:14px}.btn-action-icon,.btn-delete-icon{width:42px!important;height:42px!important;min-width:42px!important;max-width:42px!important}}
+    .proforma-list-table{table-layout:fixed;width:100%;min-width:1180px}.proforma-list-table th,.proforma-list-table td{vertical-align:middle!important}.proforma-list-table th{font-size:12px;text-transform:uppercase;color:var(--text-muted)}.proforma-list-table th:nth-child(1),.proforma-list-table td:nth-child(1){width:15%}.proforma-list-table th:nth-child(2),.proforma-list-table td:nth-child(2){width:20%}.proforma-list-table th:nth-child(3),.proforma-list-table td:nth-child(3){width:15%}.proforma-list-table th:nth-child(4),.proforma-list-table td:nth-child(4){width:10%}.proforma-list-table th:nth-child(5),.proforma-list-table td:nth-child(5){width:11%}.proforma-list-table th:nth-child(6),.proforma-list-table td:nth-child(6){width:10%}.proforma-list-table th:nth-child(7),.proforma-list-table td:nth-child(7){width:19%}
+    .status-pill{font-size:11px;font-weight:900;border-radius:999px;padding:6px 10px;background:#dbeafe;color:#1d4ed8;display:inline-flex;align-items:center;justify-content:center;line-height:1.2}.status-pill.paid{background:#dcfce7;color:#166534}.status-pill.pending{background:#fef3c7;color:#92400e}.balance-text{font-weight:900;color:#991b1b}.balance-text.paid{color:#166534}.action-buttons{display:flex;gap:6px;justify-content:flex-end;align-items:center;flex-wrap:nowrap;white-space:nowrap}.action-buttons form{display:inline-flex;margin:0}.btn-action-icon,.btn-delete-icon{width:34px!important;height:34px!important;min-width:34px!important;max-width:34px!important;padding:0!important;border-radius:50%!important;display:inline-flex!important;align-items:center!important;justify-content:center!important}.btn-action-icon svg,.btn-delete-icon svg{width:15px!important;height:15px!important;stroke-width:2.5!important}.btn-whatsapp-icon{background:#22c55e!important;border-color:#22c55e!important;color:#fff!important}.btn-whatsapp-icon:hover{background:#16a34a!important;border-color:#16a34a!important;color:#fff!important}.mobile-cards{display:none}.mobile-card{border:1px solid var(--border-soft);border-radius:18px;padding:16px;margin-bottom:12px;background:var(--card-bg)}
+    @media(max-width:767.98px){.proforma-page .page-head{padding:18px;border-radius:18px}.proforma-page .page-head h1{font-size:24px}.card-pad{padding:16px;border-radius:18px}.desktop-table{display:none!important}.mobile-cards{display:block}.mobile-actions{display:grid;grid-template-columns:repeat(5,42px);gap:8px;margin-top:14px}.btn-action-icon,.btn-delete-icon{width:42px!important;height:42px!important;min-width:42px!important;max-width:42px!important}}
     </style>
 </head>
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -181,6 +290,7 @@ try {
                                     <div class="action-buttons">
                                         <a title="View" href="proforma_bill_view.php?id=<?= (int)$row['id'] ?>" class="btn btn-sm btn-outline-secondary btn-action-icon"><i data-lucide="eye"></i></a>
                                         <a title="Payment" href="proforma_payment.php?id=<?= (int)$row['id'] ?>" class="btn btn-sm btn-success btn-action-icon"><i data-lucide="indian-rupee"></i></a>
+                                        <a title="Send WhatsApp" href="<?= e(pb_fast_whatsapp_url($conn, $row)) ?>" target="_blank" rel="noopener" class="btn btn-sm btn-whatsapp-icon btn-action-icon"><?= pb_fast_whatsapp_svg() ?></a>
                                         <?php if (empty($row['job_card_no'])): ?>
                                         <form method="post" action="api/proforma_bills.php" class="js-api-job-card-form" onsubmit="return false;">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
@@ -219,6 +329,7 @@ try {
                         <div class="mobile-actions">
                             <a title="View" href="proforma_bill_view.php?id=<?= (int)$row['id'] ?>" class="btn btn-sm btn-outline-secondary btn-action-icon"><i data-lucide="eye"></i></a>
                             <a title="Payment" href="proforma_payment.php?id=<?= (int)$row['id'] ?>" class="btn btn-sm btn-success btn-action-icon"><i data-lucide="indian-rupee"></i></a>
+                            <a title="Send WhatsApp" href="<?= e(pb_fast_whatsapp_url($conn, $row)) ?>" target="_blank" rel="noopener" class="btn btn-sm btn-whatsapp-icon btn-action-icon"><?= pb_fast_whatsapp_svg() ?></a>
                             <?php if (empty($row['job_card_no'])): ?>
                             <form method="post" action="api/proforma_bills.php" class="js-api-job-card-form" onsubmit="return false;">
                                 <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
