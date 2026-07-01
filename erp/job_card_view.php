@@ -284,6 +284,20 @@ function jcvIsDesignProofingStage(array $step, string $stepRoleKey = ''): bool
         || strpos($stepName, 'proof') !== false;
 }
 
+function jcvRequiresDesignPhotoUpload(array $step, string $stepRoleKey = ''): bool
+{
+    if (jcvIsApprovalStage($step)) {
+        return false;
+    }
+
+    $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
+    if (in_array($stepKey, ['proofing_approval', 'design_approval'], true)) {
+        return false;
+    }
+
+    return jcvIsDesignProofingStage($step, $stepRoleKey);
+}
+
 function jcvEnsureTrackingPhotosTable(mysqli $conn): void
 {
     $conn->query("
@@ -812,9 +826,10 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
 
                     $isApprovalStage = jcvIsApprovalStage($stepRow);
                     $isDesignProofingStage = jcvIsDesignProofingStage($stepRow, $stepRoleKey);
+                    $requiresDesignPhotoUpload = jcvRequiresDesignPhotoUpload($stepRow, $stepRoleKey);
 
-                    if ($isDesignProofingStage && !jcvHasUploadedTrackingPhotos('tracking_photos')) {
-                        throw new RuntimeException('Designing / Proofing update requires at least one photo upload.');
+                    if ($requiresDesignPhotoUpload && !jcvHasUploadedTrackingPhotos('tracking_photos')) {
+                        throw new RuntimeException('Designing / Proofing production update requires at least one photo upload. Proofing Approval / Design Approval does not require photo upload.');
                     }
 
                     if ($newStatus === 'completed' && $isApprovalStage) {
@@ -850,7 +865,7 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                         }
                     }
 
-                    if ($isDesignProofingStage) {
+                    if ($requiresDesignPhotoUpload) {
                         jcvSaveTrackingPhotos($conn, $jobId, $trackingId, (int)$stepRow['workflow_step_id'], $userId, 'tracking_photos');
                     }
 
@@ -1943,6 +1958,8 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                     }
                                     $approvalDone = jcvApprovalIsDone($approvalRow);
                                     $isDesignProofingStage = jcvIsDesignProofingStage($step, $stepOwnerRoleKey);
+                                    $photoRequiredStage = $isDesignProofingStage && !$isApprovalStage;
+                                    $requiresDesignPhotoUpload = jcvRequiresDesignPhotoUpload($step, $stepOwnerRoleKey);
                                 ?>
 
                                 <?php if ($isApprovalStage): ?>
@@ -2046,7 +2063,7 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                 <?php if ($canUpdateThisStep): ?>
                                 <div class="col-12">
                                     <div class="collapse" id="updateStage<?= (int)$step['id'] ?>">
-                                        <form method="post" enctype="multipart/form-data" class="info-card mt-2 stage-update-form compact-update-form" data-approval-stage="<?= $isApprovalStage ? '1' : '0' ?>" data-approval-done="<?= $approvalDone ? '1' : '0' ?>" data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>" data-design-photo-required="<?= $isDesignProofingStage ? '1' : '0' ?>">
+                                        <form method="post" enctype="multipart/form-data" class="info-card mt-2 stage-update-form compact-update-form" data-approval-stage="<?= $isApprovalStage ? '1' : '0' ?>" data-approval-done="<?= $approvalDone ? '1' : '0' ?>" data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>" data-design-photo-required="<?= $requiresDesignPhotoUpload ? '1' : '0' ?>">
                                             <input type="hidden" name="action" value="update_step_status">
                                             <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
 
@@ -2094,7 +2111,7 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                                         placeholder="Enter update remark"><?= e($step['remarks'] ?? '') ?></textarea>
                                                 </div>
 
-                                                <?php if ($isDesignProofingStage): ?>
+                                                <?php if ($requiresDesignPhotoUpload): ?>
                                                 <div class="col-12">
                                                     <div class="design-photo-box">
                                                         <div class="design-photo-title">
@@ -2158,7 +2175,7 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                             </div>
 
                                             <small class="text-muted-custom d-block mt-2">
-                                                Delay status requires delay reason and remark. Designing / Proofing updates require one or more photos. Proofing Approval / Design Approval requires customer approval before completion.
+                                                Delay status requires delay reason and remark. Designing / Proofing production updates require one or more photos. Proofing Approval / Design Approval does not need photo upload; it needs customer approval or Admin/Sales manual confirmation.
                                             </small>
                                         </form>
                                     </div>
