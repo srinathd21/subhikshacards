@@ -109,68 +109,53 @@ if (!function_exists('sidebar_icon')) {
 }
 
 try {
-    if (isset($conn) && $conn instanceof mysqli && sidebar_table_exists($conn, 'sidebar_items')) {
-        if ($isAdmin || !sidebar_table_exists($conn, 'role_sidebar_permissions')) {
-            $sql = "
-                SELECT 
-                    si.id,
-                    si.parent_id,
-                    si.menu_key,
-                    si.menu_title,
-                    si.page_title,
-                    si.route AS menu_url,
-                    si.icon,
-                    si.sort_order
-                FROM sidebar_items si
-                WHERE si.is_active = 1
-                ORDER BY
-                    COALESCE(si.parent_id, si.id),
-                    CASE WHEN si.parent_id IS NULL THEN 0 ELSE 1 END,
-                    si.sort_order,
-                    si.id
-            ";
+    if (
+        isset($conn)
+        && $conn instanceof mysqli
+        && $roleId > 0
+        && sidebar_table_exists($conn, 'sidebar_items')
+        && sidebar_table_exists($conn, 'role_sidebar_permissions')
+    ) {
+        /*
+         | Strict role-based sidebar.
+         | No Admin bypass: Admin also follows role_sidebar_permissions.can_show.
+         */
+        $sql = "
+            SELECT DISTINCT
+                si.id,
+                si.parent_id,
+                si.menu_key,
+                si.menu_title,
+                si.page_title,
+                si.route AS menu_url,
+                si.icon,
+                si.sort_order
+            FROM sidebar_items si
+            INNER JOIN role_sidebar_permissions rsp
+                ON rsp.sidebar_item_id = si.id
+               AND rsp.role_id = ?
+               AND rsp.can_show = 1
+            WHERE si.is_active = 1
+            ORDER BY
+                COALESCE(si.parent_id, si.id),
+                CASE WHEN si.parent_id IS NULL THEN 0 ELSE 1 END,
+                si.sort_order,
+                si.id
+        ";
 
-            $res = $conn->query($sql);
-            while ($row = $res->fetch_assoc()) {
-                $sidebarMenus[] = $row;
-            }
-            $res->free();
-        } else {
-            $sql = "
-                SELECT DISTINCT
-                    si.id,
-                    si.parent_id,
-                    si.menu_key,
-                    si.menu_title,
-                    si.page_title,
-                    si.route AS menu_url,
-                    si.icon,
-                    si.sort_order
-                FROM sidebar_items si
-                INNER JOIN role_sidebar_permissions rsp
-                    ON rsp.sidebar_item_id = si.id
-                   AND rsp.can_show = 1
-                WHERE rsp.role_id = ?
-                  AND si.is_active = 1
-                ORDER BY
-                    COALESCE(si.parent_id, si.id),
-                    CASE WHEN si.parent_id IS NULL THEN 0 ELSE 1 END,
-                    si.sort_order,
-                    si.id
-            ";
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param('i', $roleId);
+        $stmt->execute();
+        $res = $stmt->get_result();
 
-            $stmt = $conn->prepare($sql);
-            $stmt->bind_param('i', $roleId);
-            $stmt->execute();
-            $res = $stmt->get_result();
-
-            while ($row = $res->fetch_assoc()) {
-                $sidebarMenus[] = $row;
-            }
-
-            $stmt->close();
+        while ($row = $res->fetch_assoc()) {
+            $sidebarMenus[] = $row;
         }
+
+        $stmt->close();
     }
+} catch (Throwable $e) {
+    $sidebarMenus = [];
 } catch (Throwable $e) {
     $sidebarMenus = [];
 }

@@ -1,36 +1,97 @@
 <?php
+/**
+ * includes/auth.php
+ * Subhiksha Cards ERP - Login + Role Permission Guard
+ */
 
 require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/whatsapp-api.php';
 
-/*
- | -------------------------------------------------------
- | mysqli connection for reference UI files
- | -------------------------------------------------------
- | Your db.php already creates $pdo. The uploaded reference UI uses $conn.
- | So this file creates $conn also.
- */
+/* WhatsApp helper is optional. Auth should not fail if the file is missing. */
+$waFile = __DIR__ . '/whatsapp-api.php';
+if (file_exists($waFile)) {
+    require_once $waFile;
+}
+
 if (!isset($conn) || !($conn instanceof mysqli)) {
-    $DB_HOST = 'srv1740.hstgr.io';
-    $DB_NAME = 'u966043993_subhiksha';
-    $DB_USER = 'u966043993_subhiksha';
-    $DB_PASS = 'C^Iy3jgM!8';
+    http_response_code(500);
+    die('MySQLi connection $conn is missing. Check includes/db.php');
+}
 
-    mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
-
-    try {
-        $conn = new mysqli($DB_HOST, $DB_USER, $DB_PASS, $DB_NAME);
-        $conn->set_charset('utf8mb4');
-    } catch (Throwable $e) {
-        http_response_code(500);
-        die('Database connection failed in includes/auth.php');
+if (!function_exists('auth_current_page')) {
+    function auth_current_page(string $pageUrl): string
+    {
+        $path = parse_url($pageUrl, PHP_URL_PATH);
+        return basename($path ?: $pageUrl);
     }
 }
 
-if (!function_exists('e')) {
-    function e($value): string
+if (!function_exists('auth_login_url')) {
+    function auth_login_url(): string
     {
-        return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+        return 'login.php';
+    }
+}
+
+if (!function_exists('auth_dashboard_url')) {
+    function auth_dashboard_url(): string
+    {
+        return 'dashboard.php';
+    }
+}
+
+if (!function_exists('auth_role_keys')) {
+    function auth_role_keys(): array
+    {
+        $keys = [];
+
+        foreach (['role_key', 'current_role_key'] as $sessionKey) {
+            if (!empty($_SESSION[$sessionKey])) {
+                $keys[] = strtolower((string)$_SESSION[$sessionKey]);
+            }
+        }
+
+        if (!empty($_SESSION['role_keys']) && is_array($_SESSION['role_keys'])) {
+            foreach ($_SESSION['role_keys'] as $key) {
+                $keys[] = strtolower((string)$key);
+            }
+        }
+
+        if (!empty($_SESSION['role_name'])) {
+            $keys[] = strtolower(str_replace(' ', '_', (string)$_SESSION['role_name']));
+        }
+
+        return array_values(array_unique(array_filter($keys)));
+    }
+}
+
+if (!function_exists('auth_role_ids')) {
+    function auth_role_ids(): array
+    {
+        $ids = [];
+
+        foreach (['role_id', 'current_role_id'] as $sessionKey) {
+            if (!empty($_SESSION[$sessionKey])) {
+                $ids[] = (int)$_SESSION[$sessionKey];
+            }
+        }
+
+        if (!empty($_SESSION['role_ids']) && is_array($_SESSION['role_ids'])) {
+            foreach ($_SESSION['role_ids'] as $id) {
+                $ids[] = (int)$id;
+            }
+        }
+
+        return array_values(array_unique(array_filter($ids)));
+    }
+}
+
+if (!function_exists('is_admin_user')) {
+    function is_admin_user(): bool
+    {
+        $keys = auth_role_keys();
+        return in_array('admin', $keys, true)
+            || in_array('super_admin', $keys, true)
+            || !empty($_SESSION['is_super_admin']);
     }
 }
 
@@ -38,26 +99,12 @@ if (!function_exists('require_login')) {
     function require_login(): void
     {
         if (empty($_SESSION['user_id'])) {
-            header('Location: login.php');
-            exit;
+            $current = auth_current_page($_SERVER['SCRIPT_NAME'] ?? '');
+            if ($current !== 'login.php') {
+                header('Location: ' . auth_login_url());
+                exit;
+            }
         }
-    }
-}
-
-if (!function_exists('is_admin_user')) {
-    function is_admin_user(): bool
-    {
-        $roleKey = strtolower((string)($_SESSION['role_key'] ?? ''));
-        $roleName = strtolower((string)($_SESSION['role_name'] ?? ''));
-
-        return $roleKey === 'admin' || $roleName === 'admin';
-    }
-}
-
-if (!function_exists('auth_current_page')) {
-    function auth_current_page(string $pageUrl): string
-    {
-        return basename(parse_url($pageUrl, PHP_URL_PATH) ?: $pageUrl);
     }
 }
 
@@ -82,38 +129,40 @@ if (!function_exists('permission_allowed')) {
             return false;
         }
 
-        $userId = (int)($_SESSION['user_id'] ?? 0);
-        $roleId = (int)($_SESSION['role_id'] ?? 0);
-
-        if ($userId <= 0 || $roleId <= 0) {
+        if (empty($_SESSION['user_id'])) {
             return false;
         }
 
         /*
-         | Admin should always get full access.
+         | Admin bypass removed.
+         | Every role, including Admin, must follow role_page_permissions.
          */
-        if (is_admin_user()) {
-            return true;
-        }
+
+        $pageName = auth_current_page($pageUrl);
 
         /*
-         | Allow dashboard after login.
+         | Dashboard bypass removed.
+         | Dashboard access also depends on role_page_permissions.
          */
-        $pageName = auth_current_page($pageUrl);
-        if (in_array($pageName, ['index.php', 'dashboard.php'], true)) {
-            return true;
+
+        $roleIds = auth_role_ids();
+        if (!$roleIds) {
+            return false;
         }
 
         try {
-            /*
-             | Your current DB uses:
-             | sidebar_items + role_page_permissions
-             */
+            $placeholders = implode(',', array_fill(0, count($roleIds), '?'));
+            $types = str_repeat('i', count($roleIds)) . 'ss';
+
+            $params = $roleIds;
+            $params[] = $pageUrl;
+            $params[] = $pageName;
+
             $sql = "
-                SELECT COALESCE(MAX(rpp.$permission), 0) AS allowed
+                SELECT COALESCE(MAX(rpp.`$permission`), 0) AS allowed
                 FROM role_page_permissions rpp
                 INNER JOIN sidebar_items si ON si.id = rpp.sidebar_item_id
-                WHERE rpp.role_id = ?
+                WHERE rpp.role_id IN ($placeholders)
                   AND si.is_active = 1
                   AND (
                         si.route = ?
@@ -122,97 +171,51 @@ if (!function_exists('permission_allowed')) {
             ";
 
             $stmt = $conn->prepare($sql);
-            $stmt->bind_param('iss', $roleId, $pageUrl, $pageName);
+            $stmt->bind_param($types, ...$params);
             $stmt->execute();
-
             $row = $stmt->get_result()->fetch_assoc();
             $stmt->close();
 
             return (int)($row['allowed'] ?? 0) === 1;
         } catch (Throwable $e) {
-            /*
-             | If permission table is not ready, keep admin working only.
-             */
+            error_log('permission_allowed error: ' . $e->getMessage());
             return false;
         }
     }
 }
 
 if (!function_exists('can_view')) {
-    function can_view(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_view', $page);
-    }
+    function can_view(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_view', $page); }
 }
-
 if (!function_exists('can_create')) {
-    function can_create(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_create', $page);
-    }
+    function can_create(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_create', $page); }
 }
-
 if (!function_exists('can_edit')) {
-    function can_edit(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_edit', $page);
-    }
+    function can_edit(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_edit', $page); }
 }
-
 if (!function_exists('can_delete')) {
-    function can_delete(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_delete', $page);
-    }
+    function can_delete(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_delete', $page); }
 }
-
 if (!function_exists('can_update')) {
-    function can_update(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_update', $page);
-    }
+    function can_update(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_update', $page); }
 }
-
 if (!function_exists('can_approve')) {
-    function can_approve(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_approve', $page);
-    }
+    function can_approve(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_approve', $page); }
 }
-
 if (!function_exists('can_print')) {
-    function can_print(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_print', $page);
-    }
+    function can_print(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_print', $page); }
 }
-
 if (!function_exists('can_export')) {
-    function can_export(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_export', $page);
-    }
+    function can_export(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_export', $page); }
 }
-
 if (!function_exists('can_send_whatsapp')) {
-    function can_send_whatsapp(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_send_whatsapp', $page);
-    }
+    function can_send_whatsapp(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_send_whatsapp', $page); }
 }
-
 if (!function_exists('can_assign')) {
-    function can_assign(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_assign', $page);
-    }
+    function can_assign(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_assign', $page); }
 }
-
 if (!function_exists('can_override')) {
-    function can_override(mysqli $conn, string $page): bool
-    {
-        return permission_allowed($conn, 'can_override', $page);
-    }
+    function can_override(mysqli $conn, string $page): bool { return permission_allowed($conn, 'can_override', $page); }
 }
 
 if (!function_exists('require_permission')) {

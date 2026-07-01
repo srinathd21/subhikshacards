@@ -22,6 +22,13 @@ if (empty($_SESSION['quotations_csrf'])) {
 }
 
 $csrfToken = $_SESSION['quotations_csrf'];
+$currentPage = 'quotations.php';
+$canCreate = can_create($conn, $currentPage);
+$canEdit = can_edit($conn, $currentPage);
+$canDelete = can_delete($conn, $currentPage);
+$canPrint = can_print($conn, $currentPage);
+$canExport = can_export($conn, $currentPage);
+$canSendWhatsapp = can_send_whatsapp($conn, $currentPage);
 $message = '';
 $messageType = 'success';
 
@@ -1447,10 +1454,12 @@ if ($autoOpenWhatsappId > 0) {
                                 bill.</p>
                         </div>
 
+                        <?php if ($canCreate): ?>
                         <button type="button" class="btn btn-primary rounded-pill px-4 fw-bold" id="newRecordBtn"
                             data-bs-toggle="modal" data-bs-target="#recordModal">
                             Create New
                         </button>
+                        <?php endif; ?>
                     </div>
                 </div>
 
@@ -1599,6 +1608,9 @@ if ($autoOpenWhatsappId > 0) {
                                             data-status-name="<?= e($row['status_name'] ?? '-') ?>"
                                             data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="eye"></i></button>
 
+                                        <?php if ($canEdit): ?>
+
+
                                         <button title="Edit" aria-label="Edit" type="button"
                                             class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                             data-bs-toggle="modal" data-bs-target="#recordModal"
@@ -1622,9 +1634,16 @@ if ($autoOpenWhatsappId > 0) {
                                             data-final-amount="<?= e($row['final_amount']) ?>"
                                             data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
 
-                                        <?= qtWhatsappPreviewButton($row) ?>
 
-                                        <?php if (!$cancelled): ?>
+                                        <?php endif; ?>
+
+                                        <?php if ($canSendWhatsapp): ?>
+                                        <?php if ($canSendWhatsapp): ?>
+                                <?= qtWhatsappPreviewButton($row) ?>
+                                <?php endif; ?>
+                                        <?php endif; ?>
+
+                                        <?php if (!$cancelled && $canDelete): ?>
                                         <form method="post" action="api/quotations.php"
                                             class="d-inline js-api-cancel-form" onsubmit="return false;">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
@@ -1686,6 +1705,9 @@ if ($autoOpenWhatsappId > 0) {
                                     data-status-name="<?= e($row['status_name'] ?? '-') ?>"
                                     data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="eye"></i></button>
 
+                                <?php if ($canEdit): ?>
+
+
                                 <button title="Edit" aria-label="Edit" type="button"
                                     class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                     data-bs-toggle="modal" data-bs-target="#recordModal" data-id="<?= e($row['id']) ?>"
@@ -1706,9 +1728,12 @@ if ($autoOpenWhatsappId > 0) {
                                     data-final-amount="<?= e($row['final_amount']) ?>"
                                     data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
 
+
+                                <?php endif; ?>
+
                                 <?= qtWhatsappPreviewButton($row) ?>
 
-                                <?php if (!$cancelled): ?>
+                                <?php if (!$cancelled && $canDelete): ?>
                                 <form method="post" action="api/quotations.php" class="d-inline js-api-cancel-form"
                                     onsubmit="return false;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
@@ -1729,6 +1754,7 @@ if ($autoOpenWhatsappId > 0) {
         <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
     </div>
 
+    <?php if ($canCreate || $canEdit): ?>
     <div class="modal fade" id="recordModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-xl">
             <form method="post" action="api/quotations.php" class="modal-content" id="quotationForm">
@@ -1912,6 +1938,7 @@ if ($autoOpenWhatsappId > 0) {
             </form>
         </div>
     </div>
+    <?php endif; ?>
 
 
 
@@ -2059,6 +2086,7 @@ if ($autoOpenWhatsappId > 0) {
         </div>
     </div>
 
+    <?php if ($canSendWhatsapp): ?>
     <div class="modal fade" id="whatsappPreviewModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered modal-lg">
             <div class="modal-content">
@@ -2099,6 +2127,8 @@ if ($autoOpenWhatsappId > 0) {
         </div>
     </div>
 
+    <?php endif; ?>
+
     <?php include __DIR__ . '/includes/script.php'; ?>
 
     <script>
@@ -2107,6 +2137,9 @@ if ($autoOpenWhatsappId > 0) {
         const submit = document.getElementById('recordSubmitBtn');
         const defaultStatusId = '<?= e($defaultStatusId) ?>';
         const whatsappApiReady = <?= $whatsappApiReady ? 'true' : 'false' ?>;
+        const canCreateQuotation = <?= $canCreate ? 'true' : 'false' ?>;
+        const canEditQuotation = <?= $canEdit ? 'true' : 'false' ?>;
+        const canSendQuotationWhatsapp = <?= $canSendWhatsapp ? 'true' : 'false' ?>;
         const autoOpenWhatsappUrl = '<?= e($autoOpenWhatsappUrl) ?>';
         let currentManualWhatsappUrl = '#';
         let whatsappPreviewModal = null;

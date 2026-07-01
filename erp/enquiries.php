@@ -21,6 +21,13 @@ if (empty($_SESSION['enquiries_csrf'])) {
 }
 
 $csrfToken = $_SESSION['enquiries_csrf'];
+$currentPage = 'enquiries.php';
+$canCreate = can_create($conn, $currentPage);
+$canEdit = can_edit($conn, $currentPage);
+$canDelete = can_delete($conn, $currentPage);
+$canUpdate = can_update($conn, $currentPage);
+$canSendWhatsapp = can_send_whatsapp($conn, $currentPage);
+
 $message = '';
 $messageType = 'success';
 $toastTitle = 'Info';
@@ -1276,10 +1283,12 @@ if ($autoOpenWhatsappId > 0) {
                             <p class="text-muted-custom mb-0">Register customer enquiry and callback details.</p>
                         </div>
 
+                        <?php if ($canCreate): ?>
                         <button type="button" class="btn btn-primary rounded-pill px-4 fw-bold" id="newRecordBtn"
                             data-bs-toggle="modal" data-bs-target="#recordModal">
                             Create New
                         </button>
+                        <?php endif; ?>
                     </div>
                 </div>
 
@@ -1406,6 +1415,7 @@ if ($autoOpenWhatsappId > 0) {
                                             data-sales-person="<?= e($row['sales_person'] ?? '-') ?>"
                                             data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="eye"></i></button>
 
+                                        <?php if ($canEdit): ?>
                                         <button title="Edit" aria-label="Edit" type="button"
                                             class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                             data-bs-toggle="modal" data-bs-target="#recordModal"
@@ -1421,10 +1431,15 @@ if ($autoOpenWhatsappId > 0) {
                                             data-assigned-sales-user-id="<?= e($row['assigned_sales_user_id']) ?>"
                                             data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
                                             data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
+                                        <?php endif; ?>
 
-                                        <?= enqWhatsappPreviewButton($row) ?>
+                                        <?php if ($canSendWhatsapp): ?>
+                                        <?php if ($canSendWhatsapp): ?>
+                                <?= enqWhatsappPreviewButton($row) ?>
+                                <?php endif; ?>
+                                        <?php endif; ?>
 
-                                        <?php if (!$closed): ?>
+                                        <?php if (!$closed && $canDelete): ?>
                                         <form method="post" action="api/enquiries.php"
                                             class="d-inline js-api-close-form" onsubmit="return false;">
                                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
@@ -1481,6 +1496,7 @@ if ($autoOpenWhatsappId > 0) {
                                     data-sales-person="<?= e($row['sales_person'] ?? '-') ?>"
                                     data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="eye"></i></button>
 
+                                <?php if ($canEdit): ?>
                                 <button title="Edit" aria-label="Edit" type="button"
                                     class="btn btn-sm btn-outline-primary rounded-circle fw-bold js-edit-record btn-action-icon"
                                     data-bs-toggle="modal" data-bs-target="#recordModal" data-id="<?= e($row['id']) ?>"
@@ -1494,10 +1510,11 @@ if ($autoOpenWhatsappId > 0) {
                                     data-assigned-sales-user-id="<?= e($row['assigned_sales_user_id']) ?>"
                                     data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
                                     data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
+                                <?php endif; ?>
 
                                 <?= enqWhatsappPreviewButton($row) ?>
 
-                                <?php if (!$closed): ?>
+                                <?php if (!$closed && $canDelete): ?>
                                 <form method="post" action="api/enquiries.php" class="d-inline js-api-close-form"
                                     onsubmit="return false;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
