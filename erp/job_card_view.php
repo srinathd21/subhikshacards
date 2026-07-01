@@ -264,6 +264,294 @@ function jcvSaveManualCustomerApproval(
     $stmt->close();
 }
 
+function jcvIsDesignProofingStage(array $step, string $stepRoleKey = ''): bool
+{
+    $roleKey = strtolower(trim($stepRoleKey));
+    $defaultRoleKey = strtolower(trim((string)($step['default_owner_role_key'] ?? '')));
+    $responsibleRoleKey = strtolower(trim((string)($step['responsible_role_key'] ?? '')));
+    $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
+    $stepName = strtolower(trim((string)($step['step_name'] ?? '')));
+
+    $designRoles = ['designing_proofing', 'design_proofing', 'designing', 'proofing', 'designer'];
+
+    if (in_array($roleKey, $designRoles, true) || in_array($defaultRoleKey, $designRoles, true) || in_array($responsibleRoleKey, $designRoles, true)) {
+        return true;
+    }
+
+    return strpos($stepKey, 'design') !== false
+        || strpos($stepKey, 'proof') !== false
+        || strpos($stepName, 'design') !== false
+        || strpos($stepName, 'proof') !== false;
+}
+
+function jcvEnsureTrackingPhotosTable(mysqli $conn): void
+{
+    $conn->query("
+        CREATE TABLE IF NOT EXISTS job_tracking_photos (
+            id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            job_card_id INT NOT NULL,
+            job_tracking_id INT NOT NULL,
+            workflow_step_id INT NOT NULL,
+            file_path VARCHAR(255) NOT NULL,
+            original_name VARCHAR(255) DEFAULT NULL,
+            mime_type VARCHAR(120) DEFAULT NULL,
+            file_size INT DEFAULT 0,
+            uploaded_by INT DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_job_card_id (job_card_id),
+            KEY idx_job_tracking_id (job_tracking_id),
+            KEY idx_workflow_step_id (workflow_step_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+}
+
+function jcvHasUploadedTrackingPhotos(string $fieldName): bool
+{
+    if (empty($_FILES[$fieldName]) || empty($_FILES[$fieldName]['name']) || !is_array($_FILES[$fieldName]['name'])) {
+        return false;
+    }
+
+    foreach ($_FILES[$fieldName]['name'] as $index => $name) {
+        if (trim((string)$name) !== '' && (int)($_FILES[$fieldName]['error'][$index] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_OK) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function jcvSaveTrackingPhotos(mysqli $conn, int $jobId, int $trackingId, int $workflowStepId, int $userId, string $fieldName = 'tracking_photos'): void
+{
+    if (!jcvHasUploadedTrackingPhotos($fieldName)) {
+        return;
+    }
+
+    jcvEnsureTrackingPhotosTable($conn);
+
+    $baseDir = __DIR__ . '/uploads/job_tracking_photos';
+    if (!is_dir($baseDir) && !mkdir($baseDir, 0755, true)) {
+        throw new RuntimeException('Unable to create tracking photo upload folder.');
+    }
+
+    $allowedExt = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
+    $allowedMime = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+
+    foreach ($_FILES[$fieldName]['name'] as $index => $originalName) {
+        $originalName = trim((string)$originalName);
+        $error = (int)($_FILES[$fieldName]['error'][$index] ?? UPLOAD_ERR_NO_FILE);
+
+        if ($originalName === '' && $error === UPLOAD_ERR_NO_FILE) {
+            continue;
+        }
+
+        if ($error !== UPLOAD_ERR_OK) {
+            throw new RuntimeException('Photo upload failed. Please upload valid image files.');
+        }
+
+        $tmpPath = (string)($_FILES[$fieldName]['tmp_name'][$index] ?? '');
+        $fileSize = (int)($_FILES[$fieldName]['size'][$index] ?? 0);
+        if ($tmpPath === '' || !is_uploaded_file($tmpPath)) {
+            throw new RuntimeException('Invalid uploaded photo.');
+        }
+
+        if ($fileSize <= 0 || $fileSize > 5 * 1024 * 1024) {
+            throw new RuntimeException('Each tracking photo must be below 5 MB.');
+        }
+
+        $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+        if (!in_array($ext, $allowedExt, true)) {
+            throw new RuntimeException('Only JPG, PNG, WEBP or GIF photos are allowed.');
+        }
+
+        $mime = '';
+        if (function_exists('finfo_open')) {
+            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+            if ($finfo) {
+                $mime = (string)finfo_file($finfo, $tmpPath);
+                finfo_close($finfo);
+            }
+        }
+        if ($mime !== '' && !in_array($mime, $allowedMime, true)) {
+            throw new RuntimeException('Invalid image type uploaded.');
+        }
+
+        $safeName = 'tracking_' . $jobId . '_' . $trackingId . '_' . date('YmdHis') . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
+        $targetPath = $baseDir . '/' . $safeName;
+        $relativePath = 'uploads/job_tracking_photos/' . $safeName;
+
+        if (!move_uploaded_file($tmpPath, $targetPath)) {
+            throw new RuntimeException('Unable to save uploaded photo.');
+        }
+
+        $stmt = $conn->prepare("
+            INSERT INTO job_tracking_photos
+                (job_card_id, job_tracking_id, workflow_step_id, file_path, original_name, mime_type, file_size, uploaded_by, created_at)
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ");
+        $stmt->bind_param('iiisssii', $jobId, $trackingId, $workflowStepId, $relativePath, $originalName, $mime, $fileSize, $userId);
+        $stmt->execute();
+        $stmt->close();
+    }
+}
+
+
+function jcvWaMobile($mobile): string
+{
+    $mobile = preg_replace('/\D+/', '', (string)$mobile);
+    if ($mobile === '') return '';
+    if (strlen($mobile) === 10) return '91' . $mobile;
+    return $mobile;
+}
+
+function jcvBaseUrl(mysqli $conn): string
+{
+    $setting = '';
+    try {
+        if (jcvTableExists($conn, 'system_settings')) {
+            $stmt = $conn->prepare("SELECT setting_value FROM system_settings WHERE setting_key IN ('site_url','base_url','app_url') AND TRIM(setting_value) <> '' ORDER BY FIELD(setting_key,'site_url','base_url','app_url') LIMIT 1");
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            $setting = trim((string)($row['setting_value'] ?? ''));
+        }
+    } catch (Throwable $e) {}
+
+    if ($setting !== '') return rtrim($setting, '/');
+
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') == 443);
+    $scheme = $https ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $dir = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+    return rtrim($scheme . '://' . $host . ($dir === '' || $dir === '/' ? '' : $dir), '/');
+}
+
+function jcvEnsurePhotoApprovalTable(mysqli $conn): void
+{
+    $conn->query("
+        CREATE TABLE IF NOT EXISTS job_tracking_photo_approvals (
+            id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            job_card_id INT NOT NULL,
+            job_tracking_id INT NOT NULL,
+            workflow_step_id INT NOT NULL,
+            approval_token VARCHAR(96) NOT NULL,
+            customer_name VARCHAR(150) DEFAULT NULL,
+            mobile VARCHAR(30) DEFAULT NULL,
+            status ENUM('pending','approved','rejected','expired') NOT NULL DEFAULT 'pending',
+            customer_remarks TEXT DEFAULT NULL,
+            responded_at DATETIME DEFAULT NULL,
+            ip_address VARCHAR(80) DEFAULT NULL,
+            user_agent TEXT DEFAULT NULL,
+            link_sent_at DATETIME DEFAULT NULL,
+            link_sent_by INT DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_photo_approval_token (approval_token),
+            KEY idx_job_card_id (job_card_id),
+            KEY idx_job_tracking_id (job_tracking_id),
+            KEY idx_workflow_step_id (workflow_step_id),
+            KEY idx_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+}
+
+function jcvGetOrCreatePhotoApproval(mysqli $conn, int $jobId, int $trackingId, int $workflowStepId, string $customerName, string $mobile): ?array
+{
+    jcvEnsurePhotoApprovalTable($conn);
+
+    $stmt = $conn->prepare("
+        SELECT *
+        FROM job_tracking_photo_approvals
+        WHERE job_card_id = ?
+          AND job_tracking_id = ?
+          AND workflow_step_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+    ");
+    $stmt->bind_param('iii', $jobId, $trackingId, $workflowStepId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if ($row) return $row;
+
+    $token = jcvRandomToken();
+    $stmt = $conn->prepare("
+        INSERT INTO job_tracking_photo_approvals
+            (job_card_id, job_tracking_id, workflow_step_id, approval_token, customer_name, mobile, status, created_at)
+        VALUES
+            (?, ?, ?, ?, ?, ?, 'pending', NOW())
+    ");
+    $stmt->bind_param('iiisss', $jobId, $trackingId, $workflowStepId, $token, $customerName, $mobile);
+    $stmt->execute();
+    $id = (int)$stmt->insert_id;
+    $stmt->close();
+
+    return [
+        'id' => $id,
+        'job_card_id' => $jobId,
+        'job_tracking_id' => $trackingId,
+        'workflow_step_id' => $workflowStepId,
+        'approval_token' => $token,
+        'customer_name' => $customerName,
+        'mobile' => $mobile,
+        'status' => 'pending'
+    ];
+}
+
+function jcvPhotoApprovalUrl(mysqli $conn, string $token): string
+{
+    return jcvBaseUrl($conn) . '/customer_design_photo_approval.php?token=' . rawurlencode($token);
+}
+
+function jcvDesignPhotoWhatsappUrl(mysqli $conn, array $job, array $step, array $approval): string
+{
+    $mobile = jcvWaMobile($job['mobile'] ?? '');
+    if ($mobile === '') return '#';
+
+    $link = jcvPhotoApprovalUrl($conn, (string)($approval['approval_token'] ?? ''));
+    $customer = trim((string)($job['customer_name'] ?? 'Customer'));
+    $jobNo = trim((string)($job['job_card_no'] ?? '-'));
+    $stage = trim((string)($step['step_name'] ?? 'Designing / Proofing'));
+
+    $message = "Hi {$customer},\n\n"
+        . "Subhiksha Cards has uploaded {$stage} photos for your job card {$jobNo}.\n\n"
+        . "Please open the link below to view the photos and Approve or Reject.\n"
+        . "{$link}\n\n"
+        . "Note: Images are available inside the link. We are not attaching images in WhatsApp.\n\n"
+        . "Thank you,\nSubhiksha Cards";
+
+    return 'https://wa.me/' . $mobile . '?text=' . rawurlencode($message);
+}
+
+function jcvGetTrackingPhotos(mysqli $conn, int $jobId): array
+{
+    $photos = [];
+    if ($jobId <= 0 || !jcvTableExists($conn, 'job_tracking_photos')) return $photos;
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT *
+            FROM job_tracking_photos
+            WHERE job_card_id = ?
+            ORDER BY id ASC
+        ");
+        $stmt->bind_param('i', $jobId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        while ($row = $res->fetch_assoc()) {
+            $tid = (int)($row['job_tracking_id'] ?? 0);
+            if (!isset($photos[$tid])) $photos[$tid] = [];
+            $photos[$tid][] = $row;
+        }
+        $stmt->close();
+    } catch (Throwable $e) {}
+
+    return $photos;
+}
+
 $roleKey = strtolower((string)($_SESSION['role_key'] ?? ''));
 
 $allAccessRoles = [
@@ -297,6 +585,7 @@ $message = '';
 $messageType = 'danger';
 $job = null;
 $trackingRows = [];
+$trackingPhotosById = [];
 $delayReasons = [];
 
 if (($_GET['msg'] ?? '') === 'status_updated') {
@@ -522,6 +811,11 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                     $userId = (int)($_SESSION['user_id'] ?? 0);
 
                     $isApprovalStage = jcvIsApprovalStage($stepRow);
+                    $isDesignProofingStage = jcvIsDesignProofingStage($stepRow, $stepRoleKey);
+
+                    if ($isDesignProofingStage && !jcvHasUploadedTrackingPhotos('tracking_photos')) {
+                        throw new RuntimeException('Designing / Proofing update requires at least one photo upload.');
+                    }
 
                     if ($newStatus === 'completed' && $isApprovalStage) {
                         $approvalType = jcvApprovalTypeForStep($stepRow);
@@ -554,6 +848,10 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                                 $approvalRemarks
                             );
                         }
+                    }
+
+                    if ($isDesignProofingStage) {
+                        jcvSaveTrackingPhotos($conn, $jobId, $trackingId, (int)$stepRow['workflow_step_id'], $userId, 'tracking_photos');
                     }
 
                     if ($newStatus === 'completed') {
@@ -861,6 +1159,10 @@ if ($job) {
     }
 }
 
+if ($job) {
+    $trackingPhotosById = jcvGetTrackingPhotos($conn, $jobId);
+}
+
 $totalSteps = $job ? (int)($job['total_steps'] ?? 0) : 0;
 $completedSteps = $job ? (int)($job['completed_steps'] ?? 0) : 0;
 $progressPercent = $totalSteps > 0 ? round(($completedSteps / $totalSteps) * 100) : 0;
@@ -1095,6 +1397,109 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
 
     .stage-update-form textarea {
         min-height: 46px;
+    }
+
+
+    .stage-update-form.compact-update-form {
+        padding: 14px !important;
+        border-radius: 16px;
+    }
+
+    .compact-update-form .form-label {
+        font-size: 12px;
+        margin-bottom: 5px;
+        color: var(--text-main);
+    }
+
+    .compact-update-form .form-control,
+    .compact-update-form .form-select {
+        min-height: 40px;
+        border-radius: 12px;
+        font-size: 13px;
+        font-weight: 700;
+    }
+
+    .compact-update-form textarea.form-control {
+        min-height: 40px;
+        height: 40px;
+    }
+
+    .design-photo-box {
+        border: 1px solid #f59e0b;
+        background: #fffbeb;
+        color: #78350f;
+        border-radius: 14px;
+        padding: 10px 12px;
+    }
+
+    .design-photo-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 8px;
+    }
+
+    .design-photo-title strong {
+        font-size: 13px;
+        font-weight: 900;
+    }
+
+    .photo-input-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+    }
+
+    .photo-input-row .form-control {
+        flex: 1 1 auto;
+    }
+
+    .photo-input-remove {
+        width: 34px;
+        height: 34px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+    }
+
+    .photo-help-text {
+        font-size: 10px;
+        font-weight: 900;
+        color: #92400e;
+        text-transform: uppercase;
+        letter-spacing: .02em;
+    }
+
+    .tracking-photo-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+    }
+
+    .tracking-photo-thumb {
+        width: 74px;
+        height: 74px;
+        border-radius: 12px;
+        border: 1px solid var(--border-soft);
+        object-fit: cover;
+        background: #f8fafc;
+    }
+
+    .wa-photo-btn {
+        background: #22c55e !important;
+        border-color: #22c55e !important;
+        color: #fff !important;
+    }
+
+    .wa-photo-btn:hover {
+        background: #16a34a !important;
+        border-color: #16a34a !important;
+        color: #fff !important;
     }
 
     .delay-field {
@@ -1537,6 +1942,7 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                         ];
                                     }
                                     $approvalDone = jcvApprovalIsDone($approvalRow);
+                                    $isDesignProofingStage = jcvIsDesignProofingStage($step, $stepOwnerRoleKey);
                                 ?>
 
                                 <?php if ($isApprovalStage): ?>
@@ -1591,15 +1997,61 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                 </div>
                                 <?php endif; ?>
 
+                                <?php
+                                    $stepPhotos = $trackingPhotosById[(int)$step['id']] ?? [];
+                                    $photoApproval = null;
+                                    $photoWhatsappUrl = '#';
+                                    if ($isDesignProofingStage && $stepPhotos) {
+                                        $photoApproval = jcvGetOrCreatePhotoApproval(
+                                            $conn,
+                                            $jobId,
+                                            (int)$step['id'],
+                                            (int)$step['workflow_step_id'],
+                                            (string)($job['customer_name'] ?? ''),
+                                            (string)($job['mobile'] ?? '')
+                                        );
+                                        if ($photoApproval) {
+                                            $photoWhatsappUrl = jcvDesignPhotoWhatsappUrl($conn, $job, $step, $photoApproval);
+                                        }
+                                    }
+                                ?>
+                                <?php if ($isDesignProofingStage && $stepPhotos): ?>
+                                <div class="col-12">
+                                    <div class="info-card">
+                                        <div class="d-flex flex-column flex-md-row justify-content-between gap-2 align-items-md-center">
+                                            <div>
+                                                <small>Uploaded Design / Proofing Photos</small>
+                                                <strong><?= count($stepPhotos) ?> photo(s) uploaded</strong>
+                                                <?php if ($photoApproval): ?>
+                                                <span class="text-muted-custom small">Customer link status: <?= e(ucwords((string)($photoApproval['status'] ?? 'pending'))) ?></span>
+                                                <?php endif; ?>
+                                            </div>
+                                            <?php if ($photoWhatsappUrl !== '#'): ?>
+                                            <a href="<?= e($photoWhatsappUrl) ?>" target="_blank" rel="noopener" class="btn btn-sm wa-photo-btn rounded-pill px-3 fw-bold">
+                                                Send WhatsApp Approval Link
+                                            </a>
+                                            <?php endif; ?>
+                                        </div>
+                                        <div class="tracking-photo-list">
+                                            <?php foreach ($stepPhotos as $photo): ?>
+                                            <a href="<?= e($photo['file_path'] ?? '#') ?>" target="_blank" rel="noopener">
+                                                <img src="<?= e($photo['file_path'] ?? '') ?>" class="tracking-photo-thumb" alt="Tracking photo">
+                                            </a>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    </div>
+                                </div>
+                                <?php endif; ?>
+
                                 <?php if ($canUpdateThisStep): ?>
                                 <div class="col-12">
                                     <div class="collapse" id="updateStage<?= (int)$step['id'] ?>">
-                                        <form method="post" class="info-card mt-2 stage-update-form" data-approval-stage="<?= $isApprovalStage ? '1' : '0' ?>" data-approval-done="<?= $approvalDone ? '1' : '0' ?>" data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>">
+                                        <form method="post" enctype="multipart/form-data" class="info-card mt-2 stage-update-form compact-update-form" data-approval-stage="<?= $isApprovalStage ? '1' : '0' ?>" data-approval-done="<?= $approvalDone ? '1' : '0' ?>" data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>" data-design-photo-required="<?= $isDesignProofingStage ? '1' : '0' ?>">
                                             <input type="hidden" name="action" value="update_step_status">
                                             <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
 
-                                            <div class="row g-3 align-items-end">
-                                                <div class="col-md-3">
+                                            <div class="row g-2 align-items-end">
+                                                <div class="col-lg-2 col-md-3">
                                                     <label class="form-label fw-bold">Update Status <span class="required-star">*</span></label>
                                                     <select name="status" class="form-select js-stage-status" required>
                                                         <option value="">Select Status</option>
@@ -1612,7 +2064,7 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                                     </select>
                                                 </div>
 
-                                                <div class="col-md-3 delay-field">
+                                                <div class="col-lg-2 col-md-3 delay-field">
                                                     <label class="form-label fw-bold">Delay Reason <span class="required-star">*</span></label>
                                                     <select name="delay_reason_id" class="form-select">
                                                         <option value="">Select Reason</option>
@@ -1625,7 +2077,7 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                                     </select>
                                                 </div>
 
-                                                <div class="col-md-2 delay-field">
+                                                <div class="col-lg-2 col-md-3 delay-field">
                                                     <label class="form-label fw-bold">Delay Days <span class="required-star">*</span></label>
                                                     <input type="number"
                                                         name="delay_days"
@@ -1634,13 +2086,39 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                                         value="<?= e($step['delay_days'] ?? 0) ?>">
                                                 </div>
 
-                                                <div class="col-md-4">
+                                                <div class="col-lg-4 col-md-6">
                                                     <label class="form-label fw-bold">Remark <span class="required-star js-remark-star d-none">*</span></label>
                                                     <textarea name="remarks"
                                                         class="form-control js-remark"
                                                         rows="2"
                                                         placeholder="Enter update remark"><?= e($step['remarks'] ?? '') ?></textarea>
                                                 </div>
+
+                                                <?php if ($isDesignProofingStage): ?>
+                                                <div class="col-12">
+                                                    <div class="design-photo-box">
+                                                        <div class="design-photo-title">
+                                                            <strong>Designing / Proofing Photos <span class="required-star">*</span></strong>
+                                                            <button type="button" class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-add-photo-input">
+                                                                + Add More Image
+                                                            </button>
+                                                        </div>
+                                                        <div class="js-photo-input-list">
+                                                            <div class="photo-input-row">
+                                                                <input type="file"
+                                                                    name="tracking_photos[]"
+                                                                    class="form-control js-tracking-photos"
+                                                                    accept="image/jpeg,image/png,image/webp,image/gif"
+                                                                    required>
+                                                                <button type="button" class="btn btn-outline-danger photo-input-remove js-remove-photo-input" title="Remove image">×</button>
+                                                            </div>
+                                                        </div>
+                                                        <div class="photo-help-text">
+                                                            Upload one or more photos before saving this Designing / Proofing update. Allowed: JPG, PNG, WEBP, GIF. Max 5 MB each.
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <?php endif; ?>
 
                                                 <?php if ($isApprovalStage && !$approvalDone): ?>
                                                 <div class="col-12 approval-field">
@@ -1680,7 +2158,7 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                             </div>
 
                                             <small class="text-muted-custom d-block mt-2">
-                                                Delay status requires delay reason and remark. Proofing Approval / Design Approval requires customer approval before completion.
+                                                Delay status requires delay reason and remark. Designing / Proofing updates require one or more photos. Proofing Approval / Design Approval requires customer approval before completion.
                                             </small>
                                         </form>
                                     </div>
@@ -1713,6 +2191,7 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
             const delayDays = form.querySelector('input[name="delay_days"]');
             const approvalRemarks = form.querySelector('.js-approval-remarks');
             const manualApproval = form.querySelector('.js-manual-approval');
+            const photoInput = form.querySelector('.js-tracking-photos');
 
             if (!select) return;
 
@@ -1749,6 +2228,12 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                 if (remark) remark.removeAttribute('required');
                 if (remarkStar) remarkStar.classList.add('d-none');
             }
+
+            if (form.dataset.designPhotoRequired === '1') {
+                if (photoInput) photoInput.setAttribute('required', 'required');
+            } else if (photoInput) {
+                photoInput.removeAttribute('required');
+            }
         }
 
         document.querySelectorAll('.stage-update-form').forEach(function(form) {
@@ -1760,6 +2245,34 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                     refreshDelayFields(form);
                 });
             }
+        });
+
+
+        document.querySelectorAll('.js-add-photo-input').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                const form = btn.closest('form');
+                const list = form ? form.querySelector('.js-photo-input-list') : null;
+                if (!list) return;
+
+                const row = document.createElement('div');
+                row.className = 'photo-input-row';
+                row.innerHTML = '<input type="file" name="tracking_photos[]" class="form-control js-tracking-photos" accept="image/jpeg,image/png,image/webp,image/gif" required><button type="button" class="btn btn-outline-danger photo-input-remove js-remove-photo-input" title="Remove image">×</button>';
+                list.appendChild(row);
+            });
+        });
+
+        document.addEventListener('click', function(event) {
+            const btn = event.target.closest('.js-remove-photo-input');
+            if (!btn) return;
+            const list = btn.closest('.js-photo-input-list');
+            const row = btn.closest('.photo-input-row');
+            if (!list || !row) return;
+            if (list.querySelectorAll('.photo-input-row').length <= 1) {
+                const input = row.querySelector('input[type="file"]');
+                if (input) input.value = '';
+                return;
+            }
+            row.remove();
         });
 
         if (window.lucide && typeof window.lucide.createIcons === 'function') {
