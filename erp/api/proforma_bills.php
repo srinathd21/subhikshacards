@@ -1690,10 +1690,13 @@ try {
             $statusId = pb_int($_POST['proforma_status_id'] ?? 0) ?: null;
             $deliveryDate = pb_post('delivery_date') ?: null;
             $remarks = pb_post('remarks');
-            $createJobCardNow = isset($_POST['create_job_card_now']);
+            $createJobCardNow = isset($_POST['create_job_card_now']) || (isset($_POST['auto_create_job_card']) && (string)$_POST['auto_create_job_card'] === '1');
 
             $productId = pb_int($_POST['product_id'] ?? 0) ?: null;
             $manualItemName = pb_post('item_name');
+            if ($manualItemName === '') {
+                $manualItemName = pb_post('product_name');
+            }
             $description = pb_post('description');
             $qty = pb_float($_POST['qty'] ?? 1);
             $rate = pb_float($_POST['rate'] ?? 0);
