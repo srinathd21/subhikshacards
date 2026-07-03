@@ -354,16 +354,41 @@ function jcvIsDesignProofingStage(array $step, string $stepRoleKey = ''): bool
     $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
     $stepName = strtolower(trim((string)($step['step_name'] ?? '')));
 
+    /*
+     * Design Received is an internal production handover stage.
+     * It should NOT ask for proof/design photo upload and should NOT send
+     * customer approval link. It can still send the normal tracking link.
+     */
+    if (
+        in_array($stepKey, ['design_received', 'design_recieved', 'designing_received', 'designing_recieved'], true) ||
+        strpos($stepKey, 'received') !== false ||
+        strpos($stepKey, 'recieved') !== false ||
+        strpos($stepName, 'received') !== false ||
+        strpos($stepName, 'recieved') !== false
+    ) {
+        return false;
+    }
+
+    /* Approval stages are handled separately. */
+    if (jcvIsApprovalStage($step)) {
+        return false;
+    }
+
     $designRoles = ['designing_proofing', 'design_proofing', 'designing', 'proofing', 'designer'];
 
-    if (in_array($roleKey, $designRoles, true) || in_array($defaultRoleKey, $designRoles, true) || in_array($responsibleRoleKey, $designRoles, true)) {
+    $isDesignRole = in_array($roleKey, $designRoles, true)
+        || in_array($defaultRoleKey, $designRoles, true)
+        || in_array($responsibleRoleKey, $designRoles, true);
+
+    if ($isDesignRole) {
         return true;
     }
 
-    return strpos($stepKey, 'design') !== false
-        || strpos($stepKey, 'proof') !== false
-        || strpos($stepName, 'design') !== false
-        || strpos($stepName, 'proof') !== false;
+    /* Only exact production stages should trigger proof/design photo approval. */
+    return strpos($stepKey, 'proofing') !== false
+        || strpos($stepKey, 'designing') !== false
+        || strpos($stepName, 'proofing') !== false
+        || strpos($stepName, 'designing') !== false;
 }
 
 function jcvRequiresDesignPhotoUpload(array $step, string $stepRoleKey = ''): bool
@@ -373,6 +398,22 @@ function jcvRequiresDesignPhotoUpload(array $step, string $stepRoleKey = ''): bo
     }
 
     $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
+    $stepName = strtolower(trim((string)($step['step_name'] ?? '')));
+
+    /*
+     * Design Received / Design Recieved should never ask for photos
+     * and should never send approval link to customer.
+     */
+    if (
+        in_array($stepKey, ['design_received', 'design_recieved', 'designing_received', 'designing_recieved'], true) ||
+        strpos($stepKey, 'received') !== false ||
+        strpos($stepKey, 'recieved') !== false ||
+        strpos($stepName, 'received') !== false ||
+        strpos($stepName, 'recieved') !== false
+    ) {
+        return false;
+    }
+
     if (in_array($stepKey, ['proofing_approval', 'design_approval'], true)) {
         return false;
     }
