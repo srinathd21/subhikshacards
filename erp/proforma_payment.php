@@ -99,11 +99,16 @@ function pp_check_csrf(): void
     }
 }
 
-function pp_redirect(int $id, string $msg = '', string $err = ''): void
+function pp_redirect(int $id, string $msg = '', string $err = '', array $extra = []): void
 {
     $q = ['id' => $id];
     if ($msg !== '') $q['msg'] = $msg;
     if ($err !== '') $q['err'] = $err;
+    foreach ($extra as $key => $value) {
+        if ($value !== null && $value !== '') {
+            $q[$key] = (string)$value;
+        }
+    }
     header('Location: proforma_payment.php?' . http_build_query($q));
     exit;
 }
@@ -152,6 +157,172 @@ function pp_update_bill_and_job_amounts(mysqli $conn, int $proformaId, float $ne
     }
 }
 
+
+function pp_payment_whatsapp_money($value): string
+{
+    return number_format((float)$value, 2, '.', '');
+}
+
+function pp_payment_whatsapp_api_ready(): bool
+{
+    $apiFile = __DIR__ . '/includes/whatsapp-api.php';
+    if (!file_exists($apiFile)) {
+        return false;
+    }
+
+    require_once $apiFile;
+    return function_exists('subhiksha_send_whatsapp') || function_exists('subhiksha_send_template_whatsapp');
+}
+
+function pp_payment_whatsapp_row(mysqli $conn, int $proformaId, int $paymentId): ?array
+{
+    if ($proformaId <= 0 || $paymentId <= 0) {
+        return null;
+    }
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT
+                p.*,
+                pb.proforma_no,
+                pb.customer_name,
+                pb.mobile,
+                pb.customer_id AS bill_customer_id,
+                pb.final_amount,
+                pb.advance_amount,
+                pb.balance_amount,
+                ft.function_name
+            FROM payments p
+            INNER JOIN proforma_bills pb ON pb.id = p.proforma_bill_id
+            LEFT JOIN function_types ft ON ft.id = pb.function_type_id
+            WHERE p.id = ?
+              AND p.proforma_bill_id = ?
+            LIMIT 1
+        ");
+        $stmt->bind_param('ii', $paymentId, $proformaId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function pp_payment_whatsapp_template_key(array $row): string
+{
+    return ((float)($row['balance_amount'] ?? 0) <= 0.00001)
+        ? 'payment_completed'
+        : 'advance_payment_received';
+}
+
+function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId): array
+{
+    if (!pp_payment_whatsapp_api_ready()) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp API file/function missing.',
+            'mode' => 'api',
+            'log_id' => 0
+        ];
+    }
+
+    $row = pp_payment_whatsapp_row($conn, $proformaId, $paymentId);
+    if (!$row) {
+        return [
+            'success' => false,
+            'message' => 'Payment details not found for WhatsApp.',
+            'mode' => 'api',
+            'log_id' => 0
+        ];
+    }
+
+    $mobile = trim((string)($row['mobile'] ?? ''));
+    if ($mobile === '') {
+        return [
+            'success' => false,
+            'message' => 'Customer mobile number missing.',
+            'mode' => 'api',
+            'log_id' => 0
+        ];
+    }
+
+    $templateKey = pp_payment_whatsapp_template_key($row);
+    $variables = [
+        'customer_name' => trim((string)($row['customer_name'] ?? 'Customer')) ?: 'Customer',
+        'proforma_no' => trim((string)($row['proforma_no'] ?? '-')) ?: '-',
+        'payment_no' => trim((string)($row['payment_no'] ?? '-')) ?: '-',
+        'paid_amount' => pp_payment_whatsapp_money($row['amount'] ?? 0),
+        'payment_mode' => strtoupper((string)($row['payment_mode'] ?? '-')),
+        'balance_amount' => pp_payment_whatsapp_money($row['balance_amount'] ?? 0),
+        'final_amount' => pp_payment_whatsapp_money($row['final_amount'] ?? 0),
+        'total_paid' => pp_payment_whatsapp_money($row['advance_amount'] ?? 0),
+        'payment_date' => !empty($row['payment_date']) ? date('d-m-Y', strtotime((string)$row['payment_date'])) : date('d-m-Y'),
+        'reference_no' => trim((string)($row['reference_no'] ?? '-')) ?: '-',
+        'function_type' => trim((string)($row['function_name'] ?? '-')) ?: '-'
+    ];
+
+    $meta = [
+        'related_module' => 'Payments',
+        'related_id' => $paymentId,
+        'customer_id' => !empty($row['bill_customer_id']) ? (int)$row['bill_customer_id'] : (!empty($row['customer_id']) ? (int)$row['customer_id'] : null),
+        'sent_by' => (int)($_SESSION['user_id'] ?? 0),
+        'extra_payload' => ['type' => 'text']
+    ];
+
+    if (function_exists('subhiksha_send_template_whatsapp')) {
+        $result = subhiksha_send_template_whatsapp($conn, $templateKey, $mobile, $variables, $meta);
+    } else {
+        $result = subhiksha_send_whatsapp($conn, array_merge($meta, [
+            'mobile' => $mobile,
+            'template_key' => $templateKey,
+            'variables' => $variables
+        ]));
+    }
+
+    $result['template_key'] = $templateKey;
+    $result['payment_id'] = $paymentId;
+    $result['mode'] = 'api';
+
+    return $result;
+}
+
+function pp_last_payment_whatsapp_status(mysqli $conn, int $paymentId): array
+{
+    if ($paymentId <= 0 || !pp_table_exists($conn, 'whatsapp_logs')) {
+        return ['status' => 'not_sent', 'label' => 'Not Sent', 'log_id' => 0, 'message' => 'No WhatsApp log found.'];
+    }
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT id, status, provider_response, sent_at, created_at
+            FROM whatsapp_logs
+            WHERE related_module = 'Payments'
+              AND related_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+        ");
+        $stmt->bind_param('i', $paymentId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$row) {
+            return ['status' => 'not_sent', 'label' => 'Not Sent', 'log_id' => 0, 'message' => 'No WhatsApp log found.'];
+        }
+
+        $status = strtolower(trim((string)($row['status'] ?? '')));
+        if ($status === 'sent') {
+            return ['status' => 'sent', 'label' => 'Sent', 'log_id' => (int)$row['id'], 'message' => 'WhatsApp sent.'];
+        }
+
+        return ['status' => 'failed', 'label' => 'Failed', 'log_id' => (int)$row['id'], 'message' => trim((string)($row['provider_response'] ?? 'WhatsApp failed.'))];
+    } catch (Throwable $e) {
+        return ['status' => 'failed', 'label' => 'Failed', 'log_id' => 0, 'message' => $e->getMessage()];
+    }
+}
+
 try {
     pp_ensure_payment_cancel_columns($conn);
 } catch (Throwable $e) {
@@ -168,9 +339,20 @@ $error = '';
 $message = '';
 $messageType = 'success';
 
-if (($_GET['msg'] ?? '') === 'payment_collected') {
+$pageMsg = (string)($_GET['msg'] ?? '');
+if ($pageMsg === 'payment_collected') {
     $message = 'Payment collected successfully.';
-} elseif (($_GET['msg'] ?? '') === 'payment_cancelled') {
+} elseif ($pageMsg === 'payment_collected_wa_sent') {
+    $message = 'Payment collected successfully and WhatsApp message sent.';
+} elseif ($pageMsg === 'payment_collected_wa_failed') {
+    $message = 'Payment collected successfully. WhatsApp failed: ' . trim((string)($_GET['wa_err'] ?? 'Please use Retry WhatsApp.'));
+    $messageType = 'warning';
+} elseif ($pageMsg === 'payment_whatsapp_resent') {
+    $message = 'WhatsApp payment message sent successfully.';
+} elseif ($pageMsg === 'payment_whatsapp_retry_failed') {
+    $message = 'WhatsApp retry failed: ' . trim((string)($_GET['wa_err'] ?? 'Please check WhatsApp API settings.'));
+    $messageType = 'warning';
+} elseif ($pageMsg === 'payment_cancelled') {
     $message = 'Payment cancelled and amount reverted successfully.';
 } elseif (!empty($_GET['err'])) {
     $message = 'Error: ' . trim((string)$_GET['err']);
@@ -222,11 +404,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
             $stmt = $conn->prepare("INSERT INTO payments (customer_id, proforma_bill_id, payment_no, payment_type, payment_mode, amount, payment_date, reference_no, remarks, received_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
             $stmt->bind_param('iisssdsssi', $customerId, $id, $paymentNo, $paymentType, $paymentMode, $amount, $paymentDate, $referenceNo, $remarks, $userId);
             $stmt->execute();
+            $paymentId = (int)$stmt->insert_id;
             $stmt->close();
 
             $newAdvance = (float)$bill['advance_amount'] + $amount;
             pp_update_bill_and_job_amounts($conn, $id, $newAdvance);
-            pp_redirect($id, 'payment_collected');
+
+            $waResult = pp_send_payment_whatsapp($conn, $id, $paymentId);
+            if (!empty($waResult['success'])) {
+                pp_redirect($id, 'payment_collected_wa_sent');
+            }
+
+            pp_redirect($id, 'payment_collected_wa_failed', '', [
+                'payment_id' => $paymentId,
+                'wa_err' => (string)($waResult['message'] ?? 'Unknown WhatsApp error.')
+            ]);
+        }
+
+        if ($action === 'retry_payment_whatsapp') {
+            $paymentId = (int)($_POST['payment_id'] ?? 0);
+            if ($paymentId <= 0) throw new RuntimeException('Invalid payment for WhatsApp retry.');
+
+            $waResult = pp_send_payment_whatsapp($conn, $id, $paymentId);
+            if (!empty($waResult['success'])) {
+                pp_redirect($id, 'payment_whatsapp_resent');
+            }
+
+            pp_redirect($id, 'payment_whatsapp_retry_failed', '', [
+                'payment_id' => $paymentId,
+                'wa_err' => (string)($waResult['message'] ?? 'Unknown WhatsApp error.')
+            ]);
         }
 
         if ($action === 'cancel_payment') {
@@ -299,8 +506,12 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         $stmt->execute();
         $res = $stmt->get_result();
         while ($row = $res->fetch_assoc()) {
-            if ((int)($row['is_cancelled'] ?? 0) === 1) $cancelledPayments[] = $row;
-            else $activePayments[] = $row;
+            if ((int)($row['is_cancelled'] ?? 0) === 1) {
+                $cancelledPayments[] = $row;
+            } else {
+                $row['wa_status_info'] = pp_last_payment_whatsapp_status($conn, (int)($row['id'] ?? 0));
+                $activePayments[] = $row;
+            }
         }
         $stmt->close();
     } catch (Throwable $e) {
@@ -318,7 +529,7 @@ if ($bill && pp_table_exists($conn, 'payments')) {
     <?php include __DIR__ . '/includes/links.php'; ?>
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
     <style>
-    .payment-page .page-head{padding:24px 28px;margin-bottom:18px}.payment-page .page-head h1{font-size:30px;font-weight:900;color:var(--text-main)}.module-card{padding:24px;border-radius:20px;margin-bottom:18px}.section-title{font-size:18px;font-weight:900;color:var(--text-main);margin-bottom:12px}.info-box{border:1px solid var(--border-soft);border-radius:16px;padding:14px;background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg));height:100%}.info-box small{display:block;font-size:11px;text-transform:uppercase;color:var(--text-muted);font-weight:900;margin-bottom:5px}.info-box strong{display:block;font-size:18px;color:var(--text-main);font-weight:900;word-break:break-word}.balance-due strong{color:#991b1b}.paid-box strong{color:#166534}.payment-form{border:1px solid var(--border-soft);border-radius:18px;padding:18px;background:color-mix(in srgb,var(--success-color,#16a34a) 6%,var(--card-bg))}.table-view th{font-size:12px;text-transform:uppercase;color:var(--text-muted);white-space:nowrap}.table-view td{vertical-align:middle}.cancelled-row{background:#fef2f2!important;color:#991b1b}.status-badge{display:inline-flex;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:900;background:#dcfce7;color:#166534}.status-badge.cancelled{background:#fee2e2;color:#991b1b}.toast-ui{border:0;border-radius:18px;box-shadow:0 18px 45px rgba(15,23,42,.18);overflow:hidden;min-width:320px;max-width:420px}.toast-ui.success{background:#dcfce7;color:#14532d}.toast-ui.danger{background:#fee2e2;color:#7f1d1d}.toast-title{font-size:14px;font-weight:900}.toast-message{font-size:13px;font-weight:800;line-height:1.45}@media(max-width:767.98px){.payment-page .page-head{padding:18px;border-radius:18px}.payment-page .page-head h1{font-size:24px}.module-card{padding:16px;border-radius:18px}.table-view{font-size:13px}}
+    .payment-page .page-head{padding:24px 28px;margin-bottom:18px}.payment-page .page-head h1{font-size:30px;font-weight:900;color:var(--text-main)}.module-card{padding:24px;border-radius:20px;margin-bottom:18px}.section-title{font-size:18px;font-weight:900;color:var(--text-main);margin-bottom:12px}.info-box{border:1px solid var(--border-soft);border-radius:16px;padding:14px;background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg));height:100%}.info-box small{display:block;font-size:11px;text-transform:uppercase;color:var(--text-muted);font-weight:900;margin-bottom:5px}.info-box strong{display:block;font-size:18px;color:var(--text-main);font-weight:900;word-break:break-word}.balance-due strong{color:#991b1b}.paid-box strong{color:#166534}.payment-form{border:1px solid var(--border-soft);border-radius:18px;padding:18px;background:color-mix(in srgb,var(--success-color,#16a34a) 6%,var(--card-bg))}.table-view th{font-size:12px;text-transform:uppercase;color:var(--text-muted);white-space:nowrap}.table-view td{vertical-align:middle}.cancelled-row{background:#fef2f2!important;color:#991b1b}.status-badge{display:inline-flex;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:900;background:#dcfce7;color:#166534}.status-badge.cancelled{background:#fee2e2;color:#991b1b}.toast-ui{border:0;border-radius:18px;box-shadow:0 18px 45px rgba(15,23,42,.18);overflow:hidden;min-width:320px;max-width:420px}.toast-ui.success{background:#dcfce7;color:#14532d}.toast-ui.danger{background:#fee2e2;color:#7f1d1d}.toast-ui.warning{background:#fef3c7;color:#92400e}.toast-title{font-size:14px;font-weight:900}.toast-message{font-size:13px;font-weight:800;line-height:1.45}@media(max-width:767.98px){.payment-page .page-head{padding:18px;border-radius:18px}.payment-page .page-head h1{font-size:24px}.module-card{padding:16px;border-radius:18px}.table-view{font-size:13px}}
     </style>
 </head>
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -336,7 +547,7 @@ if ($bill && pp_table_exists($conn, 'payments')) {
             </div>
 
             <?php if ($message !== ''): ?>
-            <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:12000"><div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="4200"><div class="d-flex"><div class="toast-body"><div class="toast-title"><?= $messageType === 'danger' ? 'Failed' : 'Success' ?></div><div class="toast-message"><?= e($message) ?></div></div><button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button></div></div></div>
+            <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:12000"><div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="4200"><div class="d-flex"><div class="toast-body"><div class="toast-title"><?= $messageType === 'danger' ? 'Failed' : ($messageType === 'warning' ? 'Warning' : 'Success') ?></div><div class="toast-message"><?= e($message) ?></div></div><button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button></div></div></div>
             <?php endif; ?>
 
             <?php if ($error !== ''): ?>
@@ -379,9 +590,9 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                 <div class="section-title">Recent Payment History</div>
                 <div class="table-responsive">
                     <table class="table table-view">
-                        <thead><tr><th>No</th><th>Type</th><th>Mode</th><th>Amount</th><th>Date</th><th>Reference</th><th>Received By</th><th>Remarks</th><th class="text-end">Action</th></tr></thead>
+                        <thead><tr><th>No</th><th>Type</th><th>Mode</th><th>Amount</th><th>Date</th><th>Reference</th><th>Received By</th><th>Remarks</th><th>WhatsApp</th><th class="text-end">Action</th></tr></thead>
                         <tbody>
-                            <?php if (!$activePayments): ?><tr><td colspan="9" class="text-center text-muted-custom py-3">No active payment found.</td></tr><?php endif; ?>
+                            <?php if (!$activePayments): ?><tr><td colspan="10" class="text-center text-muted-custom py-3">No active payment found.</td></tr><?php endif; ?>
                             <?php foreach ($activePayments as $pay): ?>
                             <tr>
                                 <td><strong><?= e($pay['payment_no'] ?? '-') ?></strong></td>
@@ -392,6 +603,22 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                                 <td><?= e($pay['reference_no'] ?? '-') ?></td>
                                 <td><?= e($pay['received_by_name'] ?? '-') ?></td>
                                 <td><?= e($pay['remarks'] ?? '-') ?></td>
+                                <td>
+                                    <?php $waInfo = $pay['wa_status_info'] ?? ['status' => 'not_sent', 'label' => 'Not Sent']; ?>
+                                    <?php if (($waInfo['status'] ?? '') === 'sent'): ?>
+                                        <span class="status-badge">WhatsApp Sent</span>
+                                    <?php else: ?>
+                                        <div class="d-flex flex-column gap-1 align-items-start">
+                                            <span class="status-badge cancelled"><?= e($waInfo['label'] ?? 'Failed') ?></span>
+                                            <form method="post" onsubmit="return confirm('Retry WhatsApp payment message?')">
+                                                <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                                                <input type="hidden" name="action" value="retry_payment_whatsapp">
+                                                <input type="hidden" name="payment_id" value="<?= (int)$pay['id'] ?>">
+                                                <button type="submit" class="btn btn-sm btn-success rounded-pill fw-bold">Retry WhatsApp</button>
+                                            </form>
+                                        </div>
+                                    <?php endif; ?>
+                                </td>
                                 <td class="text-end">
                                     <form method="post" class="d-flex gap-2 justify-content-end" onsubmit="return confirm('Cancel this payment and revert balance?')">
                                         <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
