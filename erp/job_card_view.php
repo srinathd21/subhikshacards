@@ -875,6 +875,317 @@ function jcvGetTrackingPhotos(mysqli $conn, int $jobId): array
     return $photos;
 }
 
+function jcvApprovalTypeFromStepKey(string $stepKey): string
+{
+    $stepKey = strtolower(trim($stepKey));
+    if ($stepKey === 'proofing_approval') return 'proof_approval';
+    if ($stepKey === 'design_approval') return 'design_approval';
+    return 'confirmation';
+}
+
+function jcvFindApprovalWorkflowStepForPhoto(mysqli $conn, array $job, array $sourceStep): ?array
+{
+    if (!jcvTableExists($conn, 'workflow_steps')) return null;
+
+    $orderType = strtolower(trim((string)($job['order_type'] ?? ($sourceStep['order_type'] ?? ''))));
+    $sourceSort = (int)($sourceStep['sort_order'] ?? 0);
+    $preferredStepKey = $orderType === 'readymade' ? 'proofing_approval' : 'design_approval';
+
+    try {
+        if ($orderType !== '') {
+            $stmt = $conn->prepare("SELECT id, step_key, step_name FROM workflow_steps WHERE order_type = ? AND step_key = ? AND is_active = 1 LIMIT 1");
+            $stmt->bind_param('ss', $orderType, $preferredStepKey);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if ($row) return $row;
+        }
+
+        if ($orderType !== '') {
+            $stmt = $conn->prepare("
+                SELECT id, step_key, step_name
+                FROM workflow_steps
+                WHERE order_type = ?
+                  AND is_active = 1
+                  AND (is_approval_step = 1 OR step_key IN ('proofing_approval','design_approval'))
+                  AND sort_order >= ?
+                ORDER BY sort_order ASC, id ASC
+                LIMIT 1
+            ");
+            $stmt->bind_param('si', $orderType, $sourceSort);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if ($row) return $row;
+        }
+    } catch (Throwable $e) {}
+
+    return null;
+}
+
+function jcvRefreshJobCardProgressAfterPhotoCancel(mysqli $conn, int $jobId, int $userId = 0): void
+{
+    if ($jobId <= 0 || !jcvTableExists($conn, 'job_tracking') || !jcvTableExists($conn, 'job_cards')) return;
+
+    $summary = [
+        'total_steps' => 0,
+        'completed_steps' => 0,
+        'open_steps' => 0,
+        'progress_steps' => 0,
+        'delayed_steps' => 0,
+        'delay_history_steps' => 0
+    ];
+
+    $stmt = $conn->prepare("
+        SELECT
+            COUNT(*) AS total_steps,
+            SUM(CASE WHEN status IN ('completed','skipped') THEN 1 ELSE 0 END) AS completed_steps,
+            SUM(CASE WHEN status NOT IN ('completed','skipped','cancelled') THEN 1 ELSE 0 END) AS open_steps,
+            SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) AS progress_steps,
+            SUM(CASE WHEN status = 'delayed' THEN 1 ELSE 0 END) AS delayed_steps,
+            SUM(CASE WHEN is_delayed = 1 THEN 1 ELSE 0 END) AS delay_history_steps
+        FROM job_tracking
+        WHERE job_card_id = ?
+    ");
+    $stmt->bind_param('i', $jobId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if ($row) $summary = array_merge($summary, $row);
+
+    $currentWorkflowStepId = null;
+    $stmt = $conn->prepare("
+        SELECT jt.workflow_step_id
+        FROM job_tracking jt
+        LEFT JOIN workflow_steps ws ON ws.id = jt.workflow_step_id
+        WHERE jt.job_card_id = ?
+          AND jt.status NOT IN ('completed','skipped','cancelled')
+        ORDER BY ws.sort_order ASC, jt.id ASC
+        LIMIT 1
+    ");
+    $stmt->bind_param('i', $jobId);
+    $stmt->execute();
+    $currentRow = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if ($currentRow) $currentWorkflowStepId = (int)$currentRow['workflow_step_id'];
+
+    $jobStatusKey = 'pending';
+    if ((int)($summary['delayed_steps'] ?? 0) > 0) {
+        $jobStatusKey = 'delayed';
+    } elseif ((int)($summary['open_steps'] ?? 0) === 0 && (int)($summary['total_steps'] ?? 0) > 0) {
+        $jobStatusKey = 'completed';
+    } elseif ((int)($summary['progress_steps'] ?? 0) > 0) {
+        $jobStatusKey = 'in_progress';
+    }
+
+    $jobStatusId = null;
+    if (jcvTableExists($conn, 'job_card_statuses')) {
+        $stmt = $conn->prepare("SELECT id FROM job_card_statuses WHERE status_key = ? LIMIT 1");
+        $stmt->bind_param('s', $jobStatusKey);
+        $stmt->execute();
+        $statusRow = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($statusRow) $jobStatusId = (int)$statusRow['id'];
+    }
+
+    $isDelayed = ((int)($summary['delay_history_steps'] ?? 0) > 0 || $jobStatusKey === 'delayed') ? 1 : 0;
+
+    if ($jobStatusId && $currentWorkflowStepId) {
+        $stmt = $conn->prepare("
+            UPDATE job_cards
+            SET current_workflow_step_id = ?,
+                job_card_status_id = ?,
+                is_delayed = ?,
+                completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, NOW()) ELSE NULL END,
+                updated_by = CASE WHEN ? > 0 THEN ? ELSE updated_by END,
+                updated_at = NOW()
+            WHERE id = ?
+        ");
+        $stmt->bind_param('iiisiii', $currentWorkflowStepId, $jobStatusId, $isDelayed, $jobStatusKey, $userId, $userId, $jobId);
+        $stmt->execute();
+        $stmt->close();
+    } elseif ($jobStatusId) {
+        $stmt = $conn->prepare("
+            UPDATE job_cards
+            SET job_card_status_id = ?,
+                is_delayed = ?,
+                completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, NOW()) ELSE NULL END,
+                updated_by = CASE WHEN ? > 0 THEN ? ELSE updated_by END,
+                updated_at = NOW()
+            WHERE id = ?
+        ");
+        $stmt->bind_param('iisiii', $jobStatusId, $isDelayed, $jobStatusKey, $userId, $userId, $jobId);
+        $stmt->execute();
+        $stmt->close();
+    }
+}
+
+function jcvCancelUploadedTrackingPhoto(mysqli $conn, array $job, int $trackingId, int $photoId, int $userId): string
+{
+    $jobId = (int)($job['id'] ?? 0);
+    if ($jobId <= 0 || $trackingId <= 0 || $photoId <= 0) {
+        throw new RuntimeException('Invalid photo cancel request.');
+    }
+    if (!jcvTableExists($conn, 'job_tracking_photos')) {
+        throw new RuntimeException('Tracking photo table is missing.');
+    }
+
+    $stmt = $conn->prepare("
+        SELECT
+            p.*,
+            jt.status AS tracking_status,
+            jt.workflow_step_id,
+            ws.step_key,
+            ws.step_name,
+            ws.sort_order,
+            ws.order_type AS step_order_type
+        FROM job_tracking_photos p
+        LEFT JOIN job_tracking jt ON jt.id = p.job_tracking_id
+        LEFT JOIN workflow_steps ws ON ws.id = jt.workflow_step_id
+        WHERE p.id = ?
+          AND p.job_card_id = ?
+          AND p.job_tracking_id = ?
+        LIMIT 1
+    ");
+    $stmt->bind_param('iii', $photoId, $jobId, $trackingId);
+    $stmt->execute();
+    $photo = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$photo) {
+        throw new RuntimeException('Uploaded photo not found.');
+    }
+
+    $sourceStep = [
+        'workflow_step_id' => (int)($photo['workflow_step_id'] ?? 0),
+        'step_key' => (string)($photo['step_key'] ?? ''),
+        'step_name' => (string)($photo['step_name'] ?? ''),
+        'sort_order' => (int)($photo['sort_order'] ?? 0),
+        'order_type' => (string)($photo['step_order_type'] ?? ($job['order_type'] ?? ''))
+    ];
+
+    $conn->begin_transaction();
+    try {
+        $stmt = $conn->prepare("DELETE FROM job_tracking_photos WHERE id = ? AND job_card_id = ? AND job_tracking_id = ? LIMIT 1");
+        $stmt->bind_param('iii', $photoId, $jobId, $trackingId);
+        $stmt->execute();
+        $stmt->close();
+
+        $relativePath = trim((string)($photo['file_path'] ?? ''));
+        if ($relativePath !== '' && strpos($relativePath, 'uploads/job_tracking_photos/') === 0) {
+            $fullPath = __DIR__ . '/' . $relativePath;
+            if (is_file($fullPath)) {
+                @unlink($fullPath);
+            }
+        }
+
+        $stmt = $conn->prepare("SELECT COUNT(*) AS cnt FROM job_tracking_photos WHERE job_card_id = ? AND job_tracking_id = ?");
+        $stmt->bind_param('ii', $jobId, $trackingId);
+        $stmt->execute();
+        $countRow = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        $remaining = (int)($countRow['cnt'] ?? 0);
+
+        if ($remaining === 0) {
+            if (jcvTableExists($conn, 'job_tracking_photo_approvals')) {
+                $cancelRemark = 'Proof/design photos cancelled by staff. Fresh upload is required.';
+                $workflowStepId = (int)$sourceStep['workflow_step_id'];
+                $stmt = $conn->prepare("
+                    UPDATE job_tracking_photo_approvals
+                    SET status = 'expired',
+                        customer_remarks = CASE WHEN COALESCE(customer_remarks, '') = '' THEN ? ELSE customer_remarks END,
+                        updated_at = NOW()
+                    WHERE job_card_id = ?
+                      AND job_tracking_id = ?
+                      AND workflow_step_id = ?
+                      AND status IN ('pending','approved','rejected')
+                ");
+                $stmt->bind_param('siii', $cancelRemark, $jobId, $trackingId, $workflowStepId);
+                $stmt->execute();
+                $stmt->close();
+            }
+
+            $approvalStep = jcvFindApprovalWorkflowStepForPhoto($conn, $job, $sourceStep);
+            if ($approvalStep) {
+                $approvalWorkflowStepId = (int)($approvalStep['id'] ?? 0);
+                $approvalType = jcvApprovalTypeFromStepKey((string)($approvalStep['step_key'] ?? ''));
+
+                if ($approvalWorkflowStepId > 0 && jcvTableExists($conn, 'customer_approvals')) {
+                    $internalRemark = 'Proof/design photo cancelled by staff. Fresh approval required.';
+                    $stmt = $conn->prepare("
+                        UPDATE customer_approvals
+                        SET status = 'expired',
+                            approved_by_customer = 0,
+                            approved_by_call = 0,
+                            approved_at = NULL,
+                            rejected_at = NULL,
+                            internal_remarks = CASE WHEN COALESCE(internal_remarks, '') = '' THEN ? ELSE CONCAT(internal_remarks, '\n', ?) END,
+                            updated_at = NOW()
+                        WHERE job_card_id = ?
+                          AND workflow_step_id = ?
+                          AND approval_type = ?
+                        ORDER BY id DESC
+                        LIMIT 1
+                    ");
+                    $stmt->bind_param('ssiis', $internalRemark, $internalRemark, $jobId, $approvalWorkflowStepId, $approvalType);
+                    $stmt->execute();
+                    $stmt->close();
+                }
+
+                if ($approvalWorkflowStepId > 0 && jcvTableExists($conn, 'job_tracking')) {
+                    $approvalTrackingRemark = 'Approval cancelled because proof/design photo was removed. Fresh customer approval required.';
+                    $stmt = $conn->prepare("
+                        UPDATE job_tracking
+                        SET status = 'pending',
+                            remarks = ?,
+                            actual_completed_at = NULL,
+                            completed_by = NULL,
+                            updated_at = NOW()
+                        WHERE job_card_id = ?
+                          AND workflow_step_id = ?
+                          AND status = 'completed'
+                        LIMIT 1
+                    ");
+                    $stmt->bind_param('sii', $approvalTrackingRemark, $jobId, $approvalWorkflowStepId);
+                    $stmt->execute();
+                    $stmt->close();
+                }
+            }
+
+            $sourceRemark = 'Uploaded proof/design photo cancelled. Upload corrected photo and complete this stage again.';
+            $stmt = $conn->prepare("
+                UPDATE job_tracking
+                SET status = 'in_progress',
+                    remarks = ?,
+                    actual_completed_at = NULL,
+                    completed_by = NULL,
+                    updated_at = NOW()
+                WHERE id = ?
+                  AND job_card_id = ?
+                  AND status = 'completed'
+                LIMIT 1
+            ");
+            $stmt->bind_param('sii', $sourceRemark, $trackingId, $jobId);
+            $stmt->execute();
+            $stmt->close();
+
+            jcvRefreshJobCardProgressAfterPhotoCancel($conn, $jobId, $userId);
+        }
+
+        $conn->commit();
+    } catch (Throwable $e) {
+        $conn->rollback();
+        throw $e;
+    }
+
+    if ($remaining === 0) {
+        return 'Uploaded photo cancelled. All proof/design photos were removed, so customer approval was expired and this stage needs a fresh upload.';
+    }
+
+    return 'Uploaded photo cancelled successfully.';
+}
+
+
 $roleKey = strtolower((string)($_SESSION['role_key'] ?? ''));
 
 $allAccessRoles = [
@@ -943,6 +1254,12 @@ if (($_GET['msg'] ?? '') === 'approval_whatsapp_failed') {
     $message = 'WhatsApp approval link failed. Please check WhatsApp API settings/logs and try again.';
     $messageType = 'warning';
     $toastTitle = 'WhatsApp Failed';
+}
+
+if (($_GET['msg'] ?? '') === 'photo_cancelled') {
+    $message = 'Uploaded proof/design photo cancelled successfully. If all photos were cancelled, customer approval was expired and the stage was moved back for fresh proof upload.';
+    $messageType = 'success';
+    $toastTitle = 'Photo Cancelled';
 }
 
 try {
@@ -1166,6 +1483,27 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
         $message = 'Approval WhatsApp failed: ' . $e->getMessage();
         $messageType = 'danger';
         $toastTitle = 'WhatsApp Failed';
+    }
+}
+
+
+if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'cancel_tracking_photo') {
+    $trackingId = (int)($_POST['tracking_id'] ?? 0);
+    $photoId = (int)($_POST['photo_id'] ?? 0);
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+
+    try {
+        if (!$canUpdateJob) {
+            throw new RuntimeException('You do not have permission to cancel uploaded proof/design photos.');
+        }
+
+        jcvCancelUploadedTrackingPhoto($conn, $job, $trackingId, $photoId, $userId);
+        header('Location: job_card_view.php?id=' . $jobId . '&msg=photo_cancelled');
+        exit;
+    } catch (Throwable $e) {
+        $message = 'Photo cancel failed: ' . $e->getMessage();
+        $messageType = 'danger';
+        $toastTitle = 'Cancel Failed';
     }
 }
 
@@ -2028,6 +2366,109 @@ if ($message !== '' && $toastTitle === 'Info') {
         background: #f8fafc;
     }
 
+
+    .tracking-photo-item {
+        position: relative;
+        width: 84px;
+        min-height: 100px;
+        border: 1px solid var(--border-soft);
+        border-radius: 16px;
+        padding: 5px;
+        background: #fff;
+        box-shadow: 0 8px 18px rgba(15, 23, 42, .06);
+    }
+
+    .tracking-photo-item .tracking-photo-thumb {
+        width: 100%;
+        height: 74px;
+    }
+
+    .photo-cancel-form {
+        margin: 5px 0 0;
+    }
+
+    .photo-cancel-btn {
+        width: 100%;
+        border: 1px solid #fecaca;
+        background: #fff1f2;
+        color: #dc2626;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 900;
+        padding: 4px 6px;
+        line-height: 1.1;
+    }
+
+    .photo-cancel-btn:hover {
+        background: #dc2626;
+        color: #fff;
+        border-color: #dc2626;
+    }
+
+    .photo-approval-card {
+        border-radius: 18px;
+        border: 1px solid var(--border-soft);
+        background: linear-gradient(135deg, #f8fafc, #ffffff);
+        padding: 14px 16px;
+    }
+
+    .photo-approval-head {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+
+    .photo-status-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin-top: 2px;
+    }
+
+    .photo-status-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        width: auto !important;
+        min-width: 0 !important;
+        border-radius: 999px;
+        padding: 6px 11px;
+        font-size: 11px;
+        font-weight: 900;
+        line-height: 1;
+        text-transform: uppercase;
+        border: 1px solid #cbd5e1;
+        background: #f8fafc;
+        color: #475569;
+    }
+
+    .photo-status-chip.pending {
+        border-color: #fed7aa;
+        background: #fff7ed;
+        color: #9a3412;
+    }
+
+    .photo-status-chip.approved {
+        border-color: #bbf7d0;
+        background: #ecfdf5;
+        color: #166534;
+    }
+
+    .photo-status-chip.rejected,
+    .photo-status-chip.expired {
+        border-color: #fecaca;
+        background: #fef2f2;
+        color: #991b1b;
+    }
+
+    .photo-action-wrap {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+    }
+
     .wa-photo-btn {
         background: #22c55e !important;
         border-color: #22c55e !important;
@@ -2626,35 +3067,65 @@ if ($message !== '' && $toastTitle === 'Info') {
                                     }
                                 ?>
                                 <?php if ($isDesignProofingStage && $stepPhotos): ?>
+                                <?php
+                                    $photoStatusLabel = $photoApproval ? ucwords(str_replace('_', ' ', $photoApprovalStatus)) : 'No Approval Link';
+                                    $photoStatusClass = in_array($photoApprovalStatus, ['approved','rejected','expired','pending'], true) ? $photoApprovalStatus : 'pending';
+                                    $canCancelUploadedPhoto = $canUpdateJob;
+                                ?>
                                 <div class="col-12">
-                                    <div class="info-card">
-                                        <div class="d-flex flex-column flex-md-row justify-content-between gap-2 align-items-md-center">
-                                            <div>
-                                                <small>Uploaded Design / Proofing Photos</small>
+                                    <div class="photo-approval-card">
+                                        <div class="d-flex flex-column flex-md-row justify-content-between gap-3 align-items-md-center">
+                                            <div class="photo-approval-head">
+                                                <small class="text-muted-custom fw-bold text-uppercase">Uploaded Design / Proofing Photos</small>
                                                 <strong><?= count($stepPhotos) ?> photo(s) uploaded</strong>
-                                                <?php if ($photoApproval): ?>
-                                                <span class="text-muted-custom small">Customer link status: <?= e(ucwords((string)($photoApproval['status'] ?? 'pending'))) ?></span>
+                                                <div class="photo-status-row">
+                                                    <span class="photo-status-chip <?= e($photoStatusClass) ?>">
+                                                        <?= $photoStatusClass === 'approved' ? '✓' : ($photoStatusClass === 'rejected' ? '!' : ($photoStatusClass === 'expired' ? '×' : '⏱')) ?>
+                                                        <?= e($photoStatusLabel) ?>
+                                                    </span>
+                                                    <?php if ($photoApproval && !empty($photoApproval['link_sent_at'])): ?>
+                                                        <span class="text-muted-custom small fw-bold">Sent: <?= e(jcvDateTime($photoApproval['link_sent_at'])) ?></span>
+                                                    <?php endif; ?>
+                                                    <?php if ($photoStatusClass === 'approved'): ?>
+                                                        <span class="text-success small fw-bold">Customer approved this proof/design.</span>
+                                                    <?php elseif ($photoStatusClass === 'rejected'): ?>
+                                                        <span class="text-danger small fw-bold">Customer rejected this proof/design. Upload corrected copy.</span>
+                                                    <?php elseif ($photoStatusClass === 'expired'): ?>
+                                                        <span class="text-danger small fw-bold">This approval link is cancelled/expired. Upload fresh copy.</span>
+                                                    <?php else: ?>
+                                                        <span class="text-muted-custom small fw-bold">Waiting for customer approval.</span>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+
+                                            <div class="photo-action-wrap">
+                                                <?php if ($canSendPhotoApprovalApi): ?>
+                                                <form method="post" class="m-0">
+                                                    <input type="hidden" name="action" value="send_photo_approval_api">
+                                                    <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
+                                                    <button type="submit" class="btn btn-sm wa-photo-btn rounded-pill px-3 fw-bold">
+                                                        Send WhatsApp Approval Link
+                                                    </button>
+                                                </form>
                                                 <?php endif; ?>
                                             </div>
-                                            <?php if ($canSendPhotoApprovalApi): ?>
-                                            <form method="post" class="m-0">
-                                                <input type="hidden" name="action" value="send_photo_approval_api">
-                                                <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
-                                                <button type="submit" class="btn btn-sm wa-photo-btn rounded-pill px-3 fw-bold">
-                                                    Send WhatsApp Approval Link
-                                                </button>
-                                            </form>
-                                            <?php elseif ($photoApproval): ?>
-                                            <span class="badge rounded-pill <?= $photoApprovalStatus === 'approved' ? 'bg-success' : ($photoApprovalStatus === 'rejected' ? 'bg-danger' : 'bg-secondary') ?>">
-                                                <?= e(ucwords(str_replace('_', ' ', $photoApprovalStatus))) ?>
-                                            </span>
-                                            <?php endif; ?>
                                         </div>
+
                                         <div class="tracking-photo-list">
                                             <?php foreach ($stepPhotos as $photo): ?>
-                                            <a href="<?= e($photo['file_path'] ?? '#') ?>" target="_blank" rel="noopener">
-                                                <img src="<?= e($photo['file_path'] ?? '') ?>" class="tracking-photo-thumb" alt="Tracking photo">
-                                            </a>
+                                            <div class="tracking-photo-item">
+                                                <a href="<?= e($photo['file_path'] ?? '#') ?>" target="_blank" rel="noopener">
+                                                    <img src="<?= e($photo['file_path'] ?? '') ?>" class="tracking-photo-thumb" alt="Tracking photo">
+                                                </a>
+                                                <?php if ($canCancelUploadedPhoto): ?>
+                                                <form method="post" class="photo-cancel-form" onsubmit="return confirm('Cancel this uploaded proof/design photo? If this is the last photo, the customer approval link will expire and this stage will move back for fresh upload.');">
+                                                    <input type="hidden" name="action" value="cancel_tracking_photo">
+                                                    <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
+                                                    <input type="hidden" name="photo_id" value="<?= (int)($photo['id'] ?? 0) ?>">
+                                                    <button type="submit" class="photo-cancel-btn">Cancel</button>
+                                                </form>
+                                                <?php endif; ?>
+                                            </div>
                                             <?php endforeach; ?>
                                         </div>
                                     </div>
