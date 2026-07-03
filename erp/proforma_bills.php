@@ -86,61 +86,74 @@ function pb_fast_tracking_url(mysqli $conn, array $row): string
     return pb_fast_base_url($conn) . '/customer_tracking.php?token=' . rawurlencode($token);
 }
 
+function pb_fast_whatsapp_template_row(mysqli $conn, string $templateKey): ?array
+{
+    try {
+        if (!pb_fast_table_exists($conn, 'whatsapp_templates')) return null;
+
+        $stmt = $conn->prepare("
+            SELECT id, template_key, template_name, message_body
+            FROM whatsapp_templates
+            WHERE template_key = ?
+              AND is_active = 1
+            LIMIT 1
+        ");
+        $stmt->bind_param('s', $templateKey);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function pb_fast_render_template(string $message, array $variables): string
+{
+    foreach ($variables as $key => $value) {
+        $key = trim((string)$key);
+        $value = (string)$value;
+        $message = str_replace('{{' . $key . '}}', $value, $message);
+        $message = str_replace('{' . $key . '}', $value, $message);
+    }
+
+    return $message;
+}
+
+function pb_fast_whatsapp_variables(mysqli $conn, array $row): array
+{
+    return [
+        'customer_name' => trim((string)($row['customer_name'] ?? 'Customer')) ?: 'Customer',
+        'proforma_no' => trim((string)($row['proforma_no'] ?? '-')) ?: '-',
+        'job_card_no' => trim((string)($row['job_card_no'] ?? '-')) ?: '-',
+        'function_type' => trim((string)($row['function_name'] ?? '-')) ?: '-',
+        'product_name' => trim((string)($row['item_name'] ?? $row['function_name'] ?? '-')) ?: '-',
+        'order_type' => ucfirst((string)($row['order_type'] ?? '-')),
+        'final_amount' => pb_fast_money($row['final_amount'] ?? 0),
+        'advance_amount' => pb_fast_money($row['advance_amount'] ?? 0),
+        'balance_amount' => pb_fast_money($row['balance_amount'] ?? 0),
+        'delivery_date' => !empty($row['delivery_date']) ? date('d-m-Y', strtotime((string)$row['delivery_date'])) : '-',
+        'tracking_link' => pb_fast_tracking_url($conn, $row),
+        'mobile' => (string)($row['mobile'] ?? '')
+    ];
+}
+
+function pb_fast_whatsapp_message(mysqli $conn, array $row): string
+{
+    $template = pb_fast_whatsapp_template_row($conn, 'proforma_created');
+    if (!$template) return '';
+
+    return pb_fast_render_template((string)$template['message_body'], pb_fast_whatsapp_variables($conn, $row));
+}
+
 function pb_fast_whatsapp_url(mysqli $conn, array $row): string
 {
     $mobile = pb_fast_mobile($row['mobile'] ?? '');
-    if ($mobile === '') {
-        return '#';
-    }
+    if ($mobile === '') return '#';
 
-    $customer = trim((string)($row['customer_name'] ?? 'Customer')) ?: 'Customer';
-    $proformaNo = trim((string)($row['proforma_no'] ?? '-')) ?: '-';
-    $jobCardNo = trim((string)($row['job_card_no'] ?? '-')) ?: '-';
-    $functionName = trim((string)($row['function_name'] ?? '-')) ?: '-';
-    $orderType = ucfirst((string)($row['order_type'] ?? '-'));
-    $finalAmount = pb_fast_money($row['final_amount'] ?? 0);
-    $advanceAmount = pb_fast_money($row['advance_amount'] ?? 0);
-    $balanceAmount = pb_fast_money($row['balance_amount'] ?? 0);
-    $trackingUrl = pb_fast_tracking_url($conn, $row);
-
-    $message = "Hi {$customer},
-
-"
-        . "Greetings from Subhiksha Cards.
-
-"
-        . "Your proforma bill / sales order has been created.
-
-"
-        . "Proforma No: {$proformaNo}
-"
-        . "Job Card No: {$jobCardNo}
-"
-        . "Function/Product: {$functionName}
-"
-        . "Order Type: {$orderType}
-"
-        . "Final Amount: {$finalAmount}
-"
-        . "Advance Paid: {$advanceAmount}
-"
-        . "Balance Amount: {$balanceAmount}
-
-";
-
-    if ($trackingUrl !== '') {
-        $message .= "Track your order here:
-{$trackingUrl}
-
-";
-    } else {
-        $message .= "Tracking link will be shared once job card tracking is ready.
-
-";
-    }
-
-    $message .= "Thank you,
-Subhiksha Cards";
+    $message = pb_fast_whatsapp_message($conn, $row);
+    if (trim($message) === '') return '#';
 
     return 'https://wa.me/' . $mobile . '?text=' . rawurlencode($message);
 }
@@ -203,11 +216,19 @@ try {
             pb.balance_amount,
             pb.final_amount,
             pb.advance_amount,
+            pb.delivery_date,
             COALESCE(ft.function_name, '-') AS function_name,
+            pbi.item_name,
             jc.job_card_no,
             jc.tracking_token
         FROM proforma_bills pb
         LEFT JOIN function_types ft ON ft.id = pb.function_type_id
+        LEFT JOIN (
+            SELECT proforma_bill_id, MIN(id) AS first_item_id
+            FROM proforma_bill_items
+            GROUP BY proforma_bill_id
+        ) first_pbi ON first_pbi.proforma_bill_id = pb.id
+        LEFT JOIN proforma_bill_items pbi ON pbi.id = first_pbi.first_item_id
         LEFT JOIN (
             SELECT proforma_bill_id, MAX(job_card_no) AS job_card_no, MAX(tracking_token) AS tracking_token
             FROM job_cards
@@ -500,7 +521,7 @@ foreach ($rows as $statRow) {
             border-radius: 20px !important;
         }
 
-        .mobile-card > .d-flex.justify-content-between {
+        .mobile-card>.d-flex.justify-content-between {
             align-items: flex-start !important;
             gap: 12px !important;
         }
@@ -554,7 +575,8 @@ foreach ($rows as $statRow) {
                     <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
                         <div>
                             <h1 class="mb-1">Proforma Bills / Sales Orders</h1>
-                            <p class="text-muted-custom mb-0">Create, edit, collect payment and move confirmed orders to job card.</p>
+                            <p class="text-muted-custom mb-0">Create, edit, collect payment and move confirmed orders to
+                                job card.</p>
                         </div>
 
                         <?php if ($canCreate): ?>
@@ -632,7 +654,8 @@ foreach ($rows as $statRow) {
                 </div>
 
                 <div class="card-ui module-card">
-                    <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
+                    <div
+                        class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
                         <div>
                             <h2 class="module-title">Proforma Bill List</h2>
                             <p class="text-muted-custom mb-0">Correct flow: proforma bill → payment → job card.</p>
@@ -659,7 +682,8 @@ foreach ($rows as $statRow) {
                             <tbody>
                                 <?php if (!$rows): ?>
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted-custom py-4">No proforma bills found.</td>
+                                    <td colspan="7" class="text-center text-muted-custom py-4">No proforma bills found.
+                                    </td>
                                 </tr>
                                 <?php endif; ?>
 
@@ -677,7 +701,9 @@ foreach ($rows as $statRow) {
                                     </td>
                                     <td><?= e($row['function_name'] ?? '-') ?></td>
                                     <td><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></td>
-                                    <td><span class="balance-text <?= e($paidClass) ?>"><?= e(pb_fast_money($balance)) ?></span></td>
+                                    <td><span
+                                            class="balance-text <?= e($paidClass) ?>"><?= e(pb_fast_money($balance)) ?></span>
+                                    </td>
                                     <td>
                                         <span class="status-pill <?= e($paidClass) ?>">
                                             <?= $balance <= 0 ? 'Paid' : 'Pending' ?>
@@ -685,7 +711,8 @@ foreach ($rows as $statRow) {
                                     </td>
                                     <td class="text-end">
                                         <div class="action-buttons">
-                                            <a title="View" aria-label="View" href="proforma_bill_view.php?id=<?= (int)$row['id'] ?>"
+                                            <a title="View" aria-label="View"
+                                                href="proforma_bill_view.php?id=<?= (int)$row['id'] ?>"
                                                 class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon">
                                                 <i data-lucide="eye"></i>
                                             </a>
@@ -698,25 +725,30 @@ foreach ($rows as $statRow) {
                                             <?php endif; ?>
 
                                             <?php if ($canPayment): ?>
-                                            <a title="Payment" aria-label="Payment" href="proforma_payment.php?id=<?= (int)$row['id'] ?>"
+                                            <a title="Payment" aria-label="Payment"
+                                                href="proforma_payment.php?id=<?= (int)$row['id'] ?>"
                                                 class="btn btn-sm btn-success rounded-circle fw-bold btn-action-icon">
                                                 <i data-lucide="indian-rupee"></i>
                                             </a>
                                             <?php endif; ?>
 
                                             <?php if ($canSendWhatsapp): ?>
-                                            <a title="Send WhatsApp" aria-label="Send WhatsApp" href="<?= e(pb_fast_whatsapp_url($conn, $row)) ?>"
-                                                target="_blank" rel="noopener" class="btn btn-sm btn-whatsapp-icon rounded-circle fw-bold btn-action-icon">
+                                            <a title="Send WhatsApp" aria-label="Send WhatsApp"
+                                                href="<?= e(pb_fast_whatsapp_url($conn, $row)) ?>" target="_blank"
+                                                rel="noopener" data-id="<?= (int)$row['id'] ?>"
+                                                class="btn btn-sm btn-whatsapp-icon rounded-circle fw-bold btn-action-icon js-proforma-whatsapp-link">
                                                 <?= pb_fast_whatsapp_svg() ?>
                                             </a>
                                             <?php endif; ?>
 
                                             <?php if (empty($row['job_card_no']) && $canCreateJobCard): ?>
-                                            <form method="post" action="api/proforma_bills.php" class="js-api-job-card-form" onsubmit="return false;">
+                                            <form method="post" action="api/proforma_bills.php"
+                                                class="js-api-job-card-form" onsubmit="return false;">
                                                 <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                                 <input type="hidden" name="action" value="create_job_card">
                                                 <input type="hidden" name="proforma_id" value="<?= (int)$row['id'] ?>">
-                                                <button title="Create Job Card" aria-label="Create Job Card" type="submit"
+                                                <button title="Create Job Card" aria-label="Create Job Card"
+                                                    type="submit"
                                                     class="btn btn-sm btn-primary rounded-circle fw-bold btn-action-icon">
                                                     <i data-lucide="briefcase-business"></i>
                                                 </button>
@@ -724,7 +756,8 @@ foreach ($rows as $statRow) {
                                             <?php endif; ?>
 
                                             <?php if ($canDelete): ?>
-                                            <form method="post" action="api/proforma_bills.php" class="js-api-delete-form" onsubmit="return false;">
+                                            <form method="post" action="api/proforma_bills.php"
+                                                class="js-api-delete-form" onsubmit="return false;">
                                                 <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                                 <input type="hidden" name="action" value="delete_record">
                                                 <input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
@@ -759,9 +792,12 @@ foreach ($rows as $statRow) {
                                     <div class="mobile-card-title"><?= e($row['customer_name'] ?? '-') ?></div>
                                     <span class="mobile-card-subtitle">No: <?= e($row['proforma_no'] ?? '-') ?></span>
                                     <span class="mobile-card-subtitle">Mobile: <?= e($row['mobile'] ?? '-') ?></span>
-                                    <span class="mobile-card-subtitle">Function: <?= e($row['function_name'] ?? '-') ?></span>
-                                    <span class="mobile-card-subtitle">Order Type: <?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></span>
-                                    <span class="mobile-card-subtitle balance-text <?= e($paidClass) ?>">Balance: <?= e(pb_fast_money($balance)) ?></span>
+                                    <span class="mobile-card-subtitle">Function:
+                                        <?= e($row['function_name'] ?? '-') ?></span>
+                                    <span class="mobile-card-subtitle">Order Type:
+                                        <?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></span>
+                                    <span class="mobile-card-subtitle balance-text <?= e($paidClass) ?>">Balance:
+                                        <?= e(pb_fast_money($balance)) ?></span>
                                 </div>
 
                                 <span class="status-pill <?= e($paidClass) ?>">
@@ -770,41 +806,52 @@ foreach ($rows as $statRow) {
                             </div>
 
                             <div class="mobile-card-actions">
-                                <a title="View" aria-label="View" href="proforma_bill_view.php?id=<?= (int)$row['id'] ?>"
-                                    class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon"><i data-lucide="eye"></i></a>
+                                <a title="View" aria-label="View"
+                                    href="proforma_bill_view.php?id=<?= (int)$row['id'] ?>"
+                                    class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon"><i
+                                        data-lucide="eye"></i></a>
 
                                 <?php if ($canEdit): ?>
                                 <a title="Edit" aria-label="Edit" href="<?= e($editUrl) ?>"
-                                    class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon"><i data-lucide="pencil"></i></a>
+                                    class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon"><i
+                                        data-lucide="pencil"></i></a>
                                 <?php endif; ?>
 
                                 <?php if ($canPayment): ?>
-                                <a title="Payment" aria-label="Payment" href="proforma_payment.php?id=<?= (int)$row['id'] ?>"
-                                    class="btn btn-sm btn-success rounded-circle fw-bold btn-action-icon"><i data-lucide="indian-rupee"></i></a>
+                                <a title="Payment" aria-label="Payment"
+                                    href="proforma_payment.php?id=<?= (int)$row['id'] ?>"
+                                    class="btn btn-sm btn-success rounded-circle fw-bold btn-action-icon"><i
+                                        data-lucide="indian-rupee"></i></a>
                                 <?php endif; ?>
 
                                 <?php if ($canSendWhatsapp): ?>
-                                <a title="Send WhatsApp" aria-label="Send WhatsApp" href="<?= e(pb_fast_whatsapp_url($conn, $row)) ?>"
-                                    target="_blank" rel="noopener" class="btn btn-sm btn-whatsapp-icon rounded-circle fw-bold btn-action-icon"><?= pb_fast_whatsapp_svg() ?></a>
+                                <a title="Send WhatsApp" aria-label="Send WhatsApp"
+                                    href="<?= e(pb_fast_whatsapp_url($conn, $row)) ?>" target="_blank" rel="noopener"
+                                    data-id="<?= (int)$row['id'] ?>"
+                                    class="btn btn-sm btn-whatsapp-icon rounded-circle fw-bold btn-action-icon js-proforma-whatsapp-link"><?= pb_fast_whatsapp_svg() ?></a>
                                 <?php endif; ?>
 
                                 <?php if (empty($row['job_card_no']) && $canCreateJobCard): ?>
-                                <form method="post" action="api/proforma_bills.php" class="js-api-job-card-form" onsubmit="return false;">
+                                <form method="post" action="api/proforma_bills.php" class="js-api-job-card-form"
+                                    onsubmit="return false;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="create_job_card">
                                     <input type="hidden" name="proforma_id" value="<?= (int)$row['id'] ?>">
                                     <button title="Create Job Card" aria-label="Create Job Card" type="submit"
-                                        class="btn btn-sm btn-primary rounded-circle fw-bold btn-action-icon"><i data-lucide="briefcase-business"></i></button>
+                                        class="btn btn-sm btn-primary rounded-circle fw-bold btn-action-icon"><i
+                                            data-lucide="briefcase-business"></i></button>
                                 </form>
                                 <?php endif; ?>
 
                                 <?php if ($canDelete): ?>
-                                <form method="post" action="api/proforma_bills.php" class="js-api-delete-form" onsubmit="return false;">
+                                <form method="post" action="api/proforma_bills.php" class="js-api-delete-form"
+                                    onsubmit="return false;">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="delete_record">
                                     <input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
                                     <button title="Delete" aria-label="Delete" type="submit"
-                                        class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon"><i data-lucide="trash-2"></i></button>
+                                        class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon"><i
+                                            data-lucide="trash-2"></i></button>
                                 </form>
                                 <?php endif; ?>
                             </div>
@@ -831,7 +878,8 @@ foreach ($rows as $statRow) {
                 oldToastWrap.remove();
             }
 
-            const toastTitle = title || (type === 'danger' ? 'Failed' : (type === 'warning' ? 'Warning' : 'Success'));
+            const toastTitle = title || (type === 'danger' ? 'Failed' : (type === 'warning' ? 'Warning' :
+                'Success'));
             const wrap = document.createElement('div');
             wrap.id = 'dynamicActionToastWrap';
             wrap.className = 'toast-container position-fixed top-0 end-0 p-3';
@@ -878,6 +926,52 @@ foreach ($rows as $statRow) {
             });
         });
 
+        document.querySelectorAll('.js-proforma-whatsapp-link').forEach(function(link) {
+            link.addEventListener('click', function(event) {
+                event.preventDefault();
+
+                const id = link.getAttribute('data-id') || '';
+                if (!id) {
+                    if (link.href && link.href !== '#') window.open(link.href, '_blank',
+                    'noopener');
+                    return;
+                }
+
+                const formData = new FormData();
+                formData.append('csrf_token', <?= json_encode($csrfToken) ?>);
+                formData.append('action', 'send_whatsapp_api');
+                formData.append('id', id);
+
+                fetch('api/proforma_bills.php', {
+                        method: 'POST',
+                        body: formData,
+                        credentials: 'same-origin'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.open_whatsapp_url) {
+                            window.open(data.open_whatsapp_url, '_blank', 'noopener');
+                        }
+
+                        showToast(
+                            data.message || (data.status ?
+                                'WhatsApp processed successfully.' :
+                                'WhatsApp sending failed.'),
+                            data.status ? 'success' : 'danger',
+                            data.status ? 'Success' : 'Failed'
+                        );
+                    })
+                    .catch(() => {
+                        if (link.href && link.href !== '#') {
+                            window.open(link.href, '_blank', 'noopener');
+                        }
+                        showToast(
+                            'WhatsApp API request failed. Manual WhatsApp opened if available.',
+                            'warning', 'Warning');
+                    });
+            });
+        });
+
         document.querySelectorAll('.js-api-job-card-form').forEach(function(form) {
             form.addEventListener('submit', function(event) {
                 event.preventDefault();
@@ -894,8 +988,10 @@ foreach ($rows as $statRow) {
                     })
                     .then(response => response.json())
                     .then(data => {
-                        showToast(data.message || (data.status ? 'Job card created.' : 'Job card failed.'),
-                            data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+                        showToast(data.message || (data.status ? 'Job card created.' :
+                                'Job card failed.'),
+                            data.status ? 'success' : 'danger', data.status ? 'Success' :
+                            'Failed');
 
                         if (data.status) {
                             setTimeout(() => window.location.reload(), 900);
@@ -921,8 +1017,10 @@ foreach ($rows as $statRow) {
                     })
                     .then(response => response.json())
                     .then(data => {
-                        showToast(data.message || (data.status ? 'Deleted successfully.' : 'Delete failed.'),
-                            data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+                        showToast(data.message || (data.status ? 'Deleted successfully.' :
+                                'Delete failed.'),
+                            data.status ? 'success' : 'danger', data.status ? 'Success' :
+                            'Failed');
 
                         if (data.status) {
                             setTimeout(() => window.location.reload(), 900);

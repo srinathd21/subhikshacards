@@ -19,6 +19,11 @@ if (empty($_SESSION['proforma_csrf'])) {
     $_SESSION['proforma_csrf'] = bin2hex(random_bytes(32));
 }
 
+/* create_proforma.php uses this token; the list page uses proforma_csrf. */
+if (empty($_SESSION['create_proforma_csrf'])) {
+    $_SESSION['create_proforma_csrf'] = bin2hex(random_bytes(32));
+}
+
 $csrfToken = $_SESSION['proforma_csrf'];
 $message = '';
 $messageType = 'success';
@@ -26,13 +31,9 @@ $toastTitle = 'Info';
 
 function pb_table_exists(mysqli $conn, string $table): bool
 {
-    
-function apiColumnExists(mysqli $conn, string $table, string $column): bool
-{
     try {
         $table = $conn->real_escape_string($table);
-        $column = $conn->real_escape_string($column);
-        $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+        $res = $conn->query("SHOW TABLES LIKE '{$table}'");
         $ok = $res && $res->num_rows > 0;
         if ($res) {
             $res->free();
@@ -43,9 +44,12 @@ function apiColumnExists(mysqli $conn, string $table, string $column): bool
     }
 }
 
-try {
+function apiColumnExists(mysqli $conn, string $table, string $column): bool
+{
+    try {
         $table = $conn->real_escape_string($table);
-        $res = $conn->query("SHOW TABLES LIKE '{$table}'");
+        $column = $conn->real_escape_string($column);
+        $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
         $ok = $res && $res->num_rows > 0;
         if ($res) {
             $res->free();
@@ -79,11 +83,13 @@ function pb_redirect(string $query = ''): void
 
 function pb_csrf(): void
 {
-    if (
-        empty($_POST['csrf_token']) ||
-        empty($_SESSION['proforma_csrf']) ||
-        !hash_equals($_SESSION['proforma_csrf'], (string)$_POST['csrf_token'])
-    ) {
+    $token = (string)($_POST['csrf_token'] ?? '');
+    $valid = $token !== '' && (
+        (!empty($_SESSION['proforma_csrf']) && hash_equals($_SESSION['proforma_csrf'], $token)) ||
+        (!empty($_SESSION['create_proforma_csrf']) && hash_equals($_SESSION['create_proforma_csrf'], $token))
+    );
+
+    if (!$valid) {
         http_response_code(400);
         die('Invalid CSRF token.');
     }
@@ -1034,6 +1040,96 @@ function pb_whatsapp_mobile($mobile): string
     return $mobile;
 }
 
+function pb_whatsapp_template_row(mysqli $conn, string $templateKey): ?array
+{
+    try {
+        if (!pb_table_exists($conn, 'whatsapp_templates')) {
+            return null;
+        }
+
+        $stmt = $conn->prepare("
+            SELECT id, template_key, template_name, message_body
+            FROM whatsapp_templates
+            WHERE template_key = ?
+              AND is_active = 1
+            LIMIT 1
+        ");
+        $stmt->bind_param('s', $templateKey);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function pb_whatsapp_render_template(string $message, array $variables): string
+{
+    foreach ($variables as $key => $value) {
+        $key = trim((string)$key);
+        $value = (string)$value;
+        $message = str_replace('{{' . $key . '}}', $value, $message);
+        $message = str_replace('{' . $key . '}', $value, $message);
+    }
+
+    return $message;
+}
+
+function pb_whatsapp_base_url(mysqli $conn): string
+{
+    $setting = pb_setting_value($conn, 'site_url', '');
+    if ($setting === '') $setting = pb_setting_value($conn, 'base_url', '');
+    if ($setting === '') $setting = pb_setting_value($conn, 'app_url', '');
+    if ($setting !== '') return rtrim($setting, '/');
+
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') == 443);
+    $scheme = $https ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $dir = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+    $dir = preg_replace('#/api$#', '', $dir);
+
+    return rtrim($scheme . '://' . $host . ($dir === '' || $dir === '/' ? '' : $dir), '/');
+}
+
+function pb_whatsapp_tracking_url(mysqli $conn, array $row): string
+{
+    $token = trim((string)($row['tracking_token'] ?? ''));
+    if ($token === '') return '';
+
+    return pb_whatsapp_base_url($conn) . '/customer_tracking.php?token=' . rawurlencode($token);
+}
+
+function pb_whatsapp_variables(mysqli $conn, array $row): array
+{
+    return [
+        'customer_name' => (string)($row['customer_name'] ?? 'Customer'),
+        'proforma_no' => (string)($row['proforma_no'] ?? '-'),
+        'job_card_no' => (string)($row['job_card_no'] ?? '-'),
+        'function_type' => (string)($row['function_name'] ?? '-'),
+        'product_name' => (string)($row['item_name'] ?? '-'),
+        'order_type' => ucfirst((string)($row['order_type'] ?? '-')),
+        'quantity' => number_format((float)($row['total_qty'] ?? 0), 0),
+        'final_amount' => '₹' . number_format((float)($row['final_amount'] ?? 0), 2),
+        'advance_amount' => '₹' . number_format((float)($row['advance_amount'] ?? 0), 2),
+        'balance_amount' => '₹' . number_format((float)($row['balance_amount'] ?? 0), 2),
+        'delivery_date' => !empty($row['delivery_date']) ? date('d-m-Y', strtotime((string)$row['delivery_date'])) : '-',
+        'tracking_link' => pb_whatsapp_tracking_url($conn, $row),
+        'mobile' => (string)($row['mobile'] ?? '')
+    ];
+}
+
+function pb_whatsapp_template_message(mysqli $conn, string $templateKey, array $row): string
+{
+    $template = pb_whatsapp_template_row($conn, $templateKey);
+    if (!$template) {
+        return '';
+    }
+
+    return pb_whatsapp_render_template((string)$template['message_body'], pb_whatsapp_variables($conn, $row));
+}
+
 function pb_get_whatsapp_row(mysqli $conn, int $id): ?array
 {
     if ($id <= 0 || !pb_table_exists($conn, 'proforma_bills')) {
@@ -1046,6 +1142,8 @@ function pb_get_whatsapp_row(mysqli $conn, int $id): ?array
                 pb.*,
                 ft.function_name,
                 ps.status_name,
+                jc.job_card_no,
+                jc.tracking_token,
                 pbi.item_name,
                 pbi.description,
                 pbi.qty,
@@ -1065,6 +1163,11 @@ function pb_get_whatsapp_row(mysqli $conn, int $id): ?array
             FROM proforma_bills pb
             LEFT JOIN function_types ft ON ft.id = pb.function_type_id
             LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
+            LEFT JOIN (
+                SELECT proforma_bill_id, MAX(job_card_no) AS job_card_no, MAX(tracking_token) AS tracking_token
+                FROM job_cards
+                GROUP BY proforma_bill_id
+            ) jc ON jc.proforma_bill_id = pb.id
             LEFT JOIN proforma_bill_items pbi ON pbi.proforma_bill_id = pb.id
             LEFT JOIN printing_types pt ON pt.id = pbi.printing_type_id
             LEFT JOIN printing_sub_types pst ON pst.id = pbi.printing_sub_type_id
@@ -1085,30 +1188,12 @@ function pb_get_whatsapp_row(mysqli $conn, int $id): ?array
 
 function pb_whatsapp_message(array $row): string
 {
-    $customerName = trim((string)($row['customer_name'] ?? 'Customer'));
-    $proformaNo = trim((string)($row['proforma_no'] ?? '-'));
-    $orderType = ucfirst((string)($row['order_type'] ?? '-'));
-    $productName = trim((string)($row['item_name'] ?? '-'));
-    $qty = number_format((float)($row['total_qty'] ?? 0), 0);
-    $finalAmount = '₹' . number_format((float)($row['final_amount'] ?? 0), 2);
-    $advance = '₹' . number_format((float)($row['advance_amount'] ?? 0), 2);
-    $balance = '₹' . number_format((float)($row['balance_amount'] ?? 0), 2);
-    $delivery = !empty($row['delivery_date']) ? date('d-m-Y', strtotime($row['delivery_date'])) : '-';
+    $conn = $GLOBALS['conn'] ?? null;
+    if (!$conn instanceof mysqli) {
+        return '';
+    }
 
-    return "Hi {$customerName},\n\n"
-        . "Greetings from Subhiksha Cards.\n\n"
-        . "Your proforma bill / sales order has been created successfully.\n\n"
-        . "Proforma No: {$proformaNo}\n"
-        . "Order Type: {$orderType}\n"
-        . "Product: {$productName}\n"
-        . "Quantity: {$qty}\n"
-        . "Final Amount: {$finalAmount}\n"
-        . "Advance Paid: {$advance}\n"
-        . "Balance Amount: {$balance}\n"
-        . "Delivery Date: {$delivery}\n\n"
-        . "Our team will proceed with the next process and keep you updated.\n\n"
-        . "Thank you,\n"
-        . "Subhiksha Cards Team";
+    return pb_whatsapp_template_message($conn, 'proforma_created', $row);
 }
 
 function pb_whatsapp_url(array $row): string
@@ -1124,21 +1209,8 @@ function pb_whatsapp_url(array $row): string
 
 function pb_whatsapp_template_id(mysqli $conn, string $templateKey): ?int
 {
-    try {
-        if (!pb_table_exists($conn, 'whatsapp_templates')) {
-            return null;
-        }
-
-        $stmt = $conn->prepare("SELECT id FROM whatsapp_templates WHERE template_key = ? LIMIT 1");
-        $stmt->bind_param('s', $templateKey);
-        $stmt->execute();
-        $row = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
-
-        return $row ? (int)$row['id'] : null;
-    } catch (Throwable $e) {
-        return null;
-    }
+    $template = pb_whatsapp_template_row($conn, $templateKey);
+    return $template ? (int)$template['id'] : null;
 }
 
 function pb_whatsapp_log_manual(mysqli $conn, int $id): array
@@ -1161,11 +1233,16 @@ function pb_whatsapp_log_manual(mysqli $conn, int $id): array
 
     try {
         $templateId = pb_whatsapp_template_id($conn, 'proforma_created');
+        $messageBody = pb_whatsapp_template_message($conn, 'proforma_created', $row);
+
+        if (!$templateId || trim($messageBody) === '') {
+            return ['success' => false, 'message' => 'Active WhatsApp template not found for template_key: proforma_created.'];
+        }
+
         $relatedModule = 'Proforma Bills';
         $relatedId = $id;
         $customerId = !empty($row['customer_id']) ? (int)$row['customer_id'] : null;
         $jobCardId = null;
-        $messageBody = pb_whatsapp_message($row);
         $status = 'sent';
         $providerResponse = json_encode([
             'mode' => 'manual',
@@ -1228,7 +1305,7 @@ function pb_send_whatsapp_by_api(mysqli $conn, int $id): array
 
     require_once $apiFile;
 
-    if (!function_exists('subhiksha_send_whatsapp')) {
+    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
         return ['success' => false, 'message' => 'WhatsApp API function missing.'];
     }
 
@@ -1238,24 +1315,64 @@ function pb_send_whatsapp_by_api(mysqli $conn, int $id): array
         return ['success' => false, 'message' => 'Proforma bill not found.'];
     }
 
-    return subhiksha_send_whatsapp($conn, [
-        'mobile' => (string)($row['mobile'] ?? ''),
-        'template_key' => 'proforma_created',
-        'variables' => [
-            'customer_name' => (string)($row['customer_name'] ?? 'Customer'),
-            'proforma_no' => (string)($row['proforma_no'] ?? '-'),
-            'order_type' => ucfirst((string)($row['order_type'] ?? '-')),
-            'product_name' => (string)($row['item_name'] ?? '-'),
-            'quantity' => number_format((float)($row['total_qty'] ?? 0), 0),
-            'final_amount' => '₹' . number_format((float)($row['final_amount'] ?? 0), 2),
-            'advance_amount' => '₹' . number_format((float)($row['advance_amount'] ?? 0), 2),
-            'balance_amount' => '₹' . number_format((float)($row['balance_amount'] ?? 0), 2),
-            'delivery_date' => !empty($row['delivery_date']) ? date('d-m-Y', strtotime($row['delivery_date'])) : '-'
-        ],
+    $variables = pb_whatsapp_variables($conn, $row);
+    $meta = [
         'related_module' => 'Proforma Bills',
         'related_id' => $id,
         'customer_id' => $row['customer_id'] ?? null
-    ]);
+    ];
+
+    if (function_exists('subhiksha_send_template_whatsapp')) {
+        return subhiksha_send_template_whatsapp(
+            $conn,
+            'proforma_created',
+            (string)($row['mobile'] ?? ''),
+            $variables,
+            $meta
+        );
+    }
+
+    return subhiksha_send_whatsapp($conn, array_merge($meta, [
+        'mobile' => (string)($row['mobile'] ?? ''),
+        'template_key' => 'proforma_created',
+        'variables' => $variables
+    ]));
+}
+
+function pb_send_whatsapp_preferred(mysqli $conn, int $id): array
+{
+    $row = pb_get_whatsapp_row($conn, $id);
+
+    if (!$row) {
+        return ['success' => false, 'message' => 'Proforma bill not found.'];
+    }
+
+    $manualUrl = pb_whatsapp_url($row);
+
+    if (pb_whatsapp_api_ready($conn)) {
+        $apiResult = pb_send_whatsapp_by_api($conn, $id);
+        $apiResult['mode'] = 'api';
+        $apiResult['manual_whatsapp'] = false;
+
+        if (!($apiResult['success'] ?? false)) {
+            $apiResult['message'] = 'WhatsApp API sending failed: ' . (string)($apiResult['response'] ?? $apiResult['message'] ?? 'Unknown error.');
+        }
+
+        return $apiResult;
+    }
+
+    $manualResult = pb_whatsapp_log_manual($conn, $id);
+    $manualResult['mode'] = 'manual';
+    $manualResult['manual_whatsapp'] = true;
+    $manualResult['open_whatsapp_url'] = $manualUrl;
+
+    if ($manualResult['success'] ?? false) {
+        $manualResult['message'] = 'WhatsApp API is not enabled. Manual WhatsApp mode opened.';
+    } else {
+        $manualResult['message'] = 'Manual WhatsApp failed: ' . (string)($manualResult['message'] ?? 'Unknown error.');
+    }
+
+    return $manualResult;
 }
 
 function pb_whatsapp_svg(): string
@@ -1391,11 +1508,13 @@ function apiResponse(bool $status, string $message = '', array $extra = []): voi
 
 function apiCsrf(): void
 {
-    if (
-        empty($_REQUEST['csrf_token']) ||
-        empty($_SESSION['proforma_csrf']) ||
-        !hash_equals($_SESSION['proforma_csrf'], (string)$_REQUEST['csrf_token'])
-    ) {
+    $token = (string)($_REQUEST['csrf_token'] ?? '');
+    $valid = $token !== '' && (
+        (!empty($_SESSION['proforma_csrf']) && hash_equals($_SESSION['proforma_csrf'], $token)) ||
+        (!empty($_SESSION['create_proforma_csrf']) && hash_equals($_SESSION['create_proforma_csrf'], $token))
+    );
+
+    if (!$valid) {
         apiResponse(false, 'Invalid CSRF token.');
     }
 }
@@ -1524,7 +1643,7 @@ try {
         apiResponse(false, 'Action is required.');
     }
 
-    if (in_array($action, ['save_proforma', 'create', 'update', 'delete', 'delete_record', 'create_job_card', 'log_manual_whatsapp', 'send_whatsapp_api'], true)) {
+    if (in_array($action, ['save_proforma', 'create', 'update', 'create_proforma', 'update_proforma', 'delete', 'delete_record', 'create_job_card', 'log_manual_whatsapp', 'send_whatsapp_api'], true)) {
         apiCsrf();
     }
 
@@ -1545,10 +1664,10 @@ try {
 
         $action = pb_post('action');
 
-        if (in_array($action, ['save_proforma', 'create', 'update'], true)) {
+        if (in_array($action, ['save_proforma', 'create', 'update', 'create_proforma', 'update_proforma'], true)) {
             $id = pb_int($_POST['id'] ?? 0);
 
-            if ($id > 0 || $action === 'update') {
+            if ($id > 0 || in_array($action, ['update', 'update_proforma'], true)) {
                 apiRequireAnyPermission($conn, ['can_edit', 'can_update'], 'You do not have permission to edit proforma bills.');
             } else {
                 apiRequirePermission($conn, 'can_create', 'You do not have permission to create proforma bills.');
@@ -1977,22 +2096,75 @@ try {
 
             $conn->commit();
 
+            $isNewProforma = $id <= 0;
+            $jobId = 0;
+            $createdJobCard = false;
+
             if ($createJobCardNow) {
                 $conn->begin_transaction();
                 $jobId = pb_create_job_card($conn, $proformaId);
                 $conn->commit();
-
-                apiResponse(true, 'Proforma bill saved and job card created successfully.', [
-                    'id' => $proformaId,
-                    'job_id' => $jobId,
-                    'created_job_card' => true
-                ]);
+                $createdJobCard = true;
             }
 
-            apiResponse(true, $id > 0 ? 'Proforma bill updated successfully.' : 'Proforma bill created successfully.', [
+            $createdJobCardNo = '';
+            if ($createdJobCard && $jobId > 0 && pb_table_exists($conn, 'job_cards')) {
+                $stmt = $conn->prepare("SELECT job_card_no FROM job_cards WHERE id = ? LIMIT 1");
+                $stmt->bind_param('i', $jobId);
+                $stmt->execute();
+                $jobRow = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+                $createdJobCardNo = (string)($jobRow['job_card_no'] ?? '');
+            }
+
+            if (empty($proformaNo)) {
+                $stmt = $conn->prepare("SELECT proforma_no FROM proforma_bills WHERE id = ? LIMIT 1");
+                $stmt->bind_param('i', $proformaId);
+                $stmt->execute();
+                $pbRow = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+                $proformaNo = (string)($pbRow['proforma_no'] ?? '');
+            }
+
+            $responseData = [
                 'id' => $proformaId,
-                'updated' => $id > 0
-            ]);
+                'proforma_id' => $proformaId,
+                'proforma_no' => $proformaNo,
+                'redirect_url' => 'proforma_bills.php',
+                'updated' => !$isNewProforma
+            ];
+
+            if ($createdJobCard) {
+                $responseData['job_id'] = $jobId;
+                $responseData['job_card_no'] = $createdJobCardNo;
+                $responseData['created_job_card'] = true;
+            }
+
+            $responseMessage = $createdJobCard
+                ? 'Proforma bill saved and job card created successfully.'
+                : ($isNewProforma ? 'Proforma bill created successfully.' : 'Proforma bill updated successfully.');
+
+            if ($isNewProforma) {
+                $whatsappResult = pb_send_whatsapp_preferred($conn, $proformaId);
+                $responseData['whatsapp'] = $whatsappResult;
+                $responseData['whatsapp_sent'] = (bool)($whatsappResult['success'] ?? false);
+                $responseData['whatsapp_mode'] = (string)($whatsappResult['mode'] ?? '');
+
+                if (!empty($whatsappResult['manual_whatsapp'])) {
+                    $responseData['manual_whatsapp'] = true;
+                    $responseData['open_whatsapp_url'] = (string)($whatsappResult['open_whatsapp_url'] ?? '');
+                }
+
+                if ($whatsappResult['success'] ?? false) {
+                    $responseMessage .= ((string)($whatsappResult['mode'] ?? '') === 'manual')
+                        ? ' Manual WhatsApp mode opened.'
+                        : ' WhatsApp message sent successfully.';
+                } else {
+                    $responseMessage .= ' WhatsApp failed: ' . (string)($whatsappResult['message'] ?? 'Unknown error.');
+                }
+            }
+
+            apiResponse(true, $responseMessage, $responseData);
         }
 
 
@@ -2016,21 +2188,13 @@ try {
                 throw new RuntimeException('Invalid proforma bill.');
             }
 
-            if (!pb_whatsapp_api_ready($conn)) {
-                $row = pb_get_whatsapp_row($conn, $id);
-                apiResponse(false, 'WhatsApp API is not ready. Manual WhatsApp mode is active.', [
-                    'manual_whatsapp' => true,
-                    'open_whatsapp_url' => $row ? pb_whatsapp_url($row) : ''
-                ]);
-            }
-
-            $waResult = pb_send_whatsapp_by_api($conn, $id);
+            $waResult = pb_send_whatsapp_preferred($conn, $id);
 
             if (!($waResult['success'] ?? false)) {
-                apiResponse(false, (string)($waResult['response'] ?? $waResult['message'] ?? 'WhatsApp failed.'), $waResult);
+                apiResponse(false, (string)($waResult['message'] ?? $waResult['response'] ?? 'WhatsApp failed.'), $waResult);
             }
 
-            apiResponse(true, 'WhatsApp message sent successfully using API.', $waResult);
+            apiResponse(true, (string)($waResult['message'] ?? 'WhatsApp message sent successfully.'), $waResult);
         }
 
 
