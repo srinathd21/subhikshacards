@@ -553,7 +553,7 @@ function jcvEnsurePhotoApprovalTable(mysqli $conn): void
     ");
 }
 
-function jcvGetOrCreatePhotoApproval(mysqli $conn, int $jobId, int $trackingId, int $workflowStepId, string $customerName, string $mobile): ?array
+function jcvGetOrCreatePhotoApproval(mysqli $conn, int $jobId, int $trackingId, int $workflowStepId, string $customerName, string $mobile, bool $forceNew = false): ?array
 {
     jcvEnsurePhotoApprovalTable($conn);
 
@@ -571,7 +571,15 @@ function jcvGetOrCreatePhotoApproval(mysqli $conn, int $jobId, int $trackingId, 
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
 
-    if ($row) return $row;
+    /*
+     * Normal view: return the latest link.
+     * Save Completed with new proof photos: reuse only an open pending link.
+     * If the latest link was already approved/rejected/expired, create a fresh pending link
+     * for the newly uploaded proof copy.
+     */
+    if ($row && (!$forceNew || strtolower((string)($row['status'] ?? 'pending')) === 'pending')) {
+        return $row;
+    }
 
     $token = jcvRandomToken();
     $stmt = $conn->prepare("
@@ -620,6 +628,225 @@ function jcvDesignPhotoWhatsappUrl(mysqli $conn, array $job, array $step, array 
         . "Thank you,\nSubhiksha Cards";
 
     return 'https://wa.me/' . $mobile . '?text=' . rawurlencode($message);
+}
+
+
+function jcvHasTrackingPhotos(mysqli $conn, int $jobId, int $trackingId): bool
+{
+    if ($jobId <= 0 || $trackingId <= 0 || !jcvTableExists($conn, 'job_tracking_photos')) {
+        return false;
+    }
+
+    try {
+        $stmt = $conn->prepare("SELECT id FROM job_tracking_photos WHERE job_card_id = ? AND job_tracking_id = ? LIMIT 1");
+        $stmt->bind_param('ii', $jobId, $trackingId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return (bool)$row;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function jcvCustomerTrackingUrl(mysqli $conn, array $job): string
+{
+    $token = trim((string)($job['tracking_token'] ?? ''));
+    if ($token === '') return '';
+    return jcvBaseUrl($conn) . '/customer_tracking.php?token=' . rawurlencode($token);
+}
+
+function jcvApprovalTemplateKey(array $job, array $step): string
+{
+    $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
+    $stepName = strtolower(trim((string)($step['step_name'] ?? '')));
+    $orderType = strtolower(trim((string)($job['order_type'] ?? '')));
+
+    if (strpos($stepKey, 'design') !== false || strpos($stepName, 'design') !== false || $orderType === 'customized') {
+        return 'design_ready_for_approval';
+    }
+
+    return 'proofing_ready_for_approval';
+}
+
+function jcvSendPhotoApprovalByApi(mysqli $conn, array $job, array $step, array $approval, int $sentBy = 0): array
+{
+    $apiFile = __DIR__ . '/includes/whatsapp-api.php';
+    if (!is_file($apiFile)) {
+        return ['success' => false, 'message' => 'includes/whatsapp-api.php not found.'];
+    }
+
+    require_once $apiFile;
+
+    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
+        return ['success' => false, 'message' => 'WhatsApp API functions are missing.'];
+    }
+
+    $mobile = (string)($job['mobile'] ?? '');
+    $approvalLink = jcvPhotoApprovalUrl($conn, (string)($approval['approval_token'] ?? ''));
+    $trackingLink = jcvCustomerTrackingUrl($conn, $job);
+    $templateKey = jcvApprovalTemplateKey($job, $step);
+
+    $variables = [
+        'customer_name' => (string)($job['customer_name'] ?? 'Customer'),
+        'job_card_no' => (string)($job['job_card_no'] ?? '-'),
+        'stage_name' => (string)($step['step_name'] ?? 'Proofing'),
+        'product_name' => (string)($job['product_name'] ?? '-'),
+        'delivery_date' => !empty($job['delivery_date']) ? date('d-m-Y', strtotime((string)$job['delivery_date'])) : '-',
+        'approval_link' => $approvalLink,
+        'tracking_link' => $trackingLink,
+    ];
+
+    $meta = [
+        'related_module' => 'Job Tracking',
+        'related_id' => (int)($step['id'] ?? 0),
+        'job_card_id' => (int)($job['id'] ?? 0),
+        'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
+        'sent_by' => $sentBy ?: (int)($_SESSION['user_id'] ?? 0),
+    ];
+
+    if (function_exists('subhiksha_send_template_whatsapp')) {
+        $result = subhiksha_send_template_whatsapp($conn, $templateKey, $mobile, $variables, $meta);
+    } else {
+        $meta['mobile'] = $mobile;
+        $meta['template_key'] = $templateKey;
+        $meta['variables'] = $variables;
+        $result = subhiksha_send_whatsapp($conn, $meta);
+    }
+
+    if (!empty($result['success']) && !empty($approval['id']) && jcvTableExists($conn, 'job_tracking_photo_approvals')) {
+        try {
+            $approvalId = (int)$approval['id'];
+            $stmt = $conn->prepare("UPDATE job_tracking_photo_approvals SET link_sent_at = NOW(), link_sent_by = ?, updated_at = NOW() WHERE id = ?");
+            $stmt->bind_param('ii', $meta['sent_by'], $approvalId);
+            $stmt->execute();
+            $stmt->close();
+        } catch (Throwable $e) {}
+    }
+
+    $result['template_key'] = $templateKey;
+    $result['approval_link'] = $approvalLink;
+    $result['tracking_link'] = $trackingLink;
+    return $result;
+}
+
+
+function jcvStageStatusLabel(string $status): string
+{
+    $status = strtolower(trim($status));
+    return ucwords(str_replace('_', ' ', $status !== '' ? $status : 'pending'));
+}
+
+function jcvTrackingTemplateKey(string $status): string
+{
+    $status = strtolower(trim($status));
+    if ($status === 'in_progress') return 'job_stage_started';
+    if ($status === 'completed') return 'job_stage_completed';
+    if ($status === 'delayed') return 'job_stage_delayed';
+    if ($status === 'cancelled') return 'job_stage_cancelled';
+    return 'job_stage_updated';
+}
+
+function jcvDelayReasonName(mysqli $conn, int $delayReasonId): string
+{
+    if ($delayReasonId <= 0 || !jcvTableExists($conn, 'delay_reasons')) return '';
+
+    try {
+        $stmt = $conn->prepare("SELECT reason_name FROM delay_reasons WHERE id = ? LIMIT 1");
+        $stmt->bind_param('i', $delayReasonId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return trim((string)($row['reason_name'] ?? ''));
+    } catch (Throwable $e) {
+        return '';
+    }
+}
+
+function jcvSendTrackingUpdateByApi(
+    mysqli $conn,
+    array $job,
+    array $step,
+    string $newStatus,
+    string $remarks = '',
+    int $delayReasonId = 0,
+    int $delayDays = 0,
+    int $sentBy = 0
+): array {
+    $apiFile = __DIR__ . '/includes/whatsapp-api.php';
+    if (!is_file($apiFile)) {
+        return ['success' => false, 'message' => 'includes/whatsapp-api.php not found.'];
+    }
+
+    require_once $apiFile;
+
+    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
+        return ['success' => false, 'message' => 'WhatsApp API functions are missing.'];
+    }
+
+    $mobile = (string)($job['mobile'] ?? '');
+    $trackingLink = jcvCustomerTrackingUrl($conn, $job);
+    if (trim($trackingLink) === '') {
+        return ['success' => false, 'message' => 'Tracking token is missing for this job card.'];
+    }
+
+    $statusLabel = jcvStageStatusLabel($newStatus);
+    $delayReason = jcvDelayReasonName($conn, $delayReasonId);
+    $templateKey = jcvTrackingTemplateKey($newStatus);
+
+    $variables = [
+        'customer_name' => (string)($job['customer_name'] ?? 'Customer'),
+        'job_card_no' => (string)($job['job_card_no'] ?? '-'),
+        'stage_name' => (string)($step['step_name'] ?? 'Job Stage'),
+        'status_name' => $statusLabel,
+        'product_name' => (string)($job['product_name'] ?? '-'),
+        'delivery_date' => !empty($job['delivery_date']) ? date('d-m-Y', strtotime((string)$job['delivery_date'])) : '-',
+        'remarks' => trim($remarks) !== '' ? trim($remarks) : '-',
+        'delay_reason' => $delayReason !== '' ? $delayReason : '-',
+        'delay_days' => (string)$delayDays,
+        'tracking_link' => $trackingLink,
+    ];
+
+    $meta = [
+        'related_module' => 'Job Tracking Status',
+        'related_id' => (int)($step['id'] ?? 0),
+        'job_card_id' => (int)($job['id'] ?? 0),
+        'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
+        'sent_by' => $sentBy ?: (int)($_SESSION['user_id'] ?? 0),
+    ];
+
+    if (function_exists('subhiksha_send_template_whatsapp')) {
+        $result = subhiksha_send_template_whatsapp($conn, $templateKey, $mobile, $variables, $meta);
+    } else {
+        $message = "Hi {$variables['customer_name']},\n\n"
+            . "Your job card status has been updated.\n\n"
+            . "Job Card No: {$variables['job_card_no']}\n"
+            . "Current Stage: {$variables['stage_name']}\n"
+            . "Status: {$variables['status_name']}\n";
+
+        if ($newStatus === 'delayed') {
+            $message .= "Delay Reason: {$variables['delay_reason']}\n"
+                . "Delay Days: {$variables['delay_days']}\n";
+        }
+
+        if ($variables['remarks'] !== '-') {
+            $message .= "Remarks: {$variables['remarks']}\n";
+        }
+
+        $message .= "\nTrack your order here:\n{$variables['tracking_link']}\n\n"
+            . "Thank you,\nSubhiksha Cards";
+
+        $meta['mobile'] = $mobile;
+        $meta['message'] = $message;
+        $meta['message_body'] = $message;
+        $meta['template_key'] = $templateKey;
+        $meta['variables'] = $variables;
+        $result = subhiksha_send_whatsapp($conn, $meta);
+    }
+
+    $result['template_key'] = $templateKey;
+    $result['tracking_link'] = $trackingLink;
+    return $result;
 }
 
 function jcvGetTrackingPhotos(mysqli $conn, int $jobId): array
@@ -686,9 +913,36 @@ $trackingPhotosById = [];
 $delayReasons = [];
 
 if (($_GET['msg'] ?? '') === 'status_updated') {
+    $waStatus = strtolower(trim((string)($_GET['wa'] ?? '')));
     $message = 'Job status updated successfully.';
     $messageType = 'success';
     $toastTitle = 'Success';
+
+    if ($waStatus === 'approval_sent') {
+        $message .= ' Approval WhatsApp link sent to customer with tracking link.';
+    } elseif ($waStatus === 'approval_failed') {
+        $message .= ' But WhatsApp approval link failed. Use the API Send WhatsApp Approval Link button again.';
+        $messageType = 'warning';
+        $toastTitle = 'WhatsApp Failed';
+    } elseif ($waStatus === 'tracking_sent') {
+        $message .= ' Customer tracking WhatsApp sent.';
+    } elseif ($waStatus === 'tracking_failed') {
+        $message .= ' But customer tracking WhatsApp failed. Status is saved.';
+        $messageType = 'warning';
+        $toastTitle = 'WhatsApp Failed';
+    }
+}
+
+if (($_GET['msg'] ?? '') === 'approval_whatsapp_sent') {
+    $message = 'WhatsApp approval link sent to customer through API.';
+    $messageType = 'success';
+    $toastTitle = 'WhatsApp Sent';
+}
+
+if (($_GET['msg'] ?? '') === 'approval_whatsapp_failed') {
+    $message = 'WhatsApp approval link failed. Please check WhatsApp API settings/logs and try again.';
+    $messageType = 'warning';
+    $toastTitle = 'WhatsApp Failed';
 }
 
 try {
@@ -837,6 +1091,84 @@ if ($jobId <= 0) {
     }
 }
 
+if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'send_photo_approval_api') {
+    $trackingId = (int)($_POST['tracking_id'] ?? 0);
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+
+    try {
+        if ($trackingId <= 0) {
+            throw new RuntimeException('Invalid approval WhatsApp request.');
+        }
+
+        if (!$canUpdateJob) {
+            throw new RuntimeException('You do not have permission to send approval WhatsApp link.');
+        }
+
+        $stmt = $conn->prepare("
+            SELECT
+                jt.*,
+                rr.role_key AS responsible_role_key,
+                ws.default_owner_role_key,
+                ws.step_key,
+                ws.step_name,
+                ws.is_approval_step
+            FROM job_tracking jt
+            LEFT JOIN roles rr
+                ON rr.id = jt.responsible_role_id
+            LEFT JOIN workflow_steps ws
+                ON ws.id = jt.workflow_step_id
+            WHERE jt.id = ?
+              AND jt.job_card_id = ?
+            LIMIT 1
+        ");
+        $stmt->bind_param('ii', $trackingId, $jobId);
+        $stmt->execute();
+        $stepRow = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$stepRow) {
+            throw new RuntimeException('Tracking stage not found.');
+        }
+
+        $stepRoleKey = $stepRow['responsible_role_key'] ?: $stepRow['default_owner_role_key'];
+        if (!jcvIsDesignProofingStage($stepRow, $stepRoleKey)) {
+            throw new RuntimeException('Approval WhatsApp link is available only for Designing / Proofing photo stages.');
+        }
+
+        if (!jcvHasTrackingPhotos($conn, $jobId, $trackingId)) {
+            throw new RuntimeException('Please upload proof/design photos before sending approval link.');
+        }
+
+        $photoApproval = jcvGetOrCreatePhotoApproval(
+            $conn,
+            $jobId,
+            $trackingId,
+            (int)$stepRow['workflow_step_id'],
+            (string)($job['customer_name'] ?? ''),
+            (string)($job['mobile'] ?? '')
+        );
+
+        if (!$photoApproval) {
+            throw new RuntimeException('Unable to create approval link.');
+        }
+
+        $approvalStatus = strtolower(trim((string)($photoApproval['status'] ?? 'pending')));
+        if ($approvalStatus !== 'pending') {
+            throw new RuntimeException('This approval link is already ' . ucwords(str_replace('_', ' ', $approvalStatus)) . '. Upload corrected proof/design photo and save as Completed to create a new approval link.');
+        }
+
+        $apiResult = jcvSendPhotoApprovalByApi($conn, $job, $stepRow, $photoApproval, $userId);
+        $msg = !empty($apiResult['success']) ? 'approval_whatsapp_sent' : 'approval_whatsapp_failed';
+
+        header('Location: job_card_view.php?id=' . $jobId . '&msg=' . $msg);
+        exit;
+    } catch (Throwable $e) {
+        $message = 'Approval WhatsApp failed: ' . $e->getMessage();
+        $messageType = 'danger';
+        $toastTitle = 'WhatsApp Failed';
+    }
+}
+
 if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'update_step_status') {
     $trackingId = (int)($_POST['tracking_id'] ?? 0);
     $newStatus = strtolower(trim((string)($_POST['status'] ?? '')));
@@ -921,8 +1253,11 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                     $isDesignProofingStage = jcvIsDesignProofingStage($stepRow, $stepRoleKey);
                     $requiresDesignPhotoUpload = jcvRequiresDesignPhotoUpload($stepRow, $stepRoleKey);
 
-                    if ($requiresDesignPhotoUpload && !jcvHasUploadedTrackingPhotos('tracking_photos')) {
-                        throw new RuntimeException('Designing / Proofing production update requires at least one photo upload. Proofing Approval / Design Approval does not require photo upload.');
+                    $uploadedProofPhotos = jcvHasUploadedTrackingPhotos('tracking_photos');
+                    $existingProofPhotos = jcvHasTrackingPhotos($conn, $jobId, $trackingId);
+
+                    if ($requiresDesignPhotoUpload && $newStatus === 'completed' && !$uploadedProofPhotos && !$existingProofPhotos) {
+                        throw new RuntimeException('Please upload proof/design photo before completing this stage. In Progress / Pending / Delayed status does not require photo upload.');
                     }
 
                     if ($newStatus === 'completed' && $isApprovalStage) {
@@ -958,8 +1293,23 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                         }
                     }
 
-                    if ($requiresDesignPhotoUpload) {
+                    $photoApprovalSendResult = null;
+                    if ($requiresDesignPhotoUpload && $newStatus === 'completed' && $uploadedProofPhotos) {
                         jcvSaveTrackingPhotos($conn, $jobId, $trackingId, (int)$stepRow['workflow_step_id'], $userId, 'tracking_photos');
+
+                        $photoApproval = jcvGetOrCreatePhotoApproval(
+                            $conn,
+                            $jobId,
+                            $trackingId,
+                            (int)$stepRow['workflow_step_id'],
+                            (string)($job['customer_name'] ?? ''),
+                            (string)($job['mobile'] ?? ''),
+                            true
+                        );
+
+                        if ($photoApproval) {
+                            $photoApprovalSendResult = jcvSendPhotoApprovalByApi($conn, $job, $stepRow, $photoApproval, $userId);
+                        }
                     }
 
                     if ($newStatus === 'completed') {
@@ -1171,7 +1521,30 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                         $stmt->close();
                     }
 
-                    header('Location: job_card_view.php?id=' . $jobId . '&msg=status_updated');
+                    $trackingSendResult = null;
+                    // For every normal status update, send customer_tracking.php link to customer.
+                    // For proof/design completed with photo, the approval WhatsApp already contains both approval_link and tracking_link.
+                    if (!is_array($photoApprovalSendResult)) {
+                        $trackingSendResult = jcvSendTrackingUpdateByApi(
+                            $conn,
+                            $job,
+                            $stepRow,
+                            $newStatus,
+                            $remarks,
+                            $delayReasonId,
+                            $delayDays,
+                            $userId
+                        );
+                    }
+
+                    $redirectWa = '';
+                    if (is_array($photoApprovalSendResult)) {
+                        $redirectWa = !empty($photoApprovalSendResult['success']) ? '&wa=approval_sent' : '&wa=approval_failed';
+                    } elseif (is_array($trackingSendResult)) {
+                        $redirectWa = !empty($trackingSendResult['success']) ? '&wa=tracking_sent' : '&wa=tracking_failed';
+                    }
+
+                    header('Location: job_card_view.php?id=' . $jobId . '&msg=status_updated' . $redirectWa);
                     exit;
                 }
             }
@@ -1675,9 +2048,28 @@ if ($message !== '' && $toastTitle === 'Info') {
         display: block;
     }
 
+    .stage-update-form .form-label,
+    .design-photo-title strong {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex-wrap: nowrap;
+    }
+
     .required-star {
+        display: inline;
         color: #dc2626;
         font-weight: 900;
+        line-height: 1;
+        vertical-align: baseline;
+    }
+
+    .design-photo-upload-field {
+        display: none;
+    }
+
+    .stage-update-form.needs-photo .design-photo-upload-field {
+        display: block;
     }
 
     .approval-field {
@@ -1700,6 +2092,16 @@ if ($message !== '' && $toastTitle === 'Info') {
         border-color: #22c55e;
         background: #f0fdf4;
         color: #14532d;
+    }
+
+    .approval-box.denied {
+        border-color: #ef4444;
+        background: #fef2f2;
+        color: #991b1b;
+    }
+
+    .approval-box.denied .approval-mini {
+        border-color: rgba(153, 27, 27, .18);
     }
 
     .approval-grid {
@@ -2142,9 +2544,14 @@ if ($message !== '' && $toastTitle === 'Info') {
                                 ?>
 
                                 <?php if ($isApprovalStage): ?>
+                                <?php
+                                    $approvalStatusText = strtolower(trim((string)($step['approval_status'] ?? '')));
+                                    $approvalRejected = in_array($approvalStatusText, ['rejected', 'correction_requested'], true);
+                                    $approvalBoxClass = $approvalDone ? 'success' : ($approvalRejected ? 'denied' : '');
+                                ?>
                                 <div class="col-12">
-                                    <div class="approval-box <?= $approvalDone ? 'success' : '' ?>">
-                                        <strong>Customer Approval: <?= $approvalDone ? 'Approved' : 'Pending' ?></strong>
+                                    <div class="approval-box <?= e($approvalBoxClass) ?>">
+                                        <strong>Customer Approval: <?= $approvalDone ? 'Approved' : ($approvalRejected ? 'Denied / Not Approved' : 'Pending') ?></strong>
                                         <div class="small mt-1">
                                             <?php if ($approvalDone): ?>
                                                 <?php if ((int)($step['approved_by_customer'] ?? 0) === 1): ?>
@@ -2153,6 +2560,11 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                     Manually approved by call<?= !empty($step['call_confirmed_by_name']) ? ' by ' . e($step['call_confirmed_by_name']) : '' ?>.
                                                 <?php endif; ?>
                                                 <?= !empty($step['approved_at']) ? ' Manual/customer approved time: ' . e(jcvDateTime($step['approved_at'])) : '' ?>
+                                            <?php elseif ($approvalRejected): ?>
+                                                Customer denied / requested correction. This approval stage is locked and the next stage will not open until approval is received.
+                                                <?php if (!empty($step['customer_remarks'])): ?>
+                                                    <br><strong>Customer Remark:</strong> <?= e($step['customer_remarks']) ?>
+                                                <?php endif; ?>
                                             <?php else: ?>
                                                 This approval stage cannot be completed until the customer approves it, or Admin/Sales confirms approval by call.
                                             <?php endif; ?>
@@ -2196,7 +2608,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                                 <?php
                                     $stepPhotos = $trackingPhotosById[(int)$step['id']] ?? [];
                                     $photoApproval = null;
-                                    $photoWhatsappUrl = '#';
+                                    $photoApprovalStatus = 'pending';
+                                    $canSendPhotoApprovalApi = false;
                                     if ($isDesignProofingStage && $stepPhotos) {
                                         $photoApproval = jcvGetOrCreatePhotoApproval(
                                             $conn,
@@ -2207,7 +2620,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                                             (string)($job['mobile'] ?? '')
                                         );
                                         if ($photoApproval) {
-                                            $photoWhatsappUrl = jcvDesignPhotoWhatsappUrl($conn, $job, $step, $photoApproval);
+                                            $photoApprovalStatus = strtolower(trim((string)($photoApproval['status'] ?? 'pending')));
+                                            $canSendPhotoApprovalApi = $photoApprovalStatus === 'pending' && trim((string)($job['mobile'] ?? '')) !== '' && $canUpdateJob;
                                         }
                                     }
                                 ?>
@@ -2222,10 +2636,18 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                 <span class="text-muted-custom small">Customer link status: <?= e(ucwords((string)($photoApproval['status'] ?? 'pending'))) ?></span>
                                                 <?php endif; ?>
                                             </div>
-                                            <?php if ($photoWhatsappUrl !== '#'): ?>
-                                            <a href="<?= e($photoWhatsappUrl) ?>" target="_blank" rel="noopener" class="btn btn-sm wa-photo-btn rounded-pill px-3 fw-bold">
-                                                Send WhatsApp Approval Link
-                                            </a>
+                                            <?php if ($canSendPhotoApprovalApi): ?>
+                                            <form method="post" class="m-0">
+                                                <input type="hidden" name="action" value="send_photo_approval_api">
+                                                <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
+                                                <button type="submit" class="btn btn-sm wa-photo-btn rounded-pill px-3 fw-bold">
+                                                    Send WhatsApp Approval Link
+                                                </button>
+                                            </form>
+                                            <?php elseif ($photoApproval): ?>
+                                            <span class="badge rounded-pill <?= $photoApprovalStatus === 'approved' ? 'bg-success' : ($photoApprovalStatus === 'rejected' ? 'bg-danger' : 'bg-secondary') ?>">
+                                                <?= e(ucwords(str_replace('_', ' ', $photoApprovalStatus))) ?>
+                                            </span>
                                             <?php endif; ?>
                                         </div>
                                         <div class="tracking-photo-list">
@@ -2242,7 +2664,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                                 <?php if ($canOpenUpdateForm): ?>
                                 <div class="col-12">
                                     <div class="collapse" id="updateStage<?= (int)$step['id'] ?>">
-                                        <form method="post" enctype="multipart/form-data" class="info-card mt-2 stage-update-form compact-update-form" data-approval-stage="<?= $isApprovalStage ? '1' : '0' ?>" data-approval-done="<?= $approvalDone ? '1' : '0' ?>" data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>" data-design-photo-required="<?= $requiresDesignPhotoUpload ? '1' : '0' ?>">
+                                        <form method="post" enctype="multipart/form-data" class="info-card mt-2 stage-update-form compact-update-form" data-approval-stage="<?= $isApprovalStage ? '1' : '0' ?>" data-approval-done="<?= $approvalDone ? '1' : '0' ?>" data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>" data-design-photo-required="<?= $requiresDesignPhotoUpload ? '1' : '0' ?>" data-has-existing-photos="<?= !empty($stepPhotos) ? '1' : '0' ?>">
                                             <input type="hidden" name="action" value="update_step_status">
                                             <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
 
@@ -2291,7 +2713,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                 </div>
 
                                                 <?php if ($requiresDesignPhotoUpload): ?>
-                                                <div class="col-12">
+                                                <div class="col-12 design-photo-upload-field">
                                                     <div class="design-photo-box">
                                                         <div class="design-photo-title">
                                                             <strong>Designing / Proofing Photos <span class="required-star">*</span></strong>
@@ -2305,12 +2727,12 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                                     name="tracking_photos[]"
                                                                     class="form-control js-tracking-photos"
                                                                     accept="image/jpeg,image/png,image/webp,image/gif"
-                                                                    required>
+                                                                    data-required-on-completed="1">
                                                                 <button type="button" class="btn btn-outline-danger photo-input-remove js-remove-photo-input" title="Remove image">×</button>
                                                             </div>
                                                         </div>
                                                         <div class="photo-help-text">
-                                                            Upload one or more photos before saving this Designing / Proofing update. Allowed: JPG, PNG, WEBP, GIF. Max 5 MB each.
+                                                            Photo upload is required only when this stage is marked Completed. Pending / In Progress / Delayed updates do not require photos. Allowed: JPG, PNG, WEBP, GIF. Max 5 MB each.
                                                         </div>
                                                     </div>
                                                 </div>
@@ -2354,7 +2776,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                                             </div>
 
                                             <small class="text-muted-custom d-block mt-2">
-                                                Delay status requires delay reason and remark. Designing / Proofing production updates require one or more photos. Proofing Approval / Design Approval does not need photo upload; it needs customer approval or Admin/Sales manual confirmation.
+                                                Delay status requires delay reason and remark. Designing / Proofing photos are required only when the production stage is marked Completed. Proofing Approval / Design Approval does not need photo upload; it needs customer approval or Admin/Sales manual confirmation.
                                             </small>
                                         </form>
                                     </div>
@@ -2462,11 +2884,17 @@ if ($message !== '' && $toastTitle === 'Info') {
                 if (remarkStar) remarkStar.classList.add('d-none');
             }
 
-            if (form.dataset.designPhotoRequired === '1') {
-                if (photoInput) photoInput.setAttribute('required', 'required');
-            } else if (photoInput) {
-                photoInput.removeAttribute('required');
-            }
+            const photoRequiredForCompleted = form.dataset.designPhotoRequired === '1' && select.value === 'completed';
+            const hasExistingPhotos = form.dataset.hasExistingPhotos === '1';
+            form.classList.toggle('needs-photo', photoRequiredForCompleted);
+
+            form.querySelectorAll('.js-tracking-photos').forEach(function(input, index) {
+                if (photoRequiredForCompleted && (!hasExistingPhotos || index === 0)) {
+                    input.setAttribute('required', 'required');
+                } else {
+                    input.removeAttribute('required');
+                }
+            });
         }
 
         document.querySelectorAll('.stage-update-form').forEach(function(form) {
@@ -2495,8 +2923,9 @@ if ($message !== '' && $toastTitle === 'Info') {
 
                 const row = document.createElement('div');
                 row.className = 'photo-input-row';
-                row.innerHTML = '<input type="file" name="tracking_photos[]" class="form-control js-tracking-photos" accept="image/jpeg,image/png,image/webp,image/gif" required><button type="button" class="btn btn-outline-danger photo-input-remove js-remove-photo-input" title="Remove image">×</button>';
+                row.innerHTML = '<input type="file" name="tracking_photos[]" class="form-control js-tracking-photos" accept="image/jpeg,image/png,image/webp,image/gif"><button type="button" class="btn btn-outline-danger photo-input-remove js-remove-photo-input" title="Remove image">×</button>';
                 list.appendChild(row);
+                refreshDelayFields(form);
             });
         });
 
