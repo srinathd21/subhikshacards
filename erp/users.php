@@ -43,7 +43,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
                     $uid=(int)($_SESSION['user_id']??0); $stmt->bind_param('isssssiii',$roleId,$name,$email,$mobile,$username,$hash,$isActive,$uid,$id);
                 } else {
                     $stmt=$conn->prepare("UPDATE users SET role_id=?, name=?, email=?, mobile=?, username=?, is_active=?, updated_by=?, updated_at=NOW() WHERE id=?");
-                    $uid=(int)($_SESSION['user_id']??0); $stmt->bind_param('issssiiii',$roleId,$name,$email,$mobile,$username,$isActive,$uid,$id);
+                    $uid=(int)($_SESSION['user_id']??0); $stmt->bind_param('issssiii', $roleId, $name, $email, $mobile, $username, $isActive, $uid, $id);
                 }
                 $stmt->execute(); $stmt->close(); u_redirect('msg=updated');
             }
