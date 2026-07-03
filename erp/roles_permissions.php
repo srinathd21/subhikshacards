@@ -26,6 +26,7 @@ if (empty($_SESSION['roles_permissions_csrf'])) {
 $csrfToken = $_SESSION['roles_permissions_csrf'];
 $message = '';
 $messageType = 'success';
+$toastTitle = 'Info';
 
 $permissionColumns = [
     'can_view'          => 'View',
@@ -552,18 +553,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $message = $e->getMessage();
         $messageType = 'danger';
+        $toastTitle = 'Failed';
     }
 }
 
 $msg = (string)($_GET['msg'] ?? '');
 if ($msg === 'role_created') {
     $message = 'Role created successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
 } elseif ($msg === 'role_updated') {
     $message = 'Role updated successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
 } elseif ($msg === 'role_disabled') {
     $message = 'Role disabled successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
 } elseif ($msg === 'permissions_saved') {
     $message = 'Permissions saved successfully.';
+    $messageType = 'success';
+    $toastTitle = 'Success';
 }
 
 $roles = rp_get_roles($conn);
@@ -980,110 +990,50 @@ $totalPages = count($items);
         color: var(--text-muted);
     }
 
-    .toast-wrap {
-        position: fixed;
-        top: 22px;
-        right: 22px;
-        z-index: 99999;
-        display: grid;
-        gap: 10px;
-        width: min(420px, calc(100vw - 28px));
-    }
-
-    .custom-toast {
-        display: flex;
-        align-items: flex-start;
-        gap: 12px;
-        color: #fff;
-        border-radius: 18px;
-        padding: 15px 16px;
-        box-shadow: 0 20px 45px rgba(15, 23, 42, .22);
-        animation: toastSlideIn .24s ease-out;
-        overflow: hidden;
-        position: relative;
-    }
-
-    .custom-toast::after {
-        content: "";
-        position: absolute;
-        inset: auto 0 0 0;
-        height: 3px;
-        background: rgba(255, 255, 255, .35);
-    }
-
-    .custom-toast.success {
-        background: linear-gradient(135deg, #16a34a, #22c55e);
-    }
-
-    .custom-toast.error,
-    .custom-toast.danger {
-        background: linear-gradient(135deg, #dc2626, #ef4444);
-    }
-
-    .custom-toast.warning {
-        background: linear-gradient(135deg, #f59e0b, #f97316);
-    }
-
-    .custom-toast.info {
-        background: linear-gradient(135deg, #2563eb, #0ea5e9);
-    }
-
-    .toast-icon {
-        width: 34px;
-        height: 34px;
-        border-radius: 12px;
-        display: grid;
-        place-items: center;
-        background: rgba(255, 255, 255, .18);
-        flex: 0 0 auto;
-    }
-
-    .toast-title {
-        font-weight: 900;
-        line-height: 1.2;
-    }
-
-    .toast-message {
-        font-size: 13px;
-        font-weight: 700;
-        opacity: .96;
-        margin-top: 2px;
-    }
-
-    .toast-close {
-        margin-left: auto;
-        background: transparent;
+    .toast-ui {
         border: 0;
-        color: #fff;
-        font-size: 20px;
-        line-height: 1;
-        cursor: pointer;
-        opacity: .9;
+        border-radius: 18px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
+        overflow: hidden;
+        min-width: 320px;
+        max-width: 420px;
     }
 
-    .toast-close:hover {
-        opacity: 1;
+    .toast-ui.success {
+        background: #dcfce7;
+        color: #14532d;
     }
 
-    @keyframes toastSlideIn {
-        from {
-            opacity: 0;
-            transform: translateY(-8px) translateX(12px);
-        }
-
-        to {
-            opacity: 1;
-            transform: translateY(0) translateX(0);
-        }
+    .toast-ui.danger,
+    .toast-ui.error {
+        background: #fee2e2;
+        color: #7f1d1d;
     }
+
+    .toast-ui.warning {
+        background: #fef3c7;
+        color: #78350f;
+    }
+
+    .toast-ui.info {
+        background: #dbeafe;
+        color: #1e3a8a;
+    }
+
+    .toast-ui .toast-title {
+        font-size: 14px;
+        font-weight: 900;
+        margin-bottom: 2px;
+    }
+
+    .toast-ui .toast-message {
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.45;
+    }
+
 
     @media (max-width: 767.98px) {
-        .toast-wrap {
-            top: 12px;
-            right: 14px;
-            left: 14px;
-            width: auto;
-        }
 
         .permission-table th:first-child,
         .permission-table td:first-child {
@@ -1095,8 +1045,6 @@ $totalPages = count($items);
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
     <div id="mobileOverlay"></div>
-    <div class="toast-wrap" id="toastWrap"></div>
-
     <div class="app-shell">
         <?php include __DIR__ . '/includes/sidebar.php'; ?>
 
@@ -1126,7 +1074,21 @@ $totalPages = count($items);
                     </div>
                 </div>
 
-                <?php /* Toast message rendered by JavaScript below */ ?>
+                <?php if ($message !== ''): ?>
+                <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 12000">
+                    <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive"
+                        aria-atomic="true" data-bs-delay="4200">
+                        <div class="d-flex">
+                            <div class="toast-body">
+                                <div class="toast-title"><?= e($toastTitle) ?></div>
+                                <div class="toast-message"><?= e($message) ?></div>
+                            </div>
+                            <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
+                                aria-label="Close"></button>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
 
                 <div class="row g-3 mb-3">
                     <div class="col-12 col-md-4">
@@ -1578,64 +1540,71 @@ $totalPages = count($items);
     <?php include __DIR__ . '/includes/script.php'; ?>
 
     <script>
-    function showToast(type, message) {
-        const wrap = document.getElementById('toastWrap');
-        if (!wrap || !message) return;
+    function showToast(type, message, title) {
+        if (!message) return;
 
         let finalType = type || 'info';
-        if (finalType === 'danger') finalType = 'error';
+        if (finalType === 'error') finalType = 'danger';
 
         const titleMap = {
             success: 'Success',
-            error: 'Error',
+            danger: 'Failed',
             warning: 'Warning',
             info: 'Info'
         };
 
-        const iconMap = {
-            success: 'check',
-            error: 'x',
-            warning: 'triangle-alert',
-            info: 'info'
-        };
-
-        const toast = document.createElement('div');
-        toast.className = 'custom-toast ' + finalType;
-        toast.innerHTML = `
-            <div class="toast-icon"><i data-lucide="${iconMap[finalType] || 'info'}"></i></div>
-            <div style="min-width:0">
-                <div class="toast-title">${titleMap[finalType] || 'Message'}</div>
-                <div class="toast-message"></div>
-            </div>
-            <button type="button" class="toast-close" aria-label="Close">&times;</button>
-        `;
-
-        toast.querySelector('.toast-message').textContent = message;
-        wrap.appendChild(toast);
-
-        if (window.lucide && typeof window.lucide.createIcons === 'function') {
-            window.lucide.createIcons();
+        let container = document.querySelector('.toast-container.dynamic-toast-container');
+        if (!container) {
+            container = document.createElement('div');
+            container.className = 'toast-container dynamic-toast-container position-fixed top-0 end-0 p-3';
+            container.style.zIndex = '12000';
+            document.body.appendChild(container);
         }
 
-        toast.querySelector('.toast-close').addEventListener('click', function() {
-            toast.remove();
-        });
+        const toast = document.createElement('div');
+        toast.className = 'toast toast-ui ' + finalType;
+        toast.setAttribute('role', 'alert');
+        toast.setAttribute('aria-live', 'assertive');
+        toast.setAttribute('aria-atomic', 'true');
+        toast.setAttribute('data-bs-delay', '4200');
+        toast.innerHTML = `
+            <div class="d-flex">
+                <div class="toast-body">
+                    <div class="toast-title"></div>
+                    <div class="toast-message"></div>
+                </div>
+                <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+        `;
+        toast.querySelector('.toast-title').textContent = title || titleMap[finalType] || 'Info';
+        toast.querySelector('.toast-message').textContent = message;
+        container.appendChild(toast);
 
-        setTimeout(function() {
-            if (toast.parentNode) {
+        if (window.bootstrap && bootstrap.Toast) {
+            const instance = bootstrap.Toast.getOrCreateInstance(toast);
+            toast.addEventListener('hidden.bs.toast', function() {
                 toast.remove();
-            }
-        }, 4500);
+            });
+            instance.show();
+        } else {
+            toast.classList.add('show');
+            setTimeout(function() {
+                toast.remove();
+            }, 4200);
+        }
     }
 
     (function() {
-        const pageToast = {
-            type: <?= json_encode($messageType, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>,
-            message: <?= json_encode($message, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>
-        };
-
-        if (pageToast.message) {
-            showToast(pageToast.type, pageToast.message);
+        const pageToastEl = document.getElementById('pageToast');
+        if (pageToastEl) {
+            if (window.bootstrap && bootstrap.Toast) {
+                bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
+            } else {
+                pageToastEl.classList.add('show');
+                setTimeout(function() {
+                    pageToastEl.classList.remove('show');
+                }, 4200);
+            }
         }
 
         const roleModalTitle = document.getElementById('roleModalTitle');

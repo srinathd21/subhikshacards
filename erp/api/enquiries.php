@@ -580,7 +580,7 @@ function enqSendWhatsappByApi(mysqli $conn, int $id): array
 
     require_once $apiFile;
 
-    if (!function_exists('subhiksha_send_whatsapp')) {
+    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
         return [
             'success' => false,
             'message' => 'WhatsApp API function missing.'
@@ -596,14 +596,27 @@ function enqSendWhatsappByApi(mysqli $conn, int $id): array
         ];
     }
 
-    return subhiksha_send_whatsapp($conn, [
-        'mobile' => (string)($enquiry['mobile'] ?? ''),
-        'template_key' => 'enquiry_completed',
-        'variables' => [
+    /*
+     * IMPORTANT:
+     * Message body must come from whatsapp_templates table.
+     * Do not pass a direct message here, because each module uses its own template.
+     * Default enquiry template key is enquiry_completed to match existing master data.
+     * Change this key in DB if required by updating whatsapp_templates/template_key.
+     */
+    return subhiksha_send_template_whatsapp($conn, 'enquiry_completed', (string)($enquiry['mobile'] ?? ''), [
             'customer_name' => (string)($enquiry['customer_name'] ?? 'Customer'),
             'enquiry_no' => (string)($enquiry['enquiry_no'] ?? '-'),
             'function_type' => (string)($enquiry['function_name'] ?? '-'),
+            'function_date' => !empty($enquiry['function_date']) ? date('d-m-Y', strtotime((string)$enquiry['function_date'])) : '-',
+            'venue' => (string)($enquiry['venue'] ?? '-'),
+            'address' => (string)($enquiry['address'] ?? '-'),
+            'enquiry_source' => (string)($enquiry['enquiry_source'] ?? '-'),
+            'status_name' => (string)($enquiry['status_name'] ?? '-'),
+            'mobile' => (string)($enquiry['mobile'] ?? ''),
             'order_type' => '-'
+        ], [
+        'extra_payload' => [
+            'type' => 'text'
         ],
         'related_module' => 'Enquiries',
         'related_id' => $id,
@@ -904,20 +917,35 @@ try {
             $waResult = enqSendWhatsappByApi($conn, $newId);
 
             if (!($waResult['success'] ?? false)) {
-                apiResponse(true, 'Enquiry created successfully. WhatsApp API sending failed.', array_merge($extra, [
+                $waReason = trim((string)($waResult['response'] ?? ''));
+                if ($waReason === '') {
+                    $waReason = trim((string)($waResult['message'] ?? 'WhatsApp failed.'));
+                }
+
+                $decodedReason = json_decode($waReason, true);
+                if (is_array($decodedReason) && !empty($decodedReason['message'])) {
+                    $waReason = (string)$decodedReason['message'];
+                }
+
+                apiResponse(true, 'Enquiry saved, but WhatsApp failed: ' . $waReason, array_merge($extra, [
                     'whatsapp_status' => false,
-                    'whatsapp_message' => (string)($waResult['response'] ?? $waResult['message'] ?? 'WhatsApp failed.')
+                    'whatsapp_message' => $waReason,
+                    'whatsapp_log_id' => (int)($waResult['log_id'] ?? 0),
+                    'whatsapp_http_code' => (int)($waResult['http_code'] ?? 0),
+                    'whatsapp_debug' => $waResult
                 ]));
             }
 
-            apiResponse(true, 'Enquiry created and WhatsApp message sent successfully.', array_merge($extra, [
-                'whatsapp_status' => true
+            apiResponse(true, 'Enquiry saved and WhatsApp message sent successfully.', array_merge($extra, [
+                'whatsapp_status' => true,
+                'whatsapp_log_id' => (int)($waResult['log_id'] ?? 0),
+                'whatsapp_http_code' => (int)($waResult['http_code'] ?? 0)
             ]));
         }
 
-        enqWhatsappLogManual($conn, $newId);
         $row = enqGetByIdForWhatsapp($conn, $newId);
-        apiResponse(true, 'Enquiry created successfully. Open WhatsApp for manual sending.', array_merge($extra, [
+        apiResponse(true, 'Enquiry saved. WhatsApp API settings are not ready, so API message was not sent.', array_merge($extra, [
+            'whatsapp_status' => false,
             'manual_whatsapp' => true,
             'open_whatsapp_url' => $row ? enqWhatsappUrl($row) : ''
         ]));

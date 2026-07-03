@@ -1400,6 +1400,51 @@ function apiCsrf(): void
     }
 }
 
+function apiPermissionAllowed(mysqli $conn, string $permission): bool
+{
+    $currentPage = 'proforma_bills.php';
+
+    if ($permission === 'can_create') {
+        return function_exists('can_create') ? (bool)can_create($conn, $currentPage) : false;
+    }
+
+    if ($permission === 'can_edit') {
+        return function_exists('can_edit') ? (bool)can_edit($conn, $currentPage) : false;
+    }
+
+    if ($permission === 'can_update') {
+        return function_exists('can_update') ? (bool)can_update($conn, $currentPage) : false;
+    }
+
+    if ($permission === 'can_delete') {
+        return function_exists('can_delete') ? (bool)can_delete($conn, $currentPage) : false;
+    }
+
+    if ($permission === 'can_send_whatsapp') {
+        return function_exists('can_send_whatsapp') ? (bool)can_send_whatsapp($conn, $currentPage) : false;
+    }
+
+    return false;
+}
+
+function apiRequirePermission(mysqli $conn, string $permission, string $message): void
+{
+    if (!apiPermissionAllowed($conn, $permission)) {
+        apiResponse(false, $message);
+    }
+}
+
+function apiRequireAnyPermission(mysqli $conn, array $permissions, string $message): void
+{
+    foreach ($permissions as $permission) {
+        if (apiPermissionAllowed($conn, (string)$permission)) {
+            return;
+        }
+    }
+
+    apiResponse(false, $message);
+}
+
 function apiProformaRow(mysqli $conn, int $id): ?array
 {
     if ($id <= 0 || !pb_table_exists($conn, 'proforma_bills')) {
@@ -1502,6 +1547,13 @@ try {
 
         if (in_array($action, ['save_proforma', 'create', 'update'], true)) {
             $id = pb_int($_POST['id'] ?? 0);
+
+            if ($id > 0 || $action === 'update') {
+                apiRequireAnyPermission($conn, ['can_edit', 'can_update'], 'You do not have permission to edit proforma bills.');
+            } else {
+                apiRequirePermission($conn, 'can_create', 'You do not have permission to create proforma bills.');
+            }
+
             $quotationId = pb_int($_POST['quotation_id'] ?? 0) ?: null;
             $functionTypeId = pb_function_type_id($conn, pb_post('function_type_id'));
             $orderType = pb_post('order_type', 'readymade');
@@ -1945,6 +1997,7 @@ try {
 
 
         if ($action === 'log_manual_whatsapp') {
+            apiRequirePermission($conn, 'can_send_whatsapp', 'You do not have permission to send WhatsApp messages.');
             $id = pb_int($_POST['id'] ?? 0);
 
             if ($id <= 0) {
@@ -1956,6 +2009,7 @@ try {
         }
 
         if ($action === 'send_whatsapp_api') {
+            apiRequirePermission($conn, 'can_send_whatsapp', 'You do not have permission to send WhatsApp messages.');
             $id = pb_int($_POST['id'] ?? 0);
 
             if ($id <= 0) {
@@ -1981,6 +2035,7 @@ try {
 
 
         if (in_array($action, ['delete', 'delete_record'], true)) {
+            apiRequirePermission($conn, 'can_delete', 'You do not have permission to delete proforma bills.');
             $id = pb_int($_POST['id'] ?? 0);
 
             if ($id <= 0) {
@@ -2065,6 +2120,7 @@ try {
         }
 
         if ($action === 'create_job_card') {
+            apiRequireAnyPermission($conn, ['can_create', 'can_update'], 'You do not have permission to create job cards from proforma bills.');
             $proformaId = pb_int($_POST['proforma_id'] ?? 0);
 
             if ($proformaId <= 0) {

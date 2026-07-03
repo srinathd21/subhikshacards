@@ -14,6 +14,7 @@ $roleName    = strtolower((string)($_SESSION['role_name'] ?? ''));
 $isAdmin     = ($roleKey === 'admin' || $roleName === 'admin');
 
 $sidebarMenus = [];
+$sidebarLoadedFromDb = false;
 
 if (!function_exists('sidebar_table_exists')) {
     function sidebar_table_exists(mysqli $conn, string $table): bool
@@ -31,6 +32,25 @@ if (!function_exists('sidebar_table_exists')) {
         }
     }
 }
+
+if (!function_exists('sidebar_table_has_column')) {
+    function sidebar_table_has_column(mysqli $conn, string $table, string $column): bool
+    {
+        try {
+            $table = $conn->real_escape_string($table);
+            $column = $conn->real_escape_string($column);
+            $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+            $ok = $res && $res->num_rows > 0;
+            if ($res) {
+                $res->free();
+            }
+            return $ok;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+}
+
 
 if (!function_exists('sidebar_active')) {
     function sidebar_active(string $url, string $currentPage): bool
@@ -116,9 +136,13 @@ try {
         && sidebar_table_exists($conn, 'sidebar_items')
         && sidebar_table_exists($conn, 'role_sidebar_permissions')
     ) {
+        $hasShowInSidebar = sidebar_table_has_column($conn, 'sidebar_items', 'show_in_sidebar');
+        $sidebarVisibilitySql = $hasShowInSidebar ? " AND si.show_in_sidebar = 1" : "";
+
         /*
          | Strict role-based sidebar.
          | No Admin bypass: Admin also follows role_sidebar_permissions.can_show.
+         | If show_in_sidebar exists, hidden items are excluded here.
          */
         $sql = "
             SELECT DISTINCT
@@ -135,7 +159,7 @@ try {
                 ON rsp.sidebar_item_id = si.id
                AND rsp.role_id = ?
                AND rsp.can_show = 1
-            WHERE si.is_active = 1
+            WHERE si.is_active = 1{$sidebarVisibilitySql}
             ORDER BY
                 COALESCE(si.parent_id, si.id),
                 CASE WHEN si.parent_id IS NULL THEN 0 ELSE 1 END,
@@ -152,15 +176,18 @@ try {
             $sidebarMenus[] = $row;
         }
 
+        $sidebarLoadedFromDb = true;
         $stmt->close();
     }
 } catch (Throwable $e) {
     $sidebarMenus = [];
+$sidebarLoadedFromDb = false;
 } catch (Throwable $e) {
     $sidebarMenus = [];
+$sidebarLoadedFromDb = false;
 }
 
-if (!$sidebarMenus) {
+if (!$sidebarLoadedFromDb && !$sidebarMenus) {
     $sidebarMenus = [
         ['id'=>1, 'parent_id'=>null, 'menu_key'=>'dashboard', 'menu_title'=>'Dashboard', 'page_title'=>'Dashboard', 'menu_url'=>'dashboard.php', 'icon'=>'layout-dashboard', 'sort_order'=>1],
         ['id'=>2, 'parent_id'=>null, 'menu_key'=>'enquiries', 'menu_title'=>'Enquiries', 'page_title'=>'Enquiries', 'menu_url'=>'enquiries.php', 'icon'=>'phone', 'sort_order'=>2],
