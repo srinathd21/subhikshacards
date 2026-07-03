@@ -227,14 +227,135 @@ function jc_is_admin_user(mysqli $conn): bool
     return false;
 }
 
+function jc_can_update_job_cards(mysqli $conn): bool
+{
+    try {
+        if (jc_is_admin_user($conn)) return true;
+        if (function_exists('can_update')) {
+            return (bool)can_update($conn, 'job_cards.php');
+        }
+    } catch (Throwable $e) {}
+
+    return false;
+}
+
 function jc_can_update_tracking(mysqli $conn, array $trackingRow): bool
 {
+    if (!jc_can_update_job_cards($conn)) return false;
+
     if (jc_is_admin_user($conn)) return true;
 
     $responsibleRoleId = (int)($trackingRow['responsible_role_id'] ?? 0);
     if ($responsibleRoleId <= 0) return false;
 
     return in_array($responsibleRoleId, jc_current_role_ids($conn), true);
+}
+
+function jc_previous_tracking_completed(mysqli $conn, array $trackingRow): array
+{
+    $jobCardId = (int)($trackingRow['job_card_id'] ?? 0);
+    $trackingId = (int)($trackingRow['id'] ?? 0);
+
+    if ($jobCardId <= 0 || $trackingId <= 0 || !jc_table_exists($conn, 'job_tracking')) {
+        return [
+            'allowed' => false,
+            'message' => 'Invalid tracking sequence.'
+        ];
+    }
+
+    /*
+     | Strong sequence validation:
+     | Do not allow a stage update when ANY previous workflow row is still not
+     | completed/skipped. This is safer than checking only one immediate previous row,
+     | because duplicate/mismatched workflow sort orders can otherwise allow bypass.
+     */
+    try {
+        $join = jc_table_exists($conn, 'workflow_steps')
+            ? 'LEFT JOIN workflow_steps ws ON ws.id = jt.workflow_step_id'
+            : '';
+
+        $sort = jc_table_exists($conn, 'workflow_steps')
+            ? 'ORDER BY COALESCE(ws.sort_order, jt.id) ASC, jt.id ASC'
+            : 'ORDER BY jt.id ASC';
+
+        $selectSort = jc_table_exists($conn, 'workflow_steps')
+            ? 'ws.step_name, ws.sort_order'
+            : 'NULL AS step_name, jt.id AS sort_order';
+
+        $stmt = $conn->prepare("
+            SELECT jt.id, jt.job_card_id, jt.workflow_step_id, jt.status, {$selectSort}
+            FROM job_tracking jt
+            {$join}
+            WHERE jt.job_card_id = ?
+            {$sort}
+        ");
+        $stmt->bind_param('i', $jobCardId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        $rows = [];
+        while ($row = $res->fetch_assoc()) {
+            $rows[] = $row;
+        }
+
+        $stmt->close();
+
+        if (!$rows) {
+            return [
+                'allowed' => false,
+                'message' => 'Tracking sequence not found.'
+            ];
+        }
+
+        $currentIndex = null;
+        foreach ($rows as $index => $row) {
+            if ((int)$row['id'] === $trackingId) {
+                $currentIndex = $index;
+                break;
+            }
+        }
+
+        if ($currentIndex === null) {
+            return [
+                'allowed' => false,
+                'message' => 'Tracking stage not found in workflow sequence.'
+            ];
+        }
+
+        if ($currentIndex === 0) {
+            return [
+                'allowed' => true,
+                'message' => ''
+            ];
+        }
+
+        for ($i = 0; $i < $currentIndex; $i++) {
+            $previous = $rows[$i];
+            $previousStatus = strtolower(trim((string)($previous['status'] ?? 'pending')));
+
+            if (!in_array($previousStatus, ['completed', 'skipped'], true)) {
+                $previousName = trim((string)($previous['step_name'] ?? 'Previous stage'));
+                if ($previousName === '') {
+                    $previousName = 'Previous stage';
+                }
+
+                return [
+                    'allowed' => false,
+                    'message' => $previousName . ' must be completed before updating this stage.'
+                ];
+            }
+        }
+
+        return [
+            'allowed' => true,
+            'message' => ''
+        ];
+    } catch (Throwable $e) {
+        return [
+            'allowed' => false,
+            'message' => 'Unable to verify previous workflow stage.'
+        ];
+    }
 }
 
 function jc_status_id_by_key(mysqli $conn, string $key): ?int
@@ -610,7 +731,7 @@ function jc_update_job_card_progress(mysqli $conn, int $jobCardId): array
     foreach ($rows as $row) {
         $status = (string)($row['status'] ?? 'pending');
 
-        if ($status === 'completed') {
+        if (in_array($status, ['completed', 'skipped'], true)) {
             $completed++;
         } elseif ($status === 'in_progress') {
             $inProgress++;
@@ -618,7 +739,7 @@ function jc_update_job_card_progress(mysqli $conn, int $jobCardId): array
             $pending++;
         }
 
-        if ($currentStepId === null && $status !== 'completed') {
+        if ($currentStepId === null && !in_array($status, ['completed', 'skipped', 'cancelled'], true)) {
             $currentStepId = (int)($row['workflow_step_id'] ?? 0);
         }
     }
@@ -656,9 +777,12 @@ function jc_update_job_card_progress(mysqli $conn, int $jobCardId): array
 function jc_tracking_status_update(mysqli $conn, int $trackingId, string $newStatus, string $remarks = '', ?int $delayReasonId = null, string $delayRemarks = ''): array
 {
     if ($trackingId <= 0) throw new RuntimeException('Invalid tracking record.');
-    if (!in_array($newStatus, ['pending', 'in_progress', 'completed'], true)) {
+
+    $allowedStatuses = ['pending', 'in_progress', 'completed', 'delayed', 'skipped', 'cancelled'];
+    if (!in_array($newStatus, $allowedStatuses, true)) {
         throw new RuntimeException('Invalid tracking status.');
     }
+
     if (!jc_table_exists($conn, 'job_tracking')) {
         throw new RuntimeException('job_tracking table is missing.');
     }
@@ -677,8 +801,21 @@ function jc_tracking_status_update(mysqli $conn, int $trackingId, string $newSta
 
     if (!$tracking) throw new RuntimeException('Tracking step not found.');
 
+    if (!jc_can_update_job_cards($conn)) {
+        throw new RuntimeException('You do not have update permission for Job Cards.');
+    }
+
     if (!jc_can_update_tracking($conn, $tracking)) {
         throw new RuntimeException('You do not have role access to update this tracking step.');
+    }
+
+    $sequenceCheck = jc_previous_tracking_completed($conn, $tracking);
+    if (empty($sequenceCheck['allowed'])) {
+        throw new RuntimeException((string)($sequenceCheck['message'] ?? 'Previous stage must be completed before updating this stage.'));
+    }
+
+    if ($newStatus === 'delayed' && (!$delayReasonId || trim($delayRemarks) === '')) {
+        throw new RuntimeException('Delay reason and delay remarks are required before marking this stage as delayed.');
     }
 
     $jobCardId = (int)($tracking['job_card_id'] ?? 0);
@@ -696,21 +833,30 @@ function jc_tracking_status_update(mysqli $conn, int $trackingId, string $newSta
         if (jc_col($conn, 'job_tracking', 'actual_start_at') && empty($tracking['actual_start_at'])) $data['actual_start_at'] = $now;
         if (jc_col($conn, 'job_tracking', 'actual_completed_at')) $data['actual_completed_at'] = null;
         if (jc_col($conn, 'job_tracking', 'completed_by')) $data['completed_by'] = null;
-    } elseif ($newStatus === 'completed') {
+    } elseif ($newStatus === 'completed' || $newStatus === 'skipped') {
         if (jc_col($conn, 'job_tracking', 'actual_start_at') && empty($tracking['actual_start_at'])) $data['actual_start_at'] = $now;
         if (jc_col($conn, 'job_tracking', 'actual_completed_at')) $data['actual_completed_at'] = $now;
         if (jc_col($conn, 'job_tracking', 'completed_by')) $data['completed_by'] = $userId ?: null;
+    } elseif ($newStatus === 'delayed') {
+        if (jc_col($conn, 'job_tracking', 'is_delayed')) $data['is_delayed'] = 1;
+        if (jc_col($conn, 'job_tracking', 'delay_started_at') && empty($tracking['delay_started_at'])) $data['delay_started_at'] = $now;
+        if (jc_col($conn, 'job_tracking', 'delay_reason_id')) $data['delay_reason_id'] = $delayReasonId;
+        if (jc_col($conn, 'job_tracking', 'delay_remarks')) $data['delay_remarks'] = $delayRemarks;
+        if (jc_col($conn, 'job_tracking', 'delay_days')) {
+            $days = jc_delay_days_from_planned($tracking['planned_completion_date'] ?? null);
+            $data['delay_days'] = max(1, $days);
+        }
     }
 
     jc_apply_delay_data($conn, $data, $tracking, $newStatus, $delayReasonId, $delayRemarks);
 
+    if (jc_col($conn, 'job_tracking', 'remarks')) $data['remarks'] = $remarks;
     if (jc_col($conn, 'job_tracking', 'updated_at')) $data['updated_at'] = $now;
 
     $conn->begin_transaction();
 
     jc_update($conn, 'job_tracking', $data, $trackingId);
     jc_tracking_history_insert($conn, $trackingId, $jobCardId, (int)($tracking['workflow_step_id'] ?? 0), $oldStatus, $newStatus, ($remarks !== '' ? $remarks : 'Status updated from job progress page.') . ($delayRemarks !== '' ? ' Delay: ' . $delayRemarks : ''), $userId);
-
 
     $progress = jc_update_job_card_progress($conn, $jobCardId);
 

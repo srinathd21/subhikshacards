@@ -10,12 +10,24 @@
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';
 
-if (function_exists('require_permission')) {
-    require_permission($conn, 'can_create', 'proforma_bills.php');
-}
-
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
+}
+
+$currentPage = 'proforma_bills.php';
+$editId = (int)filter_var($_GET['id'] ?? 0, FILTER_SANITIZE_NUMBER_INT);
+$isEditMode = $editId > 0 && (isset($_GET['mode']) && (string)$_GET['mode'] === 'edit');
+
+if (function_exists('require_permission')) {
+    if ($isEditMode) {
+        $canEditThisPage = function_exists('can_edit') ? can_edit($conn, $currentPage) : false;
+        $canUpdateThisPage = function_exists('can_update') ? can_update($conn, $currentPage) : false;
+        if (!$canEditThisPage && !$canUpdateThisPage) {
+            require_permission($conn, 'can_edit', $currentPage);
+        }
+    } else {
+        require_permission($conn, 'can_create', $currentPage);
+    }
 }
 
 if (!function_exists('e')) {
@@ -234,6 +246,103 @@ function cpFetchAll(mysqli $conn, string $sql): array
     return $rows;
 }
 
+function cpFetchProformaForEdit(mysqli $conn, int $id): ?array
+{
+    if ($id <= 0 || !cpTableExists($conn, 'proforma_bills')) {
+        return null;
+    }
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT
+                pb.*,
+                pbi.id AS item_id,
+                pbi.product_id AS item_product_id,
+                pbi.item_name,
+                pbi.description AS item_description,
+                pbi.qty AS item_qty,
+                pbi.rate AS item_rate,
+                pbi.amount AS item_amount,
+                pbi.printing_type_id AS item_printing_type_id,
+                pbi.printing_sub_type_id AS item_printing_sub_type_id,
+                pbi.finishing_required AS item_finishing_required,
+                pbi.size_text AS item_size_text,
+                pbi.gsm_thickness AS item_gsm_thickness,
+                pbi.lamination_required AS item_lamination_required,
+                pbi.lamination_type AS item_lamination_type,
+                pbi.printing_side AS item_printing_side,
+                pbi.screening_type AS item_screening_type
+            FROM proforma_bills pb
+            LEFT JOIN proforma_bill_items pbi
+                ON pbi.proforma_bill_id = pb.id
+            WHERE pb.id = ?
+            ORDER BY pbi.sort_order ASC, pbi.id ASC
+            LIMIT 1
+        " );
+        $stmt->bind_param('i', $id);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+
+function cpFetchPlannedDatesForEdit(mysqli $conn, int $proformaId): array
+{
+    $plannedDates = [];
+
+    if (
+        $proformaId <= 0 ||
+        !cpTableExists($conn, 'job_cards') ||
+        !cpTableExists($conn, 'job_tracking')
+    ) {
+        return $plannedDates;
+    }
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT
+                jt.workflow_step_id,
+                jt.planned_start_date,
+                jt.planned_completion_date
+            FROM job_tracking jt
+            INNER JOIN (
+                SELECT id
+                FROM job_cards
+                WHERE proforma_bill_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+            ) jc ON jc.id = jt.job_card_id
+            ORDER BY jt.workflow_step_id ASC
+        ");
+        $stmt->bind_param('i', $proformaId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        while ($row = $res->fetch_assoc()) {
+            $stepId = (string)(int)($row['workflow_step_id'] ?? 0);
+            if ($stepId === '0') {
+                continue;
+            }
+
+            $plannedDates[$stepId] = [
+                'start' => !empty($row['planned_start_date']) ? substr((string)$row['planned_start_date'], 0, 10) : '',
+                'completion' => !empty($row['planned_completion_date']) ? substr((string)$row['planned_completion_date'], 0, 10) : ''
+            ];
+        }
+
+        $stmt->close();
+    } catch (Throwable $e) {
+        return [];
+    }
+
+    return $plannedDates;
+}
+
 if (empty($_SESSION['create_proforma_csrf'])) {
     $_SESSION['create_proforma_csrf'] = bin2hex(random_bytes(32));
 }
@@ -253,10 +362,41 @@ if (!empty($_SESSION['create_proforma_flash']) && is_array($_SESSION['create_pro
     unset($_SESSION['create_proforma_flash']);
 }
 
-/* Create Proforma backend moved to api/create_proforma.php */
+/* Create / Edit Proforma backend moved to api/create_proforma.php */
 
-$quotations = cpFetchAll($conn, "SELECT q.*, e.enquiry_no, ft.function_name, ft.field_group, c.gst_number, c.address AS customer_address FROM quotations q LEFT JOIN enquiries e ON e.id = q.enquiry_id LEFT JOIN function_types ft ON ft.id = q.function_type_id LEFT JOIN customers c ON c.id = q.customer_id LEFT JOIN proforma_bills pb ON pb.quotation_id = q.id WHERE pb.id IS NULL ORDER BY q.id DESC LIMIT 500");
+$editData = null;
+if ($isEditMode) {
+    $editData = cpFetchProformaForEdit($conn, $editId);
+    if (!$editData) {
+        $message = 'Proforma bill not found for editing.';
+        $messageType = 'danger';
+        $isEditMode = false;
+        $editId = 0;
+    }
+}
+
+$plannedDates = ($isEditMode && $editId > 0) ? cpFetchPlannedDatesForEdit($conn, $editId) : [];
+
+$editQuotationId = $editData && !empty($editData['quotation_id']) ? (int)$editData['quotation_id'] : 0;
+$quotationWhere = 'pb.id IS NULL';
+if ($editQuotationId > 0) {
+    $quotationWhere = '(pb.id IS NULL OR q.id = ' . $editQuotationId . ')';
+}
+
+$quotations = cpFetchAll($conn, "SELECT q.*, e.enquiry_no, ft.function_name, ft.field_group, c.gst_number, c.address AS customer_address FROM quotations q LEFT JOIN enquiries e ON e.id = q.enquiry_id LEFT JOIN function_types ft ON ft.id = q.function_type_id LEFT JOIN customers c ON c.id = q.customer_id LEFT JOIN proforma_bills pb ON pb.quotation_id = q.id WHERE {$quotationWhere} ORDER BY q.id DESC LIMIT 500");
 $functionTypes = cpFetchAll($conn, "SELECT id, function_name, field_group FROM function_types WHERE is_active = 1 ORDER BY sort_order ASC, function_name ASC");
+$proformaStatuses = cpFetchAll($conn, "SELECT id, status_name, status_key, color_code FROM proforma_statuses WHERE is_active = 1 ORDER BY sort_order ASC, id ASC");
+$defaultProformaStatusId = 0;
+foreach ($proformaStatuses as $statusRow) {
+    if (strtolower((string)($statusRow['status_key'] ?? '')) === 'confirmed') {
+        $defaultProformaStatusId = (int)$statusRow['id'];
+        break;
+    }
+}
+if ($defaultProformaStatusId <= 0 && $proformaStatuses) {
+    $defaultProformaStatusId = (int)($proformaStatuses[0]['id'] ?? 0);
+}
+$selectedProformaStatusId = ($isEditMode && $editData && !empty($editData['proforma_status_id'])) ? (int)$editData['proforma_status_id'] : $defaultProformaStatusId;
 $products = cpFetchAll($conn, "SELECT id, product_name, default_order_type, default_price FROM products WHERE is_active = 1 ORDER BY product_name ASC");
 $printingTypes = cpFetchAll($conn, "SELECT id, printing_name, printing_key, role_key, is_for_readymade, is_for_customized FROM printing_types WHERE is_active = 1 ORDER BY sort_order ASC, id ASC");
 $printingSubTypes = cpFetchAll($conn, "SELECT id, printing_type_id, sub_type_name FROM printing_sub_types WHERE is_active = 1 ORDER BY printing_type_id ASC, sort_order ASC, id ASC");
@@ -267,13 +407,15 @@ $quotationJson = json_encode($quotations, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HE
 $subTypeJson = json_encode($printingSubTypes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $printingTypeJson = json_encode($printingTypes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $stepsJson = json_encode(['readymade' => $readymadeSteps, 'customized' => $customizedSteps], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+$plannedDatesJson = json_encode($plannedDates ?: new stdClass(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+$editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 ?>
 <!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Create Proforma Bill - Subhiksha Cards</title>
+    <title><?= $isEditMode ? 'Edit Proforma Bill' : 'Create Proforma Bill' ?> - Subhiksha Cards</title>
     <?php include __DIR__ . '/includes/links.php'; ?>
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
     <style>
@@ -290,8 +432,8 @@ $stepsJson = json_encode(['readymade' => $readymadeSteps, 'customized' => $custo
             <div class="card-ui page-head">
                 <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
                     <div>
-                        <h1 class="mb-1">Create Proforma Bill</h1>
-                        <p class="text-muted-custom mb-0">Convert quotation to sales order, collect advance, create job card and initialize tracking.</p>
+                        <h1 class="mb-1"><?= $isEditMode ? 'Edit Proforma Bill' : 'Create Proforma Bill' ?></h1>
+                        <p class="text-muted-custom mb-0"><?= $isEditMode ? 'Update existing proforma bill details without changing the order flow.' : 'Convert quotation to sales order, collect advance, create job card and initialize tracking.' ?></p>
                     </div>
                     <a href="proforma_bills.php" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Back to Proforma Bills</a>
                 </div>
@@ -307,6 +449,8 @@ $stepsJson = json_encode(['readymade' => $readymadeSteps, 'customized' => $custo
 
             <form method="post" action="api/create_proforma.php" class="card-ui module-card" id="proformaForm">
                 <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                <input type="hidden" name="action" value="<?= $isEditMode ? 'update_proforma' : 'create_proforma' ?>">
+                <input type="hidden" name="id" value="<?= (int)$editId ?>">
                 <div class="row g-3">
                     <div class="col-12"><div class="section-title">1. Quotation / Customer Details</div></div>
                     <div class="col-12">
@@ -314,7 +458,7 @@ $stepsJson = json_encode(['readymade' => $readymadeSteps, 'customized' => $custo
                         <select name="quotation_id" id="quotation_id" class="form-select select2-autotype" data-placeholder="Search quotation / customer / mobile">
                             <option value="">Direct Proforma Bill</option>
                             <?php foreach ($quotations as $q): ?>
-                            <option value="<?= e($q['id']) ?>"><?= e($q['quotation_no']) ?> - <?= e($q['customer_name']) ?> - <?= e($q['mobile']) ?> - <?= e($q['function_name'] ?? '-') ?></option>
+                            <option value="<?= e($q['id']) ?>" <?= ($isEditMode && $editData && (int)($editData['quotation_id'] ?? 0) === (int)$q['id']) ? 'selected' : '' ?>><?= e($q['quotation_no']) ?> - <?= e($q['customer_name']) ?> - <?= e($q['mobile']) ?> - <?= e($q['function_name'] ?? '-') ?></option>
                             <?php endforeach; ?>
                         </select>
                     </div>
@@ -342,6 +486,16 @@ $stepsJson = json_encode(['readymade' => $readymadeSteps, 'customized' => $custo
                     <div class="col-md-3"><label class="form-label fw-bold">Rate *</label><input type="number" step="0.01" min="0" name="rate" id="rate" class="form-control" value="0" required></div>
                     <div class="col-md-3"><label class="form-label fw-bold">Discount</label><input type="number" step="0.01" min="0" name="discount_amount" id="discount_amount" class="form-control" value="0"></div>
                     <div class="col-md-3"><label class="form-label fw-bold">Delivery Date *</label><input type="date" name="delivery_date" id="delivery_date" class="form-control"></div>
+                    <?php if ($proformaStatuses): ?>
+                    <div class="col-md-3">
+                        <label class="form-label fw-bold">Proforma Status</label>
+                        <select name="proforma_status_id" id="proforma_status_id" class="form-select">
+                            <?php foreach ($proformaStatuses as $statusRow): ?>
+                            <option value="<?= (int)$statusRow['id'] ?>" <?= (int)$selectedProformaStatusId === (int)$statusRow['id'] ? 'selected' : '' ?>><?= e($statusRow['status_name']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <?php endif; ?>
                     <div class="col-md-4"><label class="form-label fw-bold">Printing Type *</label><select name="printing_type_id" id="printing_type_id" class="form-select" required><option value="">Select Printing Type</option><?php foreach ($printingTypes as $pt): ?><option value="<?= e($pt['id']) ?>" data-readymade="<?= e($pt['is_for_readymade']) ?>" data-customized="<?= e($pt['is_for_customized']) ?>" data-role-key="<?= e($pt['role_key']) ?>"><?= e($pt['printing_name']) ?></option><?php endforeach; ?></select></div>
                     <div class="col-md-4 readymade-field"><label class="form-label fw-bold">Screen Print Sub-Type</label><select name="printing_sub_type_id" id="printing_sub_type_id" class="form-select"><option value="">Not Applicable</option></select></div>
                     <div class="col-md-4 readymade-field d-flex align-items-end"><div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" name="finishing_required" id="finishing_required" value="1"><label class="form-check-label fw-bold" for="finishing_required">With Finishing</label></div></div>
@@ -362,13 +516,13 @@ $stepsJson = json_encode(['readymade' => $readymadeSteps, 'customized' => $custo
                     <div class="col-12"><label class="form-label fw-bold">Internal Remarks</label><textarea name="remarks" id="remarks" class="form-control" rows="2"></textarea></div>
 
                     <div class="col-12 mt-3"><div class="section-title">5. Job Card and Tracking</div></div>
-                    <div class="col-md-4"><div class="form-check form-switch"><input type="hidden" name="auto_create_job_card" value="1"><input class="form-check-input" type="checkbox" id="auto_create_job_card" value="1" checked disabled><label class="form-check-label fw-bold" for="auto_create_job_card">Create Job Card Automatically</label></div></div>
-                    <div class="col-md-4"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="create_tracking_link" id="create_tracking_link" value="1" checked><label class="form-check-label fw-bold" for="create_tracking_link">Create Customer Tracking Link</label></div></div>
+                    <div class="col-md-4"><div class="form-check form-switch"><input type="hidden" name="auto_create_job_card" value="<?= $isEditMode ? '0' : '1' ?>"><input class="form-check-input" type="checkbox" id="auto_create_job_card" value="1" <?= $isEditMode ? 'disabled' : 'checked disabled' ?>><label class="form-check-label fw-bold" for="auto_create_job_card">Create Job Card Automatically</label></div></div>
+                    <div class="col-md-4"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="create_tracking_link" id="create_tracking_link" value="1" <?= $isEditMode ? 'disabled' : 'checked' ?>><label class="form-check-label fw-bold" for="create_tracking_link">Create Customer Tracking Link</label></div></div>
                     <div class="col-12"><div class="soft-panel"><div class="d-flex justify-content-between align-items-center mb-2"><strong>Planned Dates for Tracking Steps</strong><small class="text-muted-custom">Optional, Sales can fill now or later</small></div><div id="workflowSteps" class="workflow-grid"></div></div></div>
 
                     <div class="col-12 d-flex flex-column flex-md-row justify-content-end gap-2 mt-4">
                         <button type="reset" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Reset</button>
-                        <button type="submit" class="btn btn-primary rounded-pill px-5 fw-bold" id="createProformaBtn">Create Proforma Bill</button>
+                        <button type="submit" class="btn btn-primary rounded-pill px-5 fw-bold" id="createProformaBtn"><?= $isEditMode ? 'Update Proforma Bill' : 'Create Proforma Bill' ?></button>
                     </div>
                 </div>
             </form>
@@ -383,6 +537,8 @@ const quotations = <?= $quotationJson ?: '[]' ?>;
 const printingSubTypes = <?= $subTypeJson ?: '[]' ?>;
 const printingTypes = <?= $printingTypeJson ?: '[]' ?>;
 const workflowData = <?= $stepsJson ?: '{"readymade":[],"customized":[]}' ?>;
+const plannedStepData = <?= $plannedDatesJson ?: '{}' ?>;
+const editData = <?= $editJson ?: 'null' ?>;
 
 function rupee(value){return '₹' + Number(value || 0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function setValue(id,value){const el=document.getElementById(id); if(el) el.value=value ?? '';}
@@ -398,7 +554,117 @@ function toggleOrderType(){const type=getValue('order_type')||'readymade'; docum
 function updatePrintingTypeOptions(){const type=getValue('order_type')||'readymade'; const select=document.getElementById('printing_type_id'); Array.from(select.options).forEach(opt=>{if(!opt.value) return; const ok=type==='readymade' ? opt.dataset.readymade==='1' : opt.dataset.customized==='1'; opt.hidden=!ok; opt.disabled=!ok;}); if(select.selectedOptions[0]?.disabled){select.value='';} updateSubTypes();}
 function updateSubTypes(){const pt=parseInt(getValue('printing_type_id')||0,10); const sub=document.getElementById('printing_sub_type_id'); sub.innerHTML='<option value="">Not Applicable</option>'; printingSubTypes.filter(s=>parseInt(s.printing_type_id,10)===pt).forEach(s=>{const opt=document.createElement('option'); opt.value=s.id; opt.textContent=s.sub_type_name; sub.appendChild(opt);});}
 function toggleLamination(){document.querySelectorAll('.lamination-type-wrap').forEach(el=>el.classList.toggle('hide-field',!document.getElementById('lamination_required').checked));}
-function renderWorkflowSteps(){const type=getValue('order_type')||'readymade'; const box=document.getElementById('workflowSteps'); box.innerHTML=''; (workflowData[type]||[]).forEach(step=>{const div=document.createElement('div'); div.className='workflow-step'; div.innerHTML='<strong>'+step.sort_order+'. '+step.step_name+'</strong><div class="row g-2 mt-1"><div class="col-6"><small>Start</small><input type="date" class="form-control" name="planned_step['+step.id+'][start]"></div><div class="col-6"><small>Complete</small><input type="date" class="form-control" name="planned_step['+step.id+'][completion]"></div></div>'; box.appendChild(div);});}
+function normalizeDateValue(value){
+    if(!value) return '';
+    const text = String(value);
+    return text.length >= 10 ? text.substring(0,10) : text;
+}
+function renderWorkflowSteps(){
+    const type = getValue('order_type') || 'readymade';
+    const box = document.getElementById('workflowSteps');
+    if(!box) return;
+
+    const previousValues = {};
+    box.querySelectorAll('[data-planned-step-id]').forEach(input=>{
+        const stepId = String(input.dataset.plannedStepId || '');
+        const kind = input.dataset.plannedKind || '';
+        if(!stepId || !kind) return;
+        if(!previousValues[stepId]) previousValues[stepId] = {};
+        previousValues[stepId][kind] = input.value || '';
+    });
+
+    box.innerHTML = '';
+
+    (workflowData[type] || []).forEach(step=>{
+        const stepId = String(step.id || '');
+        const saved = plannedStepData[stepId] || {};
+        const startValue = (previousValues[stepId] && previousValues[stepId].start)
+            ? previousValues[stepId].start
+            : normalizeDateValue(saved.start || saved.planned_start_date || '');
+        const completionValue = (previousValues[stepId] && previousValues[stepId].completion)
+            ? previousValues[stepId].completion
+            : normalizeDateValue(saved.completion || saved.planned_completion_date || '');
+
+        const div = document.createElement('div');
+        div.className = 'workflow-step';
+
+        const title = document.createElement('strong');
+        title.textContent = (step.sort_order || '') + '. ' + (step.step_name || 'Step');
+        div.appendChild(title);
+
+        const row = document.createElement('div');
+        row.className = 'row g-2 mt-1';
+
+        const startCol = document.createElement('div');
+        startCol.className = 'col-6';
+        startCol.innerHTML = '<small>Start</small>';
+        const startInput = document.createElement('input');
+        startInput.type = 'date';
+        startInput.className = 'form-control';
+        startInput.name = 'planned_step[' + stepId + '][start]';
+        startInput.value = startValue;
+        startInput.dataset.plannedStepId = stepId;
+        startInput.dataset.plannedKind = 'start';
+        startCol.appendChild(startInput);
+
+        const completionCol = document.createElement('div');
+        completionCol.className = 'col-6';
+        completionCol.innerHTML = '<small>Complete</small>';
+        const completionInput = document.createElement('input');
+        completionInput.type = 'date';
+        completionInput.className = 'form-control';
+        completionInput.name = 'planned_step[' + stepId + '][completion]';
+        completionInput.value = completionValue;
+        completionInput.dataset.plannedStepId = stepId;
+        completionInput.dataset.plannedKind = 'completion';
+        completionCol.appendChild(completionInput);
+
+        row.appendChild(startCol);
+        row.appendChild(completionCol);
+        div.appendChild(row);
+        box.appendChild(div);
+    });
+}
+function applyEditData(){
+    if(!editData) return;
+    setValue('quotation_id', editData.quotation_id || '');
+    setValue('order_type', editData.order_type || 'readymade');
+    setValue('customer_name', editData.customer_name || '');
+    setValue('mobile', editData.mobile || '');
+    setValue('billing_name', editData.billing_name || '');
+    setValue('billing_mobile', editData.billing_mobile || '');
+    setValue('billing_address', editData.billing_address || '');
+    setValue('gst_number', editData.gst_number || '');
+    setValue('function_type_id', editData.function_type_id || '');
+    setValue('proforma_status_id', editData.proforma_status_id || '');
+    setValue('bride_name', editData.bride_name || '');
+    setValue('groom_name', editData.groom_name || '');
+    setValue('venue', editData.venue || '');
+    setValue('function_date', editData.function_date || '');
+    setValue('function_time', editData.function_time || '');
+    setValue('product_id', editData.item_product_id || '');
+    setValue('product_name', editData.item_name || '');
+    setValue('description', editData.item_description || '');
+    setValue('qty', editData.item_qty || editData.total_qty || '');
+    setValue('rate', editData.item_rate || '');
+    setValue('discount_amount', editData.discount_amount || 0);
+    setValue('advance_amount', editData.advance_amount || 0);
+    setValue('delivery_date', editData.delivery_date || '');
+    setValue('remarks', editData.remarks || '');
+    setValue('printing_type_id', editData.item_printing_type_id || '');
+    updatePrintingTypeOptions();
+    setValue('printing_sub_type_id', editData.item_printing_sub_type_id || '');
+    setValue('size_text', editData.item_size_text || '');
+    setValue('gsm_thickness', editData.item_gsm_thickness || '');
+    setValue('lamination_type', editData.item_lamination_type || '');
+    setValue('printing_side', editData.item_printing_side || '');
+    setValue('screening_type', editData.item_screening_type || '');
+    const finishing = document.getElementById('finishing_required');
+    if(finishing) finishing.checked = parseInt(editData.item_finishing_required || 0,10) === 1;
+    const lamination = document.getElementById('lamination_required');
+    if(lamination) lamination.checked = parseInt(editData.item_lamination_required || 0,10) === 1;
+    ['quotation_id','function_type_id','proforma_status_id','product_id','order_type','printing_type_id','printing_sub_type_id','lamination_type','printing_side','screening_type','payment_mode'].forEach(refreshSelect);
+}
 function loadQuotation(){const id=parseInt(getValue('quotation_id')||0,10); const q=quotations.find(row=>parseInt(row.id,10)===id); if(!q) return; setValue('customer_name',q.customer_name||''); setValue('mobile',q.mobile||''); setValue('billing_name',q.billing_name||q.customer_name||''); setValue('billing_mobile',q.billing_mobile||q.mobile||''); setValue('billing_address',q.billing_address||q.address||q.customer_address||''); setValue('gst_number',q.gst_number||''); setValue('function_type_id',q.function_type_id||''); setValue('bride_name',q.bride_name||''); setValue('groom_name',q.groom_name||''); setValue('venue',q.venue||''); setValue('function_date',q.function_date||''); setValue('function_time',q.function_time||''); setValue('qty',q.total_qty||1); setValue('description',q.item_details||q.description||''); setValue('product_name',q.product_name||q.item_name||q.item_details||''); setValue('rate',((parseFloat(q.total_qty||0)>0)?(parseFloat(q.sub_total||0)/parseFloat(q.total_qty||1)):parseFloat(q.sub_total||0)).toFixed(2)); setValue('discount_amount',q.discount_amount||0); refreshSelect('function_type_id'); toggleFunctionFields(); calculate();}
 function productChanged(){const opt=document.getElementById('product_id')?.selectedOptions[0]; if(!opt||!opt.value) return; if(!getValue('product_name')) setValue('product_name',opt.dataset.name||''); if(parseFloat(opt.dataset.price||0)>0) setValue('rate',opt.dataset.price); const ot=opt.dataset.orderType; if(ot==='readymade'||ot==='customized') setValue('order_type',ot); toggleOrderType(); calculate();}
 ['qty','rate','discount_amount','advance_amount'].forEach(id=>document.getElementById(id)?.addEventListener('input',calculate));
@@ -410,7 +676,7 @@ document.getElementById('lamination_required')?.addEventListener('change',toggle
 document.getElementById('product_id')?.addEventListener('change',productChanged);
 document.getElementById('proformaForm')?.addEventListener('reset',()=>setTimeout(()=>{toggleFunctionFields();toggleOrderType();toggleLamination();calculate();},50));
 if(window.jQuery){$('#quotation_id').on('select2:select select2:clear',loadQuotation); $('#function_type_id').on('select2:select select2:clear',toggleFunctionFields); $('#product_id').on('select2:select select2:clear',productChanged);}
-initSelect2(document); toggleFunctionFields(); toggleOrderType(); toggleLamination(); calculate(); showToastOnLoad();
+initSelect2(document); applyEditData(); toggleFunctionFields(); toggleOrderType(); if(editData){ setValue('printing_sub_type_id', editData.item_printing_sub_type_id || ''); refreshSelect('printing_sub_type_id'); } toggleLamination(); calculate(); showToastOnLoad();
 document.getElementById('proformaForm')?.addEventListener('submit',function(event){
     event.preventDefault();
 
@@ -418,7 +684,7 @@ document.getElementById('proformaForm')?.addEventListener('submit',function(even
     const btn = document.getElementById('createProformaBtn');
     const oldText = btn ? btn.textContent : '';
 
-    if(btn){btn.disabled=true; btn.textContent='Creating...';}
+    if(btn){btn.disabled=true; btn.textContent=editData ? 'Updating...' : 'Creating...';}
 
     fetch('api/create_proforma.php',{
         method:'POST',
@@ -428,7 +694,7 @@ document.getElementById('proformaForm')?.addEventListener('submit',function(even
     .then(response=>response.json())
     .then(data=>{
         if(data.status){
-            let toastMessage = data.message || 'Proforma bill created successfully.';
+            let toastMessage = data.message || (editData ? 'Proforma bill updated successfully.' : 'Proforma bill created successfully.');
             if(data.proforma_no){toastMessage += '<br>Proforma: ' + data.proforma_no;}
             if(data.job_card_no){toastMessage += '<br>Job Card: ' + data.job_card_no;}
             if(data.whatsapp_mode === 'api'){toastMessage += '<br>WhatsApp: Sent using API.';}
@@ -443,12 +709,12 @@ document.getElementById('proformaForm')?.addEventListener('submit',function(even
             setTimeout(()=>{window.location.href = data.redirect_url || 'proforma_bills.php';},1200);
         }else{
             showActionToast(data.message || 'Proforma bill creation failed.','danger','Failed');
-            if(btn){btn.disabled=false; btn.textContent=oldText || 'Create Proforma Bill';}
+            if(btn){btn.disabled=false; btn.textContent=oldText || (editData ? 'Update Proforma Bill' : 'Create Proforma Bill');}
         }
     })
     .catch(()=>{
         showActionToast('Request failed. Please try again.','danger','Failed');
-        if(btn){btn.disabled=false; btn.textContent=oldText || 'Create Proforma Bill';}
+        if(btn){btn.disabled=false; btn.textContent=oldText || (editData ? 'Update Proforma Bill' : 'Create Proforma Bill');}
     });
 });
 

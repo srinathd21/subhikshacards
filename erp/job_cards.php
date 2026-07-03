@@ -650,8 +650,8 @@ $pageAccessLabel = $hasAllJobCardAccess
 
                 <?php if ($message !== ''): ?>
                 <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:12000">
-                    <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert"
-                        aria-live="assertive" aria-atomic="true" data-bs-delay="5200">
+                    <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive"
+                        aria-atomic="true" data-bs-delay="5200">
                         <div class="d-flex">
                             <div class="toast-body">
                                 <div class="toast-title"><?= $messageType === 'danger' ? 'Failed' : 'Info' ?></div>
@@ -868,13 +868,12 @@ $pageAccessLabel = $hasAllJobCardAccess
                                     <td><?= e(jcDate($row['delivery_date'] ?? null)) ?></td>
 
                                     <td class="text-end">
-    <a href="job_card_view.php?id=<?= e($row['id']) ?>"
-        class="btn btn-sm btn-outline-secondary rounded-circle btn-action-icon"
-        title="View Job Card"
-        aria-label="View Job Card">
-        <i data-lucide="eye"></i>
-    </a>
-</td>
+                                        <a href="job_card_view.php?id=<?= e($row['id']) ?>"
+                                            class="btn btn-sm btn-outline-secondary rounded-circle btn-action-icon"
+                                            title="View Job Card" aria-label="View Job Card">
+                                            <i data-lucide="eye"></i>
+                                        </a>
+                                    </td>
                                 </tr>
                                 <?php endforeach; ?>
                             </tbody>
@@ -927,11 +926,10 @@ $pageAccessLabel = $hasAllJobCardAccess
 
                             <div class="mobile-card-actions">
                                 <a href="job_card_view.php?id=<?= e($row['id']) ?>"
-    class="btn btn-sm btn-outline-secondary rounded-circle btn-action-icon"
-    title="View Job Card"
-    aria-label="View Job Card">
-    <i data-lucide="eye"></i>
-</a>
+                                    class="btn btn-sm btn-outline-secondary rounded-circle btn-action-icon"
+                                    title="View Job Card" aria-label="View Job Card">
+                                    <i data-lucide="eye"></i>
+                                </a>
                             </div>
                         </div>
                         <?php endforeach; ?>

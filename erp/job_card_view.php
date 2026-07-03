@@ -138,6 +138,88 @@ function jcvCanUpdateStep(
     return false;
 }
 
+function jcvPreviousStepStatus(mysqli $conn, int $jobId, int $trackingId): ?array
+{
+    if ($jobId <= 0 || $trackingId <= 0 || !jcvTableExists($conn, 'job_tracking')) {
+        return null;
+    }
+
+    /*
+     | Return the first unfinished previous stage in the same order shown on the page.
+     | Earlier logic checked only one immediate previous row. If workflow sort orders were
+     | duplicate or mismatched, a later stage could still open while an earlier stage was
+     | in_progress/pending. This checks every previous row before the current tracking row.
+     */
+    try {
+        $join = jcvTableExists($conn, 'workflow_steps')
+            ? 'LEFT JOIN workflow_steps ws ON ws.id = jt.workflow_step_id'
+            : '';
+
+        $select = jcvTableExists($conn, 'workflow_steps')
+            ? 'ws.step_name, ws.sort_order'
+            : 'NULL AS step_name, jt.id AS sort_order';
+
+        $sort = jcvTableExists($conn, 'workflow_steps')
+            ? 'ORDER BY COALESCE(ws.sort_order, jt.id) ASC, jt.id ASC'
+            : 'ORDER BY jt.id ASC';
+
+        $stmt = $conn->prepare("
+            SELECT
+                jt.id,
+                jt.status,
+                jt.workflow_step_id,
+                {$select}
+            FROM job_tracking jt
+            {$join}
+            WHERE jt.job_card_id = ?
+            {$sort}
+        ");
+        $stmt->bind_param('i', $jobId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        $rows = [];
+        while ($row = $res->fetch_assoc()) {
+            $rows[] = $row;
+        }
+
+        $stmt->close();
+
+        $currentIndex = null;
+        foreach ($rows as $index => $row) {
+            if ((int)($row['id'] ?? 0) === $trackingId) {
+                $currentIndex = $index;
+                break;
+            }
+        }
+
+        if ($currentIndex === null || $currentIndex === 0) {
+            return null;
+        }
+
+        for ($i = 0; $i < $currentIndex; $i++) {
+            $status = strtolower(trim((string)($rows[$i]['status'] ?? 'pending')));
+            if (!in_array($status, ['completed', 'skipped'], true)) {
+                return $rows[$i];
+            }
+        }
+
+        return null;
+    } catch (Throwable $e) {
+        return [
+            'id' => 0,
+            'status' => 'pending',
+            'step_name' => 'Previous stage'
+        ];
+    }
+}
+
+function jcvPreviousStepAllowsUpdate(?array $previousStep): bool
+{
+    // jcvPreviousStepStatus now returns only a blocking unfinished previous stage.
+    return !$previousStep;
+}
+
 function jcvIsApprovalStage(array $step): bool
 {
     $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
@@ -597,6 +679,7 @@ try {
 $jobId = (int)($_GET['id'] ?? 0);
 $message = '';
 $messageType = 'danger';
+$toastTitle = 'Info';
 $job = null;
 $trackingRows = [];
 $trackingPhotosById = [];
@@ -605,6 +688,7 @@ $delayReasons = [];
 if (($_GET['msg'] ?? '') === 'status_updated') {
     $message = 'Job status updated successfully.';
     $messageType = 'success';
+    $toastTitle = 'Success';
 }
 
 try {
@@ -818,9 +902,18 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                     $oldStepStatus
                 );
 
-                if (!$canUpdateThisStep) {
+                $previousStep = jcvPreviousStepStatus($conn, $jobId, $trackingId);
+                $previousStepAllowed = jcvPreviousStepAllowsUpdate($previousStep);
+
+                if (!$previousStepAllowed) {
+                    $previousStepName = trim((string)($previousStep['step_name'] ?? 'Previous stage'));
+                    $message = $previousStepName . ' must be completed before updating this stage.';
+                    $messageType = 'danger';
+                    $toastTitle = 'Locked';
+                } elseif (!$canUpdateThisStep) {
                     $message = 'You do not have permission to update this stage.';
                     $messageType = 'danger';
+                    $toastTitle = 'Permission Denied';
                 } else {
                     $userId = (int)($_SESSION['user_id'] ?? 0);
 
@@ -1085,6 +1178,7 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
         } catch (Throwable $e) {
             $message = 'Status update failed: ' . $e->getMessage();
             $messageType = 'danger';
+            $toastTitle = 'Failed';
         }
     }
 }
@@ -1185,6 +1279,10 @@ $progressPercent = max(0, min(100, $progressPercent));
 
 $orderType = $job ? strtolower((string)($job['order_type'] ?? 'readymade')) : '';
 $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
+
+if ($message !== '' && $toastTitle === 'Info') {
+    $toastTitle = $messageType === 'success' ? 'Success' : ($messageType === 'warning' ? 'Warning' : 'Failed');
+}
 
 ?>
 <!doctype html>
@@ -1297,6 +1395,58 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
     .status-pill.danger {
         color: #991b1b;
         background: #fee2e2;
+    }
+
+
+    .status-pill.locked {
+        color: #475569;
+        background: #e2e8f0;
+    }
+
+    .toast-ui {
+        border: 0;
+        border-radius: 18px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
+        overflow: hidden;
+        min-width: 320px;
+        max-width: 420px;
+    }
+
+    .toast-ui.success {
+        background: #dcfce7;
+        color: #14532d;
+    }
+
+    .toast-ui.danger {
+        background: #fee2e2;
+        color: #7f1d1d;
+    }
+
+    .toast-ui.warning {
+        background: #fef3c7;
+        color: #78350f;
+    }
+
+    .toast-ui .toast-title {
+        font-size: 14px;
+        font-weight: 900;
+        margin-bottom: 2px;
+    }
+
+    .toast-ui .toast-message {
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.45;
+    }
+
+    .stage-lock-note {
+        color: #64748b;
+        background: #f1f5f9;
+        border: 1px solid #e2e8f0;
+        border-radius: 999px;
+        padding: 7px 12px;
+        font-size: 11px;
+        font-weight: 900;
     }
 
     .progress-wrap {
@@ -1638,8 +1788,18 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                 </div>
 
                 <?php if ($message !== ''): ?>
-                <div class="alert alert-<?= e($messageType === 'success' ? 'success' : 'danger') ?> rounded-4 fw-bold">
-                    <?= e($message) ?>
+                <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 12000">
+                    <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive"
+                        aria-atomic="true" data-bs-delay="4200">
+                        <div class="d-flex">
+                            <div class="toast-body">
+                                <div class="toast-title"><?= e($toastTitle ?: ($messageType === 'success' ? 'Success' : 'Failed')) ?></div>
+                                <div class="toast-message"><?= e($message) ?></div>
+                            </div>
+                            <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
+                                aria-label="Close"></button>
+                        </div>
+                    </div>
                 </div>
                 <?php endif; ?>
 
@@ -1835,6 +1995,11 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                 $canUpdateJob,
                                 $stepStatus
                             );
+                            $previousStep = jcvPreviousStepStatus($conn, $jobId, (int)$step['id']);
+                            $previousStepAllowed = jcvPreviousStepAllowsUpdate($previousStep);
+                            $canOpenUpdateForm = $canUpdateThisStep && $previousStepAllowed;
+                            $previousStepName = trim((string)($previousStep['step_name'] ?? 'Previous stage'));
+                            $previousStepStatus = strtolower(trim((string)($previousStep['status'] ?? '')));
                             $stageWasDelayed = (int)($step['is_delayed'] ?? 0) === 1
                                 || !empty($step['delay_started_at'])
                                 || !empty($step['delay_reason_id'])
@@ -1865,12 +2030,18 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                     <span class="status-pill danger">Delayed History</span>
                                     <?php endif; ?>
 
-                                    <?php if ($canUpdateThisStep): ?>
+                                    <?php if ($canOpenUpdateForm): ?>
                                     <button type="button"
                                         class="btn btn-sm btn-primary rounded-pill px-3 fw-bold"
                                         data-bs-toggle="collapse"
                                         data-bs-target="#updateStage<?= (int)$step['id'] ?>">
                                         Update Status
+                                    </button>
+                                    <?php elseif ($canUpdateThisStep && !$previousStepAllowed): ?>
+                                    <button type="button"
+                                        class="btn btn-sm btn-outline-secondary rounded-pill px-3 fw-bold js-locked-stage"
+                                        data-message="<?= e($previousStepName . ' must be completed before updating this stage.') ?>">
+                                        Locked
                                     </button>
                                     <?php endif; ?>
                                 </div>
@@ -1904,6 +2075,14 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                         <strong><?= e(jcvDateTime($step['actual_completed_at'] ?? null)) ?></strong>
                                     </div>
                                 </div>
+
+                                <?php if ($canUpdateThisStep && !$previousStepAllowed): ?>
+                                <div class="col-12">
+                                    <span class="stage-lock-note">
+                                        <?= e($previousStepName) ?> must be completed before this stage can be updated.
+                                    </span>
+                                </div>
+                                <?php endif; ?>
 
                                 <?php if ($stageWasDelayed): ?>
                                 <div class="col-12">
@@ -2060,7 +2239,7 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                                 </div>
                                 <?php endif; ?>
 
-                                <?php if ($canUpdateThisStep): ?>
+                                <?php if ($canOpenUpdateForm): ?>
                                 <div class="col-12">
                                     <div class="collapse" id="updateStage<?= (int)$step['id'] ?>">
                                         <form method="post" enctype="multipart/form-data" class="info-card mt-2 stage-update-form compact-update-form" data-approval-stage="<?= $isApprovalStage ? '1' : '0' ?>" data-approval-done="<?= $approvalDone ? '1' : '0' ?>" data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>" data-design-photo-required="<?= $requiresDesignPhotoUpload ? '1' : '0' ?>">
@@ -2200,6 +2379,43 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
 
     <script>
     (function() {
+        function showActionToast(message, type, title) {
+            type = type || 'success';
+            title = title || (type === 'success' ? 'Success' : 'Info');
+
+            let container = document.querySelector('.toast-container');
+            if (!container) {
+                container = document.createElement('div');
+                container.className = 'toast-container position-fixed top-0 end-0 p-3';
+                container.style.zIndex = '12000';
+                document.body.appendChild(container);
+            }
+
+            const toast = document.createElement('div');
+            toast.className = 'toast toast-ui ' + type;
+            toast.setAttribute('role', 'alert');
+            toast.setAttribute('aria-live', 'assertive');
+            toast.setAttribute('aria-atomic', 'true');
+            toast.setAttribute('data-bs-delay', '4200');
+            toast.innerHTML = '<div class="d-flex"><div class="toast-body"><div class="toast-title"></div><div class="toast-message"></div></div><button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button></div>';
+            toast.querySelector('.toast-title').textContent = title;
+            toast.querySelector('.toast-message').textContent = message;
+            container.appendChild(toast);
+
+            if (window.bootstrap && bootstrap.Toast) {
+                const instance = bootstrap.Toast.getOrCreateInstance(toast);
+                instance.show();
+                toast.addEventListener('hidden.bs.toast', function() { toast.remove(); });
+            } else {
+                setTimeout(function() { toast.remove(); }, 4200);
+            }
+        }
+
+        const pageToastEl = document.getElementById('pageToast');
+        if (pageToastEl && window.bootstrap && bootstrap.Toast) {
+            bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
+        }
+
         function refreshDelayFields(form) {
             const select = form.querySelector('.js-stage-status');
             const remark = form.querySelector('.js-remark');
@@ -2262,6 +2478,12 @@ $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
                     refreshDelayFields(form);
                 });
             }
+        });
+
+        document.querySelectorAll('.js-locked-stage').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                showActionToast(btn.dataset.message || 'Previous stage must be completed before updating this stage.', 'warning', 'Stage Locked');
+            });
         });
 
 

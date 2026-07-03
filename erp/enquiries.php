@@ -596,6 +596,13 @@ function enqSendWhatsappByApi(mysqli $conn, int $id): array
         ];
     }
 
+    /*
+     * IMPORTANT:
+     * Message body must come from whatsapp_templates table.
+     * Do not pass a direct message here, because each module uses its own template.
+     * Default enquiry template key is enquiry_completed to match existing master data.
+     * Change this key in DB if required by updating whatsapp_templates/template_key.
+     */
     return subhiksha_send_whatsapp($conn, [
         'mobile' => (string)($enquiry['mobile'] ?? ''),
         'template_key' => 'enquiry_completed',
@@ -603,7 +610,16 @@ function enqSendWhatsappByApi(mysqli $conn, int $id): array
             'customer_name' => (string)($enquiry['customer_name'] ?? 'Customer'),
             'enquiry_no' => (string)($enquiry['enquiry_no'] ?? '-'),
             'function_type' => (string)($enquiry['function_name'] ?? '-'),
+            'function_date' => !empty($enquiry['function_date']) ? date('d-m-Y', strtotime((string)$enquiry['function_date'])) : '-',
+            'venue' => (string)($enquiry['venue'] ?? '-'),
+            'address' => (string)($enquiry['address'] ?? '-'),
+            'enquiry_source' => (string)($enquiry['enquiry_source'] ?? '-'),
+            'status_name' => (string)($enquiry['status_name'] ?? '-'),
+            'mobile' => (string)($enquiry['mobile'] ?? ''),
             'order_type' => '-'
+        ],
+        'extra_payload' => [
+            'type' => 'text'
         ],
         'related_module' => 'Enquiries',
         'related_id' => $id,
@@ -1087,6 +1103,35 @@ if ($autoOpenWhatsappId > 0) {
         width: 100% !important;
     }
 
+    /* Select2 modal dropdown fix: keep dropdown below the field */
+    #recordModal .select2-container--open {
+        z-index: 13000 !important;
+    }
+
+    #recordModal .select2-dropdown {
+        z-index: 13000 !important;
+        border-radius: 14px !important;
+        box-shadow: 0 14px 38px rgba(15, 23, 42, .18) !important;
+    }
+
+    #recordModal .select2-dropdown--above,
+    #recordModal .select2-dropdown--below {
+        margin-top: 6px !important;
+        border-top-left-radius: 14px !important;
+        border-top-right-radius: 14px !important;
+        border-bottom-left-radius: 14px !important;
+        border-bottom-right-radius: 14px !important;
+    }
+
+    #recordModal .select2-search--dropdown {
+        padding: 8px !important;
+    }
+
+    #recordModal .select2-results__options {
+        max-height: 210px !important;
+        overflow-y: auto !important;
+    }
+
     @media(max-width:767.98px) {
         .module-page .page-head {
             padding: 18px;
@@ -1131,7 +1176,7 @@ if ($autoOpenWhatsappId > 0) {
             border-radius: 20px !important;
         }
 
-        .mobile-card > .d-flex.justify-content-between {
+        .mobile-card>.d-flex.justify-content-between {
             align-items: flex-start !important;
             gap: 12px !important;
         }
@@ -1241,6 +1286,7 @@ if ($autoOpenWhatsappId > 0) {
     }
 
     @media(max-width:767.98px) {
+
         .mobile-card-actions .btn-action-icon,
         .mobile-card-actions .btn-delete-icon,
         .proforma-mobile-card .proforma-mobile-actions .btn-action-icon,
@@ -1262,7 +1308,6 @@ if ($autoOpenWhatsappId > 0) {
             height: 18px !important;
         }
     }
-
     </style>
 </head>
 
@@ -1430,13 +1475,14 @@ if ($autoOpenWhatsappId > 0) {
                                             data-enquiry-status-id="<?= e($row['enquiry_status_id']) ?>"
                                             data-assigned-sales-user-id="<?= e($row['assigned_sales_user_id']) ?>"
                                             data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
-                                            data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
+                                            data-remarks="<?= e($row['remarks']) ?>"><i
+                                                data-lucide="pencil"></i></button>
                                         <?php endif; ?>
 
                                         <?php if ($canSendWhatsapp): ?>
                                         <?php if ($canSendWhatsapp): ?>
-                                <?= enqWhatsappPreviewButton($row) ?>
-                                <?php endif; ?>
+                                        <?= enqWhatsappPreviewButton($row) ?>
+                                        <?php endif; ?>
                                         <?php endif; ?>
 
                                         <?php if (!$closed && $canDelete): ?>
@@ -1446,7 +1492,8 @@ if ($autoOpenWhatsappId > 0) {
                                             <input type="hidden" name="action" value="close_record">
                                             <input type="hidden" name="id" value="<?= e($row['id']) ?>">
                                             <button title="Close" aria-label="Close" type="submit"
-                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i data-lucide="x-circle"></i></button>
+                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i
+                                                    data-lucide="x-circle"></i></button>
                                         </form>
                                         <?php endif; ?>
                                     </td>
@@ -1520,7 +1567,9 @@ if ($autoOpenWhatsappId > 0) {
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="close_record">
                                     <input type="hidden" name="id" value="<?= e($row['id']) ?>">
-                                    <button title="Close" aria-label="Close" type="submit" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i data-lucide="x-circle"></i></button>
+                                    <button title="Close" aria-label="Close" type="submit"
+                                        class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i
+                                            data-lucide="x-circle"></i></button>
                                 </form>
                                 <?php endif; ?>
                             </div>
@@ -1774,8 +1823,8 @@ if ($autoOpenWhatsappId > 0) {
                             data-bs-dismiss="modal">
                             Cancel
                         </button>
-                        <button type="button" class="btn btn-whatsapp-icon btn-action-icon rounded-circle" id="waSendBtn"
-                            title="Send WhatsApp">
+                        <button type="button" class="btn btn-whatsapp-icon btn-action-icon rounded-circle"
+                            id="waSendBtn" title="Send WhatsApp">
                             <?= enqWhatsappSvg() ?>
                         </button>
                     </div>
@@ -1827,6 +1876,7 @@ if ($autoOpenWhatsappId > 0) {
             `;
 
             document.body.appendChild(wrap);
+
 
             const toastEl = document.getElementById('dynamicActionToast');
             if (window.bootstrap && bootstrap.Toast && toastEl) {
@@ -1976,6 +2026,40 @@ if ($autoOpenWhatsappId > 0) {
         }
 
 
+        function forceSelect2DropdownBelow($select) {
+            if (!window.jQuery || !$select || !$select.length) return;
+
+            window.setTimeout(function() {
+                const $modal = $select.closest('.modal');
+                const $parent = $modal.length ? $modal : $(document.body);
+                const $selection = $select.next('.select2-container');
+                const $dropdownContainer = $('.select2-container--open').last();
+                const $dropdown = $dropdownContainer.find('.select2-dropdown');
+
+                if (!$selection.length || !$dropdownContainer.length || !$dropdown.length) return;
+
+                const selectionRect = $selection[0].getBoundingClientRect();
+                const parentRect = ($parent[0] && $parent[0] !== document.body) ?
+                    $parent[0].getBoundingClientRect() : {
+                        top: 0,
+                        left: 0
+                    };
+
+                $selection.removeClass('select2-container--above').addClass('select2-container--below');
+                $dropdown.removeClass('select2-dropdown--above').addClass('select2-dropdown--below');
+
+                $dropdownContainer.css({
+                    top: (selectionRect.bottom - parentRect.top + 6) + 'px',
+                    left: (selectionRect.left - parentRect.left) + 'px',
+                    width: selectionRect.width + 'px'
+                });
+
+                $dropdown.css({
+                    width: selectionRect.width + 'px'
+                });
+            }, 0);
+        }
+
         function initSelect2AutoType(context) {
             if (!window.jQuery || !$.fn.select2) return;
 
@@ -1998,6 +2082,7 @@ if ($autoOpenWhatsappId > 0) {
                         .text() || 'Search and select',
                     allowClear: false,
                     tags: String($select.data('tags')) === 'true',
+                    dropdownAutoWidth: false,
                     createTag: function(params) {
                         const term = $.trim(params.term);
                         if (term === '') return null;
@@ -2008,6 +2093,14 @@ if ($autoOpenWhatsappId > 0) {
                             newTag: true
                         };
                     }
+                });
+
+                $select.off('select2:open.enqDropdownBelow').on('select2:open.enqDropdownBelow',
+            function() {
+                    forceSelect2DropdownBelow($select);
+                    window.setTimeout(function() {
+                        forceSelect2DropdownBelow($select);
+                    }, 60);
                 });
             });
         }
@@ -2084,8 +2177,23 @@ if ($autoOpenWhatsappId > 0) {
                 })
                 .then(response => response.json())
                 .then(data => {
-                    showToast(data.message || (data.status ? 'Saved successfully.' : 'Save failed.'),
-                        data.status ? 'success' : 'danger', data.status ? 'Success' : 'Failed');
+                    let toastType = data.status ? 'success' : 'danger';
+                    let toastTitle = data.status ? 'Success' : 'Failed';
+
+                    let toastMessage = data.message || (data.status ? 'Saved successfully.' :
+                        'Save failed.');
+
+                    if (data.status && data.whatsapp_status === false) {
+                        toastType = 'warning';
+                        toastTitle = 'Saved / WhatsApp Failed';
+
+                        if (data.whatsapp_message && !String(toastMessage).includes(String(data
+                                .whatsapp_message))) {
+                            toastMessage += ' Reason: ' + data.whatsapp_message;
+                        }
+                    }
+
+                    showToast(toastMessage, toastType, toastTitle);
 
                     if (data.open_whatsapp_url) {
                         setTimeout(() => window.open(data.open_whatsapp_url, '_blank', 'noopener'),
@@ -2093,7 +2201,7 @@ if ($autoOpenWhatsappId > 0) {
                     }
 
                     if (data.status) {
-                        setTimeout(() => window.location.reload(), 900);
+                        setTimeout(() => window.location.reload(), 1000);
                     }
                 })
                 .catch(() => showToast('API request failed.', 'danger', 'Failed'));

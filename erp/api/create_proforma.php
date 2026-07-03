@@ -15,13 +15,30 @@ header('Content-Type: application/json; charset=utf-8');
 require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/auth.php';
 
-if (function_exists('require_permission')) {
-    require_permission($conn, 'can_create', 'proforma_bills.php');
-}
-
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
+
+$currentPage = 'proforma_bills.php';
+$incomingAction = trim((string)($_POST['action'] ?? 'create_proforma'));
+$incomingEditId = (int)filter_var($_POST['id'] ?? 0, FILTER_SANITIZE_NUMBER_INT);
+$isUpdateRequest = $incomingEditId > 0 && $incomingAction === 'update_proforma';
+
+if (function_exists('require_permission')) {
+    if ($isUpdateRequest) {
+        $canEditThisPage = function_exists('can_edit') ? can_edit($conn, $currentPage) : false;
+        $canUpdateThisPage = function_exists('can_update') ? can_update($conn, $currentPage) : false;
+        if (!$canEditThisPage && !$canUpdateThisPage) {
+            require_permission($conn, 'can_edit', $currentPage);
+        }
+    } else {
+        require_permission($conn, 'can_create', $currentPage);
+    }
+}
+
+$canCreateProforma = function_exists('can_create') ? can_create($conn, $currentPage) : true;
+$canEditProforma = function_exists('can_edit') ? can_edit($conn, $currentPage) : true;
+$canUpdateProforma = function_exists('can_update') ? can_update($conn, $currentPage) : true;
 
 if (!function_exists('e')) {
     function e($value): string
@@ -85,6 +102,68 @@ function cpDateOrNull(string $value): ?string
 function cpTimeOrNull(string $value): ?string
 {
     return $value !== '' ? $value : null;
+}
+
+
+function cpPostedPlannedDate($value): ?string
+{
+    $value = trim((string)$value);
+    if ($value === '') {
+        return null;
+    }
+
+    return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) ? $value : null;
+}
+
+function cpUpdateExistingPlannedTrackingDates(mysqli $conn, int $proformaId): void
+{
+    if (
+        $proformaId <= 0 ||
+        empty($_POST['planned_step']) ||
+        !is_array($_POST['planned_step']) ||
+        !cpTableExists($conn, 'job_cards') ||
+        !cpTableExists($conn, 'job_tracking')
+    ) {
+        return;
+    }
+
+    try {
+        $stmt = $conn->prepare("SELECT id FROM job_cards WHERE proforma_bill_id = ? ORDER BY id DESC LIMIT 1");
+        $stmt->bind_param('i', $proformaId);
+        $stmt->execute();
+        $jobRow = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        $jobCardId = !empty($jobRow['id']) ? (int)$jobRow['id'] : 0;
+        if ($jobCardId <= 0) {
+            return;
+        }
+
+        $stmt = $conn->prepare("
+            UPDATE job_tracking
+            SET planned_start_date = ?,
+                planned_completion_date = ?,
+                updated_at = NOW()
+            WHERE job_card_id = ?
+              AND workflow_step_id = ?
+        ");
+
+        foreach ($_POST['planned_step'] as $stepIdRaw => $stepDates) {
+            $stepId = cpInt($stepIdRaw);
+            if ($stepId <= 0 || !is_array($stepDates)) {
+                continue;
+            }
+
+            $plannedStart = cpPostedPlannedDate($stepDates['start'] ?? '');
+            $plannedCompletion = cpPostedPlannedDate($stepDates['completion'] ?? '');
+            $stmt->bind_param('ssii', $plannedStart, $plannedCompletion, $jobCardId, $stepId);
+            $stmt->execute();
+        }
+
+        $stmt->close();
+    } catch (Throwable $e) {
+        // Planned-date sync must not block the main proforma update.
+    }
 }
 
 function cpNextNo(mysqli $conn, string $table, string $column, string $prefix): string
@@ -239,6 +318,50 @@ function cpFetchAll(mysqli $conn, string $sql): array
     return $rows;
 }
 
+function cpFetchProformaForEdit(mysqli $conn, int $id): ?array
+{
+    if ($id <= 0 || !cpTableExists($conn, 'proforma_bills')) {
+        return null;
+    }
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT
+                pb.*,
+                pbi.id AS item_id,
+                pbi.product_id AS item_product_id,
+                pbi.item_name,
+                pbi.description AS item_description,
+                pbi.qty AS item_qty,
+                pbi.rate AS item_rate,
+                pbi.amount AS item_amount,
+                pbi.printing_type_id AS item_printing_type_id,
+                pbi.printing_sub_type_id AS item_printing_sub_type_id,
+                pbi.finishing_required AS item_finishing_required,
+                pbi.size_text AS item_size_text,
+                pbi.gsm_thickness AS item_gsm_thickness,
+                pbi.lamination_required AS item_lamination_required,
+                pbi.lamination_type AS item_lamination_type,
+                pbi.printing_side AS item_printing_side,
+                pbi.screening_type AS item_screening_type
+            FROM proforma_bills pb
+            LEFT JOIN proforma_bill_items pbi
+                ON pbi.proforma_bill_id = pb.id
+            WHERE pb.id = ?
+            ORDER BY pbi.sort_order ASC, pbi.id ASC
+            LIMIT 1
+        " );
+        $stmt->bind_param('i', $id);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
 if (empty($_SESSION['create_proforma_csrf'])) {
     $_SESSION['create_proforma_csrf'] = bin2hex(random_bytes(32));
 }
@@ -335,17 +458,13 @@ function cpGetProformaWhatsappRow(mysqli $conn, int $id): ?array
                 pbi.printing_side,
                 pbi.screening_type,
                 pt.printing_name,
-                pst.sub_type_name,
-                jc.id AS job_card_id,
-                jc.job_card_no,
-                jc.tracking_token
+                pst.sub_type_name
             FROM proforma_bills pb
             LEFT JOIN function_types ft ON ft.id = pb.function_type_id
             LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
             LEFT JOIN proforma_bill_items pbi ON pbi.proforma_bill_id = pb.id
             LEFT JOIN printing_types pt ON pt.id = pbi.printing_type_id
             LEFT JOIN printing_sub_types pst ON pst.id = pbi.printing_sub_type_id
-            LEFT JOIN job_cards jc ON jc.proforma_bill_id = pb.id
             WHERE pb.id = ?
             ORDER BY pbi.sort_order ASC, pbi.id ASC
             LIMIT 1
@@ -361,71 +480,10 @@ function cpGetProformaWhatsappRow(mysqli $conn, int $id): ?array
     }
 }
 
-
-function cpBaseUrl(mysqli $conn): string
-{
-    $setting = '';
-    try {
-        if (cpTableExists($conn, 'system_settings')) {
-            $stmt = $conn->prepare("SELECT setting_value FROM system_settings WHERE setting_key IN ('site_url','base_url','app_url') AND TRIM(setting_value) <> '' ORDER BY FIELD(setting_key,'site_url','base_url','app_url') LIMIT 1");
-            $stmt->execute();
-            $row = $stmt->get_result()->fetch_assoc();
-            $stmt->close();
-            $setting = trim((string)($row['setting_value'] ?? ''));
-        }
-    } catch (Throwable $e) {}
-
-    if ($setting !== '') return rtrim($setting, '/');
-
-    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') == 443);
-    $scheme = $https ? 'https' : 'http';
-    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-    $dir = str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? ''));
-    $dir = rtrim($dir, '/');
-    if (substr($dir, -4) === '/api') {
-        $dir = substr($dir, 0, -4);
-    }
-    if ($dir === '/' || $dir === '.') $dir = '';
-
-    return rtrim($scheme . '://' . $host . $dir, '/');
-}
-
-function cpCustomerTrackingUrl(mysqli $conn, array $row): string
-{
-    $token = trim((string)($row['tracking_token'] ?? ''));
-    if ($token === '') return '';
-    return cpBaseUrl($conn) . '/customer_tracking.php?token=' . rawurlencode($token);
-}
-
-function cpEnsureCustomerTrackingLinksTable(mysqli $conn): void
-{
-    $conn->query("
-        CREATE TABLE IF NOT EXISTS customer_tracking_links (
-            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-            job_card_id BIGINT UNSIGNED NOT NULL,
-            tracking_token VARCHAR(120) NOT NULL,
-            mobile VARCHAR(30) DEFAULT NULL,
-            is_active TINYINT(1) NOT NULL DEFAULT 1,
-            expires_at DATETIME DEFAULT NULL,
-            created_by BIGINT UNSIGNED DEFAULT NULL,
-            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
-            PRIMARY KEY (id),
-            UNIQUE KEY uq_tracking_token (tracking_token),
-            KEY idx_job_card_id (job_card_id),
-            KEY idx_mobile (mobile),
-            KEY idx_active_expiry (is_active, expires_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    ");
-}
-
 function cpWhatsappMessage(array $row): string
 {
-    global $conn;
-
     $customerName = trim((string)($row['customer_name'] ?? 'Customer'));
     $proformaNo = trim((string)($row['proforma_no'] ?? '-'));
-    $jobCardNo = trim((string)($row['job_card_no'] ?? '-'));
     $orderType = ucfirst((string)($row['order_type'] ?? '-'));
     $productName = trim((string)($row['item_name'] ?? '-'));
     $qty = number_format((float)($row['total_qty'] ?? 0), 0);
@@ -433,23 +491,19 @@ function cpWhatsappMessage(array $row): string
     $advance = '₹' . number_format((float)($row['advance_amount'] ?? 0), 2);
     $balance = '₹' . number_format((float)($row['balance_amount'] ?? 0), 2);
     $delivery = !empty($row['delivery_date']) ? date('d-m-Y', strtotime($row['delivery_date'])) : '-';
-    $trackingLink = ($conn instanceof mysqli) ? cpCustomerTrackingUrl($conn, $row) : '';
 
     return "Hi {$customerName},\n\n"
         . "Greetings from Subhiksha Cards.\n\n"
         . "Your proforma bill / sales order has been created successfully.\n\n"
         . "Proforma No: {$proformaNo}\n"
-        . "Job Card No: {$jobCardNo}\n"
         . "Order Type: {$orderType}\n"
         . "Product: {$productName}\n"
         . "Quantity: {$qty}\n"
         . "Final Amount: {$finalAmount}\n"
         . "Advance Paid: {$advance}\n"
         . "Balance Amount: {$balance}\n"
-        . "Expected Delivery: {$delivery}\n\n"
-        . "Track your order live here:\n"
-        . ($trackingLink !== '' ? $trackingLink : 'Tracking link will be shared shortly.') . "\n\n"
-        . "The tracking page shows each production stage one by one like shipment tracking.\n\n"
+        . "Delivery Date: {$delivery}\n\n"
+        . "Our team will proceed with the next process and keep you updated.\n\n"
         . "Thank you,\n"
         . "Subhiksha Cards Team";
 }
@@ -496,7 +550,7 @@ function cpWhatsappLogManual(mysqli $conn, int $id): array
         $relatedModule = 'Proforma Bills';
         $relatedId = $id;
         $customerId = !empty($row['customer_id']) ? (int)$row['customer_id'] : null;
-        $jobCardId = !empty($row['job_card_id']) ? (int)$row['job_card_id'] : null;
+        $jobCardId = null;
         $messageBody = cpWhatsappMessage($row);
         $status = 'sent';
         $providerResponse = json_encode([
@@ -569,11 +623,21 @@ function cpSendWhatsappByApi(mysqli $conn, int $id): array
 
     return subhiksha_send_whatsapp($conn, [
         'mobile' => (string)($row['mobile'] ?? ''),
-        'message' => cpWhatsappMessage($row),
+        'template_key' => 'proforma_created',
+        'variables' => [
+            'customer_name' => (string)($row['customer_name'] ?? 'Customer'),
+            'proforma_no' => (string)($row['proforma_no'] ?? '-'),
+            'order_type' => ucfirst((string)($row['order_type'] ?? '-')),
+            'product_name' => (string)($row['item_name'] ?? '-'),
+            'quantity' => number_format((float)($row['total_qty'] ?? 0), 0),
+            'final_amount' => '₹' . number_format((float)($row['final_amount'] ?? 0), 2),
+            'advance_amount' => '₹' . number_format((float)($row['advance_amount'] ?? 0), 2),
+            'balance_amount' => '₹' . number_format((float)($row['balance_amount'] ?? 0), 2),
+            'delivery_date' => !empty($row['delivery_date']) ? date('d-m-Y', strtotime($row['delivery_date'])) : '-'
+        ],
         'related_module' => 'Proforma Bills',
         'related_id' => $id,
-        'customer_id' => $row['customer_id'] ?? null,
-        'job_card_id' => $row['job_card_id'] ?? null
+        'customer_id' => $row['customer_id'] ?? null
     ]);
 }
 
@@ -642,6 +706,27 @@ try {
             }
         }
 
+        $postedEditId = cpInt($_POST['id'] ?? 0);
+        $action = cpPost('action', 'create_proforma');
+        $isUpdateAction = $postedEditId > 0 && $action === 'update_proforma';
+
+        if ($isUpdateAction && !$canEditProforma && !$canUpdateProforma) {
+            throw new RuntimeException('You do not have permission to edit proforma bills.');
+        }
+        if (!$isUpdateAction && !$canCreateProforma) {
+            throw new RuntimeException('You do not have permission to create proforma bills.');
+        }
+
+        $existingEditBill = null;
+        $existingItemId = 0;
+        if ($isUpdateAction) {
+            $existingEditBill = cpFetchProformaForEdit($conn, $postedEditId);
+            if (!$existingEditBill) {
+                throw new RuntimeException('Proforma bill not found for editing.');
+            }
+            $existingItemId = (int)($existingEditBill['item_id'] ?? 0);
+        }
+
         $quotationId = cpInt($_POST['quotation_id'] ?? 0);
         $orderType = cpPost('order_type');
         $customerName = cpPost('customer_name');
@@ -651,6 +736,7 @@ try {
         $billingAddress = cpPost('billing_address');
         $gstNumber = cpPost('gst_number');
         $functionTypeId = cpInt($_POST['function_type_id'] ?? 0);
+        $postedProformaStatusId = cpInt($_POST['proforma_status_id'] ?? 0);
         $brideName = cpPost('bride_name');
         $groomName = cpPost('groom_name');
         $venue = cpPost('venue');
@@ -676,8 +762,8 @@ try {
         $laminationType = cpPost('lamination_type');
         $printingSide = cpPost('printing_side');
         $screeningType = cpPost('screening_type');
-        $autoCreateJobCard = 1; // Job card must always be created after saving proforma bill.
-        $createTrackingLink = 1; // Always create customer tracking link after proforma/job card creation.
+        $autoCreateJobCard = isset($_POST['auto_create_job_card']) ? 1 : 0;
+        $createTrackingLink = isset($_POST['create_tracking_link']) ? 1 : 0;
 
         if ($autoCreateJobCard) {
             foreach (['job_cards', 'job_card_items', 'job_tracking'] as $requiredTable) {
@@ -716,6 +802,20 @@ try {
         }
         if (!$laminationRequired) $laminationType = '';
 
+        if ($postedProformaStatusId > 0) {
+            if (!cpTableExists($conn, 'proforma_statuses')) {
+                throw new RuntimeException('Proforma status table is missing.');
+            }
+            $stmt = $conn->prepare("SELECT id FROM proforma_statuses WHERE id = ? AND is_active = 1 LIMIT 1");
+            $stmt->bind_param('i', $postedProformaStatusId);
+            $stmt->execute();
+            $statusRow = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if (!$statusRow) {
+                throw new RuntimeException('Selected proforma status is invalid.');
+            }
+        }
+
         $subTotal = round($qty * $rate, 2);
         if ($discountAmount < 0) throw new RuntimeException('Discount cannot be negative.');
         if ($discountAmount > $subTotal) throw new RuntimeException('Discount cannot be greater than subtotal.');
@@ -740,7 +840,9 @@ try {
         $billingMobile = $billingMobile !== '' ? $billingMobile : $mobile;
         $customerId = cpCustomerId($conn, $customerName, $mobile, $billingAddress, $gstNumber);
         $userId = (int)($_SESSION['user_id'] ?? 0);
-        $proformaStatusId = cpStatusId($conn, 'proforma_statuses', ['job_card_created', 'confirmed', 'draft']);
+        $proformaStatusId = $postedProformaStatusId > 0
+            ? $postedProformaStatusId
+            : cpStatusId($conn, 'proforma_statuses', ['job_card_created', 'confirmed', 'draft']);
         $jobStatusId = cpStatusId($conn, 'job_card_statuses', ['in_progress', 'pending']);
         $quotationConvertedStatusId = cpStatusId($conn, 'quotation_statuses', ['converted_to_proforma_bill']);
         $proformaNo = cpNextNo($conn, 'proforma_bills', 'proforma_no', 'SC-PRO');
@@ -757,6 +859,171 @@ try {
         $screeningTypeValue = $screeningType !== '' ? $screeningType : null;
 
         $conn->begin_transaction();
+
+        if ($isUpdateAction) {
+            $proformaId = $postedEditId;
+            $proformaNo = (string)($existingEditBill['proforma_no'] ?? '');
+
+            $stmt = $conn->prepare("
+                UPDATE proforma_bills
+                SET
+                    quotation_id = ?,
+                    customer_id = ?,
+                    function_type_id = ?,
+                    proforma_status_id = ?,
+                    order_type = ?,
+                    customer_name = ?,
+                    mobile = ?,
+                    billing_name = ?,
+                    billing_mobile = ?,
+                    billing_address = ?,
+                    gst_number = ?,
+                    bride_name = ?,
+                    groom_name = ?,
+                    venue = ?,
+                    function_date = ?,
+                    function_time = ?,
+                    total_qty = ?,
+                    sub_total = ?,
+                    discount_amount = ?,
+                    final_amount = ?,
+                    advance_amount = ?,
+                    balance_amount = ?,
+                    delivery_date = ?,
+                    remarks = ?,
+                    updated_by = ?,
+                    updated_at = NOW()
+                WHERE id = ?
+            " );
+            $stmt->bind_param(
+                'iiiissssssssssssddddddssii',
+                $quotationIdValue,
+                $customerIdValue,
+                $functionTypeValue,
+                $proformaStatusId,
+                $orderType,
+                $customerName,
+                $mobile,
+                $billingName,
+                $billingMobile,
+                $billingAddress,
+                $gstNumber,
+                $brideName,
+                $groomName,
+                $venue,
+                $functionDate,
+                $functionTime,
+                $qty,
+                $subTotal,
+                $discountAmount,
+                $finalAmount,
+                $advanceAmount,
+                $balanceAmount,
+                $deliveryDate,
+                $remarks,
+                $userId,
+                $proformaId
+            );
+            $stmt->execute();
+            $stmt->close();
+
+            if ($existingItemId > 0) {
+                $stmt = $conn->prepare("
+                    UPDATE proforma_bill_items
+                    SET
+                        product_id = ?,
+                        item_name = ?,
+                        description = ?,
+                        qty = ?,
+                        rate = ?,
+                        amount = ?,
+                        printing_type_id = ?,
+                        printing_sub_type_id = ?,
+                        finishing_required = ?,
+                        size_text = ?,
+                        gsm_thickness = ?,
+                        lamination_required = ?,
+                        lamination_type = ?,
+                        printing_side = ?,
+                        screening_type = ?
+                    WHERE id = ?
+                " );
+                $stmt->bind_param(
+                    'issdddiiississsi',
+                    $productIdValue,
+                    $productName,
+                    $description,
+                    $qty,
+                    $rate,
+                    $subTotal,
+                    $printingTypeId,
+                    $printingSubTypeValue,
+                    $finishingRequired,
+                    $sizeText,
+                    $gsmThickness,
+                    $laminationRequired,
+                    $laminationTypeValue,
+                    $printingSideValue,
+                    $screeningTypeValue,
+                    $existingItemId
+                );
+                $stmt->execute();
+                $stmt->close();
+            } else {
+                $stmt = $conn->prepare("INSERT INTO proforma_bill_items (proforma_bill_id, product_id, item_name, description, qty, rate, amount, printing_type_id, printing_sub_type_id, finishing_required, size_text, gsm_thickness, lamination_required, lamination_type, printing_side, screening_type, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())");
+                $stmt->bind_param('iissdddiiississs', $proformaId, $productIdValue, $productName, $description, $qty, $rate, $subTotal, $printingTypeId, $printingSubTypeValue, $finishingRequired, $sizeText, $gsmThickness, $laminationRequired, $laminationTypeValue, $printingSideValue, $screeningTypeValue);
+                $stmt->execute();
+                $stmt->close();
+            }
+
+            if (cpTableExists($conn, 'job_cards')) {
+                try {
+                    $stmt = $conn->prepare("
+                        UPDATE job_cards
+                        SET
+                            customer_id = ?,
+                            order_type = ?,
+                            customer_name = ?,
+                            mobile = ?,
+                            function_type_id = ?,
+                            product_id = ?,
+                            product_name = ?,
+                            printing_type_id = ?,
+                            printing_sub_type_id = ?,
+                            final_amount = ?,
+                            advance_amount = ?,
+                            balance_amount = ?,
+                            delivery_date = ?,
+                            updated_at = NOW()
+                        WHERE proforma_bill_id = ?
+                    " );
+                    $stmt->bind_param('isssiisiidddsi', $customerIdValue, $orderType, $customerName, $mobile, $functionTypeValue, $productIdValue, $productName, $printingTypeId, $printingSubTypeValue, $finalAmount, $advanceAmount, $balanceAmount, $deliveryDate, $proformaId);
+                    $stmt->execute();
+                    $stmt->close();
+                } catch (Throwable $ignore) {
+                    // Keep proforma edit working even if linked job card sync is not possible.
+                }
+            }
+
+            cpUpdateExistingPlannedTrackingDates($conn, $proformaId);
+
+            cpLog($conn, 'update_proforma_bill', 'Proforma Bills', 'proforma_bills', $proformaId, 'Proforma bill updated.', ['proforma_no' => $proformaNo, 'final_amount' => $finalAmount]);
+
+            $conn->commit();
+
+            $_SESSION['create_proforma_csrf'] = bin2hex(random_bytes(32));
+
+            cpApiResponse(true, 'Proforma bill updated successfully.', [
+                'proforma_id' => $proformaId,
+                'proforma_no' => $proformaNo,
+                'job_card_no' => '',
+                'redirect_url' => 'proforma_bills.php?msg=updated&proforma_no=' . urlencode($proformaNo),
+                'whatsapp_mode' => 'none',
+                'whatsapp_success' => false,
+                'whatsapp_message' => '',
+                'open_whatsapp_url' => ''
+            ]);
+        }
 
         $stmt = $conn->prepare("INSERT INTO proforma_bills (proforma_no, quotation_id, enquiry_id, customer_id, function_type_id, order_type, customer_name, mobile, billing_name, billing_mobile, billing_address, gst_number, bride_name, groom_name, venue, function_date, function_time, proforma_status_id, total_qty, sub_total, discount_amount, final_amount, advance_amount, balance_amount, delivery_date, remarks, job_card_created, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())");
         $stmt->bind_param('siiiissssssssssssiddddddssii', $proformaNo, $quotationIdValue, $enquiryIdValue, $customerIdValue, $functionTypeValue, $orderType, $customerName, $mobile, $billingName, $billingMobile, $billingAddress, $gstNumber, $brideName, $groomName, $venue, $functionDate, $functionTime, $proformaStatusId, $qty, $subTotal, $discountAmount, $finalAmount, $advanceAmount, $balanceAmount, $deliveryDate, $remarks, $autoCreateJobCard, $userId);
@@ -854,38 +1121,9 @@ try {
                 }
             }
 
-            if ($createTrackingLink) {
-                cpEnsureCustomerTrackingLinksTable($conn);
+            if ($createTrackingLink && cpTableExists($conn, 'customer_tracking_links')) {
                 $expiresAt = $deliveryDate ? date('Y-m-d 23:59:59', strtotime($deliveryDate . ' +15 days')) : null;
-                $trackingHasUpdatedAt = cpColumnExists($conn, 'customer_tracking_links', 'updated_at');
-
-                if ($trackingHasUpdatedAt) {
-                    $stmt = $conn->prepare("
-                        INSERT INTO customer_tracking_links
-                            (job_card_id, tracking_token, mobile, is_active, expires_at, created_by, created_at)
-                        VALUES
-                            (?, ?, ?, 1, ?, ?, NOW())
-                        ON DUPLICATE KEY UPDATE
-                            job_card_id = VALUES(job_card_id),
-                            mobile = VALUES(mobile),
-                            is_active = 1,
-                            expires_at = VALUES(expires_at),
-                            updated_at = NOW()
-                    ");
-                } else {
-                    $stmt = $conn->prepare("
-                        INSERT INTO customer_tracking_links
-                            (job_card_id, tracking_token, mobile, is_active, expires_at, created_by, created_at)
-                        VALUES
-                            (?, ?, ?, 1, ?, ?, NOW())
-                        ON DUPLICATE KEY UPDATE
-                            job_card_id = VALUES(job_card_id),
-                            mobile = VALUES(mobile),
-                            is_active = 1,
-                            expires_at = VALUES(expires_at)
-                    ");
-                }
-
+                $stmt = $conn->prepare("INSERT INTO customer_tracking_links (job_card_id, tracking_token, mobile, is_active, expires_at, created_by, created_at) VALUES (?, ?, ?, 1, ?, ?, NOW())");
                 $stmt->bind_param('isssi', $jobCardId, $trackingToken, $mobile, $expiresAt, $userId);
                 $stmt->execute();
                 $stmt->close();
