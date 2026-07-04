@@ -33,7 +33,7 @@ $permissionColumns = [
     'can_create'        => 'Create',
     'can_edit'          => 'Edit',
     'can_delete'        => 'Delete',
-    'can_update'        => 'Update',
+    'can_update'        => 'Update Status',
     'can_approve'       => 'Approve',
     'can_print'         => 'Print',
     'can_export'        => 'Export',
@@ -592,6 +592,8 @@ $rolePermissions = rp_get_role_permissions($conn, $selectedRoleId);
 $totalRoles = count($roles);
 $totalActiveRoles = count($activeRoles);
 $totalPages = count($items);
+
+$openPermissionsModal = !empty($_GET['open_permissions']) && $selectedRole;
 ?>
 <!doctype html>
 <html lang="en">
@@ -741,6 +743,35 @@ $totalPages = count($items);
     .form-select {
         border-radius: 14px;
         min-height: 46px;
+    }
+
+    .permission-modal-dialog {
+        max-width: min(1320px, 96vw);
+    }
+
+    .permission-modal-body {
+        max-height: 72vh;
+        overflow: auto;
+    }
+
+    .permission-toolbar {
+        border: 1px solid var(--border-soft);
+        background: color-mix(in srgb, var(--card-bg) 94%, var(--body-bg));
+        border-radius: 18px;
+        padding: 12px;
+        margin-bottom: 14px;
+    }
+
+    .permission-toolbar .btn {
+        font-size: 12px;
+        font-weight: 900;
+    }
+
+    .permission-open-card {
+        border: 1px dashed color-mix(in srgb, var(--brand-1) 34%, var(--border-soft));
+        background: color-mix(in srgb, var(--brand-1) 6%, var(--card-bg));
+        border-radius: 20px;
+        padding: 18px;
     }
 
     @media (max-width: 991px) {
@@ -1171,9 +1202,9 @@ $totalPages = count($items);
                                         </span>
                                     </td>
                                     <td class="text-end">
-                                        <a href="roles_permissions.php?role_id=<?= e($role['id']) ?>"
+                                        <a href="roles_permissions.php?role_id=<?= e($role['id']) ?>&open_permissions=1"
                                             class="btn btn-sm btn-outline-secondary rounded-pill fw-bold">
-                                            Permissions
+                                            Access
                                         </a>
 
                                         <button type="button"
@@ -1225,9 +1256,9 @@ $totalPages = count($items);
                             </div>
 
                             <div class="mobile-card-actions">
-                                <a href="roles_permissions.php?role_id=<?= e($role['id']) ?>"
+                                <a href="roles_permissions.php?role_id=<?= e($role['id']) ?>&open_permissions=1"
                                     class="btn btn-sm btn-outline-secondary rounded-pill fw-bold">
-                                    Permissions
+                                    Access
                                 </a>
 
                                 <button type="button"
@@ -1257,12 +1288,11 @@ $totalPages = count($items);
                 </div>
 
                 <div class="card-ui rp-card">
-                    <div
-                        class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
+                    <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
                         <div>
-                            <h2 class="rp-section-title mb-1">Permission Matrix</h2>
+                            <h2 class="rp-section-title mb-1">Permission Access</h2>
                             <p class="text-muted-custom mb-2">
-                                Select a role and control sidebar visibility plus page actions.
+                                Permissions are now handled in a clean modal view like the roles access screen.
                             </p>
                             <?php if ($selectedRole): ?>
                             <span class="rp-muted-chip">
@@ -1272,18 +1302,62 @@ $totalPages = count($items);
                             <?php endif; ?>
                         </div>
 
-                        <form method="get" class="d-flex gap-2 align-items-center permission-role-select-wrap">
-                            <select name="role_id" class="form-select" onchange="this.form.submit()">
-                                <?php foreach ($activeRoles as $role): ?>
-                                <option value="<?= e($role['id']) ?>"
-                                    <?= (int)$selectedRoleId === (int)$role['id'] ? 'selected' : '' ?>>
-                                    <?= e($role['role_name']) ?>
-                                </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </form>
-                    </div>
+                        <div class="d-flex flex-column flex-sm-row gap-2 align-items-stretch align-items-sm-center">
+                            <form method="get" class="permission-role-select-wrap">
+                                <select name="role_id" class="form-select" onchange="this.form.submit()">
+                                    <?php foreach ($activeRoles as $role): ?>
+                                    <option value="<?= e($role['id']) ?>"
+                                        <?= (int)$selectedRoleId === (int)$role['id'] ? 'selected' : '' ?>>
+                                        <?= e($role['role_name']) ?>
+                                    </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </form>
 
+                            <?php if ($selectedRole): ?>
+                            <button type="button"
+                                class="btn btn-primary rounded-pill px-4 fw-bold js-open-permission-modal"
+                                data-bs-toggle="modal"
+                                data-bs-target="#permissionModal">
+                                Open Permissions
+                            </button>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    <div class="permission-open-card mt-3">
+                        <div class="d-flex flex-column flex-lg-row gap-2 justify-content-between align-items-lg-center">
+                            <div>
+                                <strong class="d-block">Modal Permission View</strong>
+                                <small class="text-muted-custom fw-bold">
+                                    Select a role and open the modal to manage sidebar and page permissions.
+                                </small>
+                            </div>
+                            <span class="rp-muted-chip"><i data-lucide="layout-panel-top" style="width:14px"></i> Clean modal UI</span>
+                        </div>
+                    </div>
+                </div>
+
+            </section>
+        </main>
+
+        <div id="settingsOverlay"></div>
+        <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
+    </div>
+
+    <div class="modal fade" id="permissionModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable permission-modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div>
+                        <h5 class="modal-title fw-bold">Role Permissions</h5>
+                        <small class="text-muted-custom">
+                            <?= $selectedRole ? 'Configure access for ' . e($selectedRole['role_name']) : 'Please select a role' ?>
+                        </small>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+
+                <div class="modal-body permission-modal-body">
                     <?php if (!$selectedRole): ?>
                     <div class="text-muted-custom">Please create/select a role.</div>
                     <?php else: ?>
@@ -1293,9 +1367,15 @@ $totalPages = count($items);
                         <input type="hidden" name="role_id" value="<?= e($selectedRoleId) ?>">
                         <input type="hidden" name="permissions_json" id="permissions_json" value="">
 
-                        <div class="alert alert-info rounded-4">
-                            Editing permissions for:
-                            <strong><?= e($selectedRole['role_name']) ?></strong>
+                        <div class="permission-toolbar d-flex flex-column flex-xl-row justify-content-between gap-2">
+                            <div>
+                                <strong class="d-block">Editing: <?= e($selectedRole['role_name']) ?></strong>
+                                <small class="text-muted-custom fw-bold">Sidebar checkbox automatically enables View permission.</small>
+                            </div>
+                            <div class="d-flex flex-wrap gap-2">
+                                <button type="button" class="btn btn-outline-primary rounded-pill px-3 js-select-all-permissions">Select All</button>
+                                <button type="button" class="btn btn-outline-danger rounded-pill px-3 js-clear-all-permissions">Clear All</button>
+                            </div>
                         </div>
 
                         <div class="table-responsive desktop-permission-table">
@@ -1318,7 +1398,7 @@ $totalPages = count($items);
                                                 ? (int)$rolePermissions['sidebar'][$parentId] === 1
                                                 : false;
                                             ?>
-                                    <tr>
+                                    <tr data-sidebar-id="<?= e($parentId) ?>">
                                         <td class="rp-menu-name">
                                             <i data-lucide="<?= e($parent['icon'] ?: 'circle') ?>"
                                                 style="width:16px"></i>
@@ -1353,7 +1433,7 @@ $totalPages = count($items);
                                                     ? (int)$rolePermissions['sidebar'][$childId] === 1
                                                     : false;
                                                 ?>
-                                    <tr>
+                                    <tr data-sidebar-id="<?= e($childId) ?>">
                                         <td class="rp-menu-name rp-child">
                                             <i data-lucide="<?= e($child['icon'] ?: 'circle') ?>"
                                                 style="width:16px"></i>
@@ -1394,7 +1474,7 @@ $totalPages = count($items);
                                         ? (int)$rolePermissions['sidebar'][$parentId] === 1
                                         : false;
                                     ?>
-                            <div class="mobile-card-item">
+                            <div class="mobile-card-item" data-sidebar-id="<?= e($parentId) ?>">
                                 <div class="mobile-card-top">
                                     <div>
                                         <div class="mobile-card-title">
@@ -1438,7 +1518,7 @@ $totalPages = count($items);
                                             ? (int)$rolePermissions['sidebar'][$childId] === 1
                                             : false;
                                         ?>
-                            <div class="mobile-card-item">
+                            <div class="mobile-card-item" data-sidebar-id="<?= e($childId) ?>">
                                 <div class="mobile-card-top">
                                     <div>
                                         <div class="mobile-card-title">
@@ -1476,20 +1556,18 @@ $totalPages = count($items);
                             <?php endforeach; ?>
                             <?php endforeach; ?>
                         </div>
-
-                        <div class="d-flex justify-content-end mt-3 mobile-permission-save">
-                            <button type="submit" class="btn btn-primary rounded-pill px-4 fw-bold">
-                                Save Permissions
-                            </button>
-                        </div>
                     </form>
                     <?php endif; ?>
                 </div>
-            </section>
-        </main>
 
-        <div id="settingsOverlay"></div>
-        <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold" data-bs-dismiss="modal">Close</button>
+                    <?php if ($selectedRole): ?>
+                    <button type="submit" form="permissionForm" class="btn btn-primary rounded-pill px-4 fw-bold">Save Permissions</button>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div class="modal fade" id="roleModal" tabindex="-1" aria-hidden="true">
@@ -1705,6 +1783,54 @@ $totalPages = count($items);
             });
         });
 
+        function rpSetPermissionValue(sidebarItemId, permission, checked) {
+            document.querySelectorAll('input[name="perm[' + sidebarItemId + '][' + permission + ']"]').forEach(function(input) {
+                input.checked = checked;
+            });
+        }
+
+        function rpSetSidebarValue(sidebarItemId, checked) {
+            document.querySelectorAll('input[name="sidebar[' + sidebarItemId + ']"]').forEach(function(input) {
+                input.checked = checked;
+            });
+        }
+
+        document.querySelectorAll('.js-open-permission-modal').forEach(function(button) {
+            button.addEventListener('click', function(event) {
+                const permissionModalEl = document.getElementById('permissionModal');
+                if (!permissionModalEl) {
+                    event.preventDefault();
+                    showToast('danger', 'Permission modal not found. Please refresh the page.');
+                    return;
+                }
+
+                if (window.bootstrap && bootstrap.Modal) {
+                    event.preventDefault();
+                    bootstrap.Modal.getOrCreateInstance(permissionModalEl).show();
+                }
+            });
+        });
+
+        document.querySelectorAll('.js-select-all-permissions').forEach(function(button) {
+            button.addEventListener('click', function() {
+                const container = document.getElementById('permissionModal') || document;
+                container.querySelectorAll('.js-row-sidebar, .js-row-permission').forEach(function(input) {
+                    input.checked = true;
+                });
+                showToast('success', 'All visible permissions selected. Click Save Permissions to update.');
+            });
+        });
+
+        document.querySelectorAll('.js-clear-all-permissions').forEach(function(button) {
+            button.addEventListener('click', function() {
+                const container = document.getElementById('permissionModal') || document;
+                container.querySelectorAll('.js-row-sidebar, .js-row-permission').forEach(function(input) {
+                    input.checked = false;
+                });
+                showToast('warning', 'All visible permissions cleared. Click Save Permissions to update.');
+            });
+        });
+
         document.getElementById('permissionForm')?.addEventListener('submit', function() {
             const form = this;
             const visibleContainer = rpVisiblePermissionContainer();
@@ -1764,6 +1890,12 @@ $totalPages = count($items);
                     input.disabled = true;
                 });
         });
+
+        const shouldOpenPermissions = <?= $openPermissionsModal ? 'true' : 'false' ?>;
+        const permissionModalEl = document.getElementById('permissionModal');
+        if (shouldOpenPermissions && permissionModalEl && window.bootstrap && bootstrap.Modal) {
+            bootstrap.Modal.getOrCreateInstance(permissionModalEl).show();
+        }
 
         if (window.lucide && typeof window.lucide.createIcons === 'function') {
             window.lucide.createIcons();
