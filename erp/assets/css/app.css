@@ -1090,3 +1090,174 @@ body:not(.sidebar-collapsed) #sidebar::after {
     background: transparent !important;
   }
 }
+
+/* =========================================================
+   SUBHIKSHA SIDEBAR SCROLL + ACTIVE MENU VISIBILITY FIX
+   Purpose:
+   - Sidebar menu scrolls smoothly with mouse wheel / touchpad / touch.
+   - Native scrollbar remains hidden.
+   - Active menu background is not clipped/hidden.
+   - Footer stays at bottom and does not cover menu items.
+   Keep this block at the VERY END of assets/css/app.css.
+   ========================================================= */
+
+#sidebar {
+  height: 100vh !important;
+  max-height: 100vh !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+#sidebar .sidebar-header,
+#sidebar .sidebar-footer {
+  flex: 0 0 auto !important;
+  position: relative !important;
+  z-index: 2 !important;
+}
+
+#sidebar .sidebar-nav,
+#sidebar .sidebar-nav.thin-scrollbar,
+#sidebar .sidebar-nav.sidebar-scroll-area {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  height: auto !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  overscroll-behavior: contain !important;
+  -webkit-overflow-scrolling: touch !important;
+
+  /* Important: do not use negative margin to hide scrollbar.
+     Negative margin was clipping the active menu highlight. */
+  margin-right: 0 !important;
+  padding: 14px 14px 18px 14px !important;
+
+  /* Hide scrollbar but keep scrolling */
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+#sidebar .sidebar-nav::-webkit-scrollbar,
+#sidebar .sidebar-nav.thin-scrollbar::-webkit-scrollbar,
+#sidebar .sidebar-nav.sidebar-scroll-area::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  display: none !important;
+  background: transparent !important;
+}
+
+/* Remove old right-side mask that was covering/clipping active menu area */
+#sidebar::after {
+  display: none !important;
+  content: none !important;
+}
+
+#sidebar .nav-link-custom {
+  width: 100% !important;
+  min-width: 0 !important;
+  margin: 0 0 7px 0 !important;
+  padding: 12px 14px !important;
+  border-radius: 14px !important;
+  position: relative !important;
+  z-index: 1 !important;
+  transform: none !important;
+}
+
+#sidebar .nav-link-custom:hover {
+  transform: none !important;
+}
+
+#sidebar .nav-link-custom.active {
+  position: relative !important;
+  z-index: 1 !important;
+  box-shadow: 0 12px 26px rgba(245, 158, 11, 0.24) !important;
+}
+
+#sidebar .nav-link-custom svg {
+  flex: 0 0 auto !important;
+}
+
+#sidebar .sidebar-text {
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+#sidebar .sidebar-submenu {
+  margin: 0 0 8px 0 !important;
+  padding: 6px !important;
+  overflow: visible !important;
+}
+
+#sidebar .sidebar-sub-link {
+  margin-bottom: 5px !important;
+}
+
+/* Desktop collapsed sidebar: icon list should still scroll invisibly */
+@media (min-width: 1200px) {
+  body.sidebar-collapsed #sidebar {
+    width: 84px !important;
+    overflow: visible !important;
+  }
+
+  body.sidebar-collapsed #sidebar .sidebar-nav,
+  body.sidebar-collapsed #sidebar .sidebar-nav.thin-scrollbar,
+  body.sidebar-collapsed #sidebar .sidebar-nav.sidebar-scroll-area {
+    overflow-y: auto !important;
+    overflow-x: visible !important;
+    padding: 14px 10px 18px 10px !important;
+    margin-right: 0 !important;
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+  }
+
+  body.sidebar-collapsed #sidebar .nav-link-custom {
+    width: 64px !important;
+    min-height: 52px !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    justify-content: center !important;
+  }
+
+  body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+  }
+
+  body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
+  }
+}
+
+/* Mobile sidebar: full-height drawer with invisible scroll */
+@media (max-width: 1199.98px) {
+  #sidebar {
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    overflow: hidden !important;
+  }
+
+  #sidebar.open {
+    transform: translateX(0) !important;
+  }
+
+  #sidebar .sidebar-nav,
+  #sidebar .sidebar-nav.thin-scrollbar,
+  #sidebar .sidebar-nav.sidebar-scroll-area {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    padding: 14px 14px 18px 14px !important;
+    margin-right: 0 !important;
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+  }
+
+  #sidebar .nav-link-custom.active {
+    box-shadow: 0 10px 24px rgba(245, 158, 11, 0.22) !important;
+  }
+}
