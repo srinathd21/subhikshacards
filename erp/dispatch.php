@@ -793,7 +793,257 @@ if (dspTableExists($conn, 'job_cards')) {
             height: 18px !important
         }
     }
-    </style>
+    
+
+    /* =========================================================
+       Dispatch Page Reference UI Alignment Patch
+       UI ONLY - backend logic / forms / queries are unchanged.
+       Matches Enquiries page layout style.
+       ========================================================= */
+    .page-section.module-page {
+        padding: 24px;
+    }
+
+    .module-page .page-head {
+        padding: 24px 28px !important;
+        margin-bottom: 18px !important;
+        border-radius: 22px !important;
+    }
+
+    .module-page .page-head h1 {
+        font-size: 30px !important;
+        line-height: 1.15 !important;
+        font-weight: 900 !important;
+        margin: 0 0 4px !important;
+        letter-spacing: -.02em;
+        color: var(--text-main) !important;
+    }
+
+    .module-page .page-head p {
+        font-size: 15px !important;
+        line-height: 1.45 !important;
+        max-width: 760px;
+    }
+
+    .module-page .page-head .btn {
+        min-height: 42px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px !important;
+        white-space: nowrap;
+    }
+
+    .module-page .row.g-3.mb-3 {
+        margin-bottom: 18px !important;
+    }
+
+    .module-page .stat-card {
+        min-height: 112px !important;
+        padding: 18px 20px !important;
+        border-radius: 20px !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 16px !important;
+    }
+
+    .module-page .stat-icon {
+        width: 52px !important;
+        height: 52px !important;
+        border-radius: 16px !important;
+        flex: 0 0 52px !important;
+    }
+
+    .module-page .stat-card span {
+        font-size: 12px !important;
+        line-height: 1.2 !important;
+        margin-bottom: 6px !important;
+        letter-spacing: .02em;
+    }
+
+    .module-page .stat-card strong {
+        font-size: 24px !important;
+        line-height: 1 !important;
+    }
+
+    .module-card {
+        padding: 24px 28px 28px !important;
+        border-radius: 22px !important;
+    }
+
+    .module-card > .d-flex:first-child {
+        align-items: flex-start !important;
+        margin-bottom: 18px !important;
+    }
+
+    .module-title {
+        font-size: 18px !important;
+        line-height: 1.25 !important;
+        font-weight: 900 !important;
+        margin-bottom: 4px !important;
+    }
+
+    .module-card .text-muted-custom {
+        line-height: 1.55 !important;
+    }
+
+    .dispatch-filter-area {
+        max-width: 720px;
+        margin-left: auto;
+    }
+
+    .dispatch-filter-area .filter-chip {
+        min-height: 38px;
+        padding: 8px 14px !important;
+        border-radius: 999px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 4px;
+        line-height: 1 !important;
+    }
+
+    .dispatch-filter-area #tableSearch {
+        width: 260px !important;
+        max-width: 260px !important;
+        min-height: 46px !important;
+        border-radius: 14px !important;
+        margin-left: 0;
+    }
+
+    .desktop-table.table-responsive {
+        border-radius: 18px;
+        overflow: hidden;
+        border: 1px solid var(--border-soft);
+    }
+
+    .table-ui {
+        margin-bottom: 0 !important;
+        vertical-align: middle !important;
+    }
+
+    .table-ui thead th {
+        padding: 14px 16px !important;
+        font-size: 12px !important;
+        line-height: 1.2 !important;
+        font-weight: 900 !important;
+        text-transform: uppercase;
+        white-space: nowrap;
+        background: color-mix(in srgb, var(--body-bg) 85%, var(--card-bg)) !important;
+    }
+
+    .table-ui tbody td {
+        padding: 15px 16px !important;
+        vertical-align: middle !important;
+        font-size: 14px;
+    }
+
+    .table-ui tbody tr td[colspan] {
+        padding: 30px 16px !important;
+        font-size: 15px;
+    }
+
+    .status-pill {
+        min-height: 28px;
+        align-items: center;
+        justify-content: center;
+        line-height: 1.15;
+    }
+
+    .btn-action-icon {
+        vertical-align: middle !important;
+    }
+
+    @media (min-width: 992px) {
+        .module-card > .d-flex:first-child > div:first-child {
+            min-width: 360px;
+            max-width: 620px;
+        }
+
+        .dispatch-filter-area {
+            justify-content: flex-end !important;
+        }
+    }
+
+    @media (max-width: 991.98px) {
+        .page-section.module-page {
+            padding: 16px;
+        }
+
+        .module-card > .d-flex:first-child {
+            align-items: stretch !important;
+        }
+
+        .dispatch-filter-area {
+            width: 100%;
+            max-width: 100%;
+            justify-content: flex-start !important;
+        }
+
+        .dispatch-filter-area .filter-chip {
+            flex: 1 1 auto;
+            justify-content: center;
+            text-align: center;
+        }
+
+        .dispatch-filter-area #tableSearch {
+            width: 100% !important;
+            max-width: 100% !important;
+            flex: 1 1 100%;
+        }
+    }
+
+    @media (max-width: 767.98px) {
+        .page-section.module-page {
+            padding: 14px 12px 24px;
+        }
+
+        .module-page .page-head {
+            padding: 18px !important;
+            border-radius: 18px !important;
+            margin-bottom: 14px !important;
+        }
+
+        .module-page .page-head h1 {
+            font-size: 24px !important;
+        }
+
+        .module-page .page-head .btn {
+            width: 100%;
+        }
+
+        .module-page .stat-card {
+            min-height: 92px !important;
+            padding: 16px !important;
+            border-radius: 18px !important;
+        }
+
+        .module-page .stat-icon {
+            width: 48px !important;
+            height: 48px !important;
+            flex-basis: 48px !important;
+            border-radius: 15px !important;
+        }
+
+        .module-card {
+            padding: 16px !important;
+            border-radius: 18px !important;
+        }
+
+        .dispatch-filter-area {
+            gap: 8px !important;
+        }
+
+        .dispatch-filter-area .filter-chip {
+            flex: 1 1 100%;
+            min-height: 40px;
+        }
+
+        .mobile-card {
+            padding: 16px 16px 14px !important;
+            border-radius: 20px !important;
+        }
+    }
+</style>
 </head>
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -802,7 +1052,7 @@ if (dspTableExists($conn, 'job_cards')) {
         <?php include __DIR__ . '/includes/sidebar.php'; ?>
         <main id="main">
             <?php include __DIR__ . '/includes/nav.php'; ?>
-            <section class="page-section module-age">
+            <section class="page-section module-page">
                 <!-- DISPATCH_UI_VERSION: THREE_TABS_READY_DISPATCHED_DELIVERED_FINAL -->
                 <div class="card-ui page-head">
                     <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
@@ -867,7 +1117,7 @@ if (dspTableExists($conn, 'job_cards')) {
                             <p class="text-muted-custom mb-0">Dispatch page handles only dispatch and delivery.
                                 Stage/status updates can still be checked from Job Card View.</p>
                         </div>
-                        <div class="d-flex flex-wrap gap-2 align-items-center">
+                        <div class="dispatch-filter-area d-flex flex-wrap gap-2 align-items-center justify-content-lg-end">
                             <a class="filter-chip <?= $filter === 'ready' ? 'active' : '' ?>"
                                 href="dispatch.php?filter=ready">Ready
                                 <small>(<?= number_format($totalReady) ?>)</small></a>
