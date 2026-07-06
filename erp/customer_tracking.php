@@ -44,7 +44,7 @@ function ctStatusClass(string $status): string
 {
     $status = strtolower(trim($status));
     if ($status === 'completed' || $status === 'skipped') return 'done';
-    if ($status === 'in_progress') return 'live';
+    if ($status === 'in_progress' || $status === 'progress') return 'live';
     if ($status === 'delayed') return 'delay';
     if ($status === 'cancelled') return 'cancel';
     return 'pending';
@@ -56,18 +56,91 @@ function ctStatusLabel(string $status): string
     return ucwords(str_replace('_', ' ', $status !== '' ? $status : 'pending'));
 }
 
+function ctPaymentLabel(array $job): string
+{
+    $balance = (float)($job['balance_amount'] ?? 0);
+    $advance = (float)($job['advance_amount'] ?? 0);
+    $final = (float)($job['final_amount'] ?? 0);
+
+    if ($balance <= 0 && $final > 0) {
+        return 'Paid';
+    }
+
+    if ($advance > 0) {
+        return 'Advance Paid';
+    }
+
+    return 'Pending';
+}
+
+function ctCurrentStatusText(array $steps): string
+{
+    foreach ($steps as $step) {
+        $status = strtolower((string)($step['status'] ?? 'pending'));
+        if (in_array($status, ['in_progress', 'delayed'], true)) {
+            return (string)($step['step_name'] ?? '-');
+        }
+    }
+
+    foreach ($steps as $step) {
+        $status = strtolower((string)($step['status'] ?? 'pending'));
+        if (!in_array($status, ['completed', 'skipped', 'cancelled'], true)) {
+            return (string)($step['step_name'] ?? '-');
+        }
+    }
+
+    return $steps ? 'Completed' : '-';
+}
+
+function ctPublicStatusLabel(array $job, array $steps): string
+{
+    $statusKey = strtolower((string)($job['status_key'] ?? ''));
+    $statusName = trim((string)($job['status_name'] ?? ''));
+
+    if (in_array($statusKey, ['delivered', 'completed'], true) || stripos($statusName, 'completed') !== false) {
+        return 'Completed';
+    }
+
+    if (in_array($statusKey, ['cancelled'], true)) {
+        return 'Cancelled';
+    }
+
+    if ($steps) {
+        return 'In Production';
+    }
+
+    return $statusName !== '' ? $statusName : 'In Production';
+}
+
 $token = trim((string)($_GET['token'] ?? ''));
+$jobCardNo = trim((string)($_GET['job_card_no'] ?? $_POST['job_card_no'] ?? ''));
 $message = '';
-$messageType = 'danger';
+$messageType = 'info';
 $job = null;
 $steps = [];
 
-if ($token === '') {
-    $message = 'Invalid tracking link.';
-} elseif (!ctTableExists($conn, 'job_cards') || !ctTableExists($conn, 'job_tracking')) {
+if (!ctTableExists($conn, 'job_cards') || !ctTableExists($conn, 'job_tracking')) {
     $message = 'Tracking system is not available.';
+    $messageType = 'danger';
+} elseif ($token === '' && $jobCardNo === '') {
+    $message = 'Enter your job card number to track your order.';
+    $messageType = 'info';
 } else {
     try {
+        $hasTrackingLinks = ctTableExists($conn, 'customer_tracking_links');
+        $trackingSelect = $hasTrackingLinks
+            ? 'ctl.expires_at AS tracking_expires_at, ctl.is_active AS tracking_is_active'
+            : 'NULL AS tracking_expires_at, NULL AS tracking_is_active';
+        $trackingJoin = $hasTrackingLinks
+            ? 'LEFT JOIN customer_tracking_links ctl ON ctl.job_card_id = jc.id' . ($token !== '' ? ' AND ctl.tracking_token = ?' : '')
+            : '';
+
+        if ($token !== '') {
+            $where = 'WHERE jc.tracking_token = ?' . ($hasTrackingLinks ? ' OR ctl.tracking_token = ?' : '');
+        } else {
+            $where = 'WHERE UPPER(TRIM(jc.job_card_no)) = UPPER(TRIM(?))';
+        }
+
         $sql = "
             SELECT
                 jc.*,
@@ -77,37 +150,50 @@ if ($token === '') {
                 pst.sub_type_name,
                 jcs.status_name,
                 jcs.status_key,
-                ctl.expires_at AS tracking_expires_at,
-                ctl.is_active AS tracking_is_active
+                {$trackingSelect}
             FROM job_cards jc
             LEFT JOIN proforma_bills pb ON pb.id = jc.proforma_bill_id
             LEFT JOIN function_types ft ON ft.id = jc.function_type_id
             LEFT JOIN printing_types pt ON pt.id = jc.printing_type_id
             LEFT JOIN printing_sub_types pst ON pst.id = jc.printing_sub_type_id
             LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id
-            LEFT JOIN customer_tracking_links ctl ON ctl.job_card_id = jc.id AND ctl.tracking_token = ?
-            WHERE jc.tracking_token = ?
-               OR ctl.tracking_token = ?
+            {$trackingJoin}
+            {$where}
             ORDER BY jc.id DESC
             LIMIT 1
         ";
+
         $stmt = $conn->prepare($sql);
-        $stmt->bind_param('sss', $token, $token, $token);
+
+        if ($token !== '') {
+            if ($hasTrackingLinks) {
+                $stmt->bind_param('sss', $token, $token, $token);
+            } else {
+                $stmt->bind_param('s', $token);
+            }
+        } else {
+            $stmt->bind_param('s', $jobCardNo);
+        }
+
         $stmt->execute();
         $job = $stmt->get_result()->fetch_assoc();
         $stmt->close();
 
         if (!$job) {
-            $message = 'Tracking link not found.';
-        } elseif (isset($job['tracking_is_active']) && $job['tracking_is_active'] !== null && (int)$job['tracking_is_active'] !== 1) {
+            $message = $token !== '' ? 'Tracking link not found.' : 'No order found for this job card number.';
+            $messageType = 'danger';
+        } elseif ($token !== '' && isset($job['tracking_is_active']) && $job['tracking_is_active'] !== null && (int)$job['tracking_is_active'] !== 1) {
             $message = 'This tracking link is inactive.';
+            $messageType = 'danger';
             $job = null;
-        } elseif (!empty($job['tracking_expires_at']) && strtotime((string)$job['tracking_expires_at']) < time()) {
+        } elseif ($token !== '' && !empty($job['tracking_expires_at']) && strtotime((string)$job['tracking_expires_at']) < time()) {
             $message = 'This tracking link has expired.';
+            $messageType = 'danger';
             $job = null;
         }
     } catch (Throwable $e) {
         $message = 'Unable to load tracking details.';
+        $messageType = 'danger';
         $job = null;
     }
 }
@@ -137,7 +223,9 @@ if ($job) {
         $stmt->bind_param('i', $jobId);
         $stmt->execute();
         $res = $stmt->get_result();
-        while ($row = $res->fetch_assoc()) $steps[] = $row;
+        while ($row = $res->fetch_assoc()) {
+            $steps[] = $row;
+        }
         $stmt->close();
     } catch (Throwable $e) {
         $steps = [];
@@ -146,130 +234,768 @@ if ($job) {
 
 $totalSteps = count($steps);
 $completedSteps = 0;
-$liveStepName = '-';
-foreach ($steps as $s) {
+$openStepIndex = -1;
+
+foreach ($steps as $index => $s) {
     $status = strtolower((string)($s['status'] ?? 'pending'));
-    if (in_array($status, ['completed', 'skipped'], true)) $completedSteps++;
-    if ($liveStepName === '-' && in_array($status, ['in_progress', 'delayed'], true)) {
-        $liveStepName = (string)($s['step_name'] ?? '-');
+    if (in_array($status, ['completed', 'skipped'], true)) {
+        $completedSteps++;
+    }
+    if ($openStepIndex === -1 && in_array($status, ['in_progress', 'delayed'], true)) {
+        $openStepIndex = $index;
     }
 }
+
+if ($openStepIndex === -1) {
+    foreach ($steps as $index => $s) {
+        $status = strtolower((string)($s['status'] ?? 'pending'));
+        if (!in_array($status, ['completed', 'skipped', 'cancelled'], true)) {
+            $openStepIndex = $index;
+            break;
+        }
+    }
+}
+
 $progressPercent = $totalSteps > 0 ? round(($completedSteps / $totalSteps) * 100) : 0;
 $progressPercent = max(0, min(100, $progressPercent));
+$currentStage = $steps ? ctCurrentStatusText($steps) : '-';
+$publicStatus = $job ? ctPublicStatusLabel($job, $steps) : '';
+$paymentLabel = $job ? ctPaymentLabel($job) : '-';
+$displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
 ?>
 <!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Order Tracking - Subhiksha Cards</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Customer Tracking - Subhiksha Cards</title>
+
     <style>
-        :root{--ink:#0f172a;--muted:#64748b;--line:#dbeafe;--green:#16a34a;--blue:#2563eb;--orange:#f59e0b;--red:#dc2626;--purple:#7c3aed;--pink:#db2777;--sky:#0284c7;--card:#fff}
-        *{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at top left,#dbeafe 0,#f8fafc 30%,#fff7ed 65%,#fdf2f8 100%);color:var(--ink)}
-        .page{max-width:1160px;margin:0 auto;padding:18px}.hero{position:relative;overflow:hidden;border-radius:30px;padding:26px;background:linear-gradient(135deg,#0f172a,#1d4ed8 52%,#7c3aed);color:#fff;box-shadow:0 24px 60px rgba(15,23,42,.18)}
-        .hero:before,.hero:after{content:"";position:absolute;border-radius:999px;filter:blur(1px);opacity:.24}.hero:before{width:240px;height:240px;background:#22c55e;right:-55px;top:-80px}.hero:after{width:200px;height:200px;background:#f59e0b;left:-80px;bottom:-85px}
-        .hero-content{position:relative;z-index:2}.brand-pill{display:inline-flex;gap:8px;align-items:center;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.22);border-radius:999px;padding:8px 13px;font-weight:900;font-size:12px;letter-spacing:.04em;text-transform:uppercase}.title{font-size:34px;font-weight:900;margin:12px 0 6px;line-height:1.1}.subtitle{font-weight:700;color:rgba(255,255,255,.82);margin:0}.hero-card{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.22);border-radius:22px;padding:16px;backdrop-filter:blur(8px)}.hero-card small{display:block;text-transform:uppercase;font-size:10px;font-weight:900;color:rgba(255,255,255,.7)}.hero-card strong{font-size:21px;font-weight:900}.progress-shell{height:14px;border-radius:999px;background:rgba(255,255,255,.28);overflow:hidden}.progress-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,#22c55e,#a3e635,#facc15);box-shadow:0 0 18px rgba(34,197,94,.42)}
-        .color-card{border:0;border-radius:24px;padding:18px;background:#fff;box-shadow:0 18px 45px rgba(15,23,42,.08);height:100%;position:relative;overflow:hidden}.color-card:after{content:"";position:absolute;right:-40px;bottom:-40px;width:120px;height:120px;border-radius:999px;opacity:.12}.color-card.blue:after{background:#2563eb}.color-card.green:after{background:#16a34a}.color-card.orange:after{background:#f59e0b}.color-card.purple:after{background:#7c3aed}.color-card small{display:block;font-size:11px;text-transform:uppercase;font-weight:900;color:var(--muted);margin-bottom:6px}.color-card strong,.color-card span{font-weight:900;word-break:break-word;position:relative;z-index:2}.color-icon{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;color:#fff;font-weight:900;margin-bottom:10px}.blue .color-icon{background:linear-gradient(135deg,#2563eb,#38bdf8)}.green .color-icon{background:linear-gradient(135deg,#16a34a,#86efac)}.orange .color-icon{background:linear-gradient(135deg,#f59e0b,#f97316)}.purple .color-icon{background:linear-gradient(135deg,#7c3aed,#db2777)}
-        .tracker-wrap{margin-top:18px;background:rgba(255,255,255,.76);border:1px solid rgba(148,163,184,.24);border-radius:30px;padding:22px;box-shadow:0 24px 70px rgba(15,23,42,.10);backdrop-filter:blur(8px)}.section-title{font-size:22px;font-weight:900;margin:0}.section-sub{color:var(--muted);font-weight:700;margin:3px 0 0}.shipment{position:relative;display:grid;gap:18px;margin-top:22px}.shipment:before{content:"";position:absolute;left:28px;top:18px;bottom:18px;width:5px;border-radius:999px;background:linear-gradient(180deg,#22c55e,#38bdf8,#f59e0b,#ef4444);opacity:.24}.step{position:relative;display:grid;grid-template-columns:62px 1fr;gap:14px;align-items:start}.dot{width:62px;height:62px;border-radius:22px;display:grid;place-items:center;font-size:24px;font-weight:900;color:#fff;box-shadow:0 16px 30px rgba(15,23,42,.18);z-index:2}.dot.done{background:linear-gradient(135deg,#16a34a,#22c55e)}.dot.live{background:linear-gradient(135deg,#2563eb,#38bdf8);animation:pulseBlue 1.25s infinite}.dot.delay{background:linear-gradient(135deg,#dc2626,#f97316);animation:pulseRed 1.25s infinite}.dot.pending{background:linear-gradient(135deg,#94a3b8,#64748b)}.dot.cancel{background:linear-gradient(135deg,#991b1b,#ef4444)}@keyframes pulseBlue{0%{box-shadow:0 0 0 0 rgba(37,99,235,.36)}70%{box-shadow:0 0 0 16px rgba(37,99,235,0)}100%{box-shadow:0 0 0 0 rgba(37,99,235,0)}}@keyframes pulseRed{0%{box-shadow:0 0 0 0 rgba(220,38,38,.32)}70%{box-shadow:0 0 0 16px rgba(220,38,38,0)}100%{box-shadow:0 0 0 0 rgba(220,38,38,0)}}
-        .step-card{border-radius:24px;background:#fff;border:1px solid rgba(148,163,184,.25);padding:16px;box-shadow:0 12px 35px rgba(15,23,42,.07);position:relative;overflow:hidden}.step-card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:7px;background:#94a3b8}.step-card.done:before{background:#22c55e}.step-card.live:before{background:#2563eb}.step-card.delay:before{background:#dc2626}.step-card.cancel:before{background:#991b1b}.step-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.step-title{font-size:17px;font-weight:900;margin:0}.step-meta{font-size:12px;color:var(--muted);font-weight:800;margin-top:4px}.badge-status{border-radius:999px;padding:7px 11px;font-size:11px;font-weight:900;text-transform:uppercase}.badge-status.done{background:#dcfce7;color:#166534}.badge-status.live{background:#dbeafe;color:#1d4ed8}.badge-status.delay{background:#fee2e2;color:#991b1b}.badge-status.pending{background:#f1f5f9;color:#475569}.badge-status.cancel{background:#fee2e2;color:#7f1d1d}.info-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}.mini{border-radius:16px;padding:10px 12px;background:linear-gradient(135deg,#f8fafc,#ffffff);border:1px solid #e2e8f0}.mini small{display:block;font-size:9px;text-transform:uppercase;font-weight:900;color:var(--muted);margin-bottom:3px}.mini strong,.mini span{font-size:12px;font-weight:900;word-break:break-word}.delay-note{margin-top:12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:18px;padding:11px 13px;font-size:12px;font-weight:900}.empty{border-radius:24px;background:#fff;border:1px solid #e2e8f0;padding:24px;text-align:center;font-weight:900;color:var(--muted)}.footer-note{text-align:center;color:#64748b;font-weight:800;font-size:12px;margin:18px 0 0}.bad-link{background:#fff;border:1px solid #fecaca;color:#991b1b;border-radius:24px;padding:22px;font-weight:900;box-shadow:0 18px 45px rgba(220,38,38,.08)}
-        @media(max-width:767px){.page{padding:12px}.hero{border-radius:22px;padding:20px}.title{font-size:26px}.tracker-wrap{padding:14px;border-radius:22px}.step{grid-template-columns:48px 1fr;gap:10px}.shipment:before{left:22px}.dot{width:48px;height:48px;border-radius:16px;font-size:18px}.step-head{flex-direction:column}.info-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.color-card{border-radius:20px}.step-card{border-radius:20px;padding:14px}}
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --ink: #172033;
+            --muted: #60718a;
+            --line: #dce7ef;
+            --soft: #f8fafc;
+            --green: #0f766e;
+            --green-2: #16a34a;
+            --success-bg: #dcfce7;
+            --danger: #dc2626;
+            --warning: #f59e0b;
+            --blue: #2563eb;
+            --card: rgba(255, 255, 255, 0.94);
+        }
+
+        body {
+            font-family: Inter, Arial, sans-serif;
+            background: linear-gradient(180deg, #eef7f6 0%, #f7f9fc 48%, #eef2f7 100%);
+            color: var(--ink);
+            min-height: 100vh;
+        }
+
+        .page {
+            width: 100%;
+            max-width: 760px;
+            margin: 0 auto;
+            min-height: 100vh;
+            padding-bottom: 22px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #0f766e, #0b5f59);
+            color: #fff;
+            padding: 28px 24px 32px;
+            border-bottom-left-radius: 30px;
+            border-bottom-right-radius: 30px;
+            box-shadow: 0 18px 45px rgba(15, 118, 110, 0.18);
+        }
+
+        .header h4 {
+            font-size: 15px;
+            font-weight: 800;
+            opacity: 0.96;
+            margin-bottom: 9px;
+        }
+
+        .header h1 {
+            font-size: clamp(26px, 4vw, 38px);
+            line-height: 1.15;
+            font-weight: 900;
+            letter-spacing: -0.7px;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 22px;
+            box-shadow: 0 10px 30px rgba(20, 40, 60, 0.06);
+        }
+
+        .search-card {
+            margin: 18px 14px;
+            padding: 16px;
+        }
+
+        .search-card label {
+            display: block;
+            font-size: 14px;
+            font-weight: 900;
+            color: var(--muted);
+            margin-bottom: 9px;
+        }
+
+        .search-row {
+            display: flex;
+            gap: 10px;
+        }
+
+        .search-row input {
+            flex: 1;
+            min-width: 0;
+            height: 48px;
+            border: 1px solid var(--line);
+            border-radius: 15px;
+            padding: 0 14px;
+            font-size: 16px;
+            font-weight: 800;
+            color: var(--ink);
+            background: var(--soft);
+            outline: none;
+            text-transform: uppercase;
+        }
+
+        .search-row input:focus {
+            border-color: var(--green);
+            box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+        }
+
+        .search-row button {
+            width: 88px;
+            height: 48px;
+            border: none;
+            border-radius: 15px;
+            background: var(--green);
+            color: #fff;
+            font-size: 15px;
+            font-weight: 900;
+            cursor: pointer;
+            box-shadow: 0 8px 18px rgba(15, 118, 110, 0.22);
+        }
+
+        .search-row button:hover {
+            background: #0b5f59;
+        }
+
+        .message {
+            margin: 0 14px 16px;
+            padding: 14px 16px;
+            border-radius: 18px;
+            font-size: 14px;
+            font-weight: 800;
+            border: 1px solid #bfdbfe;
+            background: #eff6ff;
+            color: #1d4ed8;
+        }
+
+        .message.danger {
+            border-color: #fecaca;
+            background: #fef2f2;
+            color: #991b1b;
+        }
+
+        .order-card {
+            margin: 0 14px 16px;
+            padding: 18px;
+        }
+
+        .order-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+
+        .order-head h2 {
+            font-size: clamp(20px, 4vw, 28px);
+            font-weight: 900;
+            letter-spacing: -0.5px;
+            line-height: 1.2;
+        }
+
+        .status-badge {
+            background: var(--success-bg);
+            color: #166534;
+            font-size: 12px;
+            font-weight: 900;
+            padding: 8px 12px;
+            border-radius: 999px;
+            white-space: nowrap;
+        }
+
+        .status-badge.cancel,
+        .status-badge.delay {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .product {
+            font-size: 16px;
+            color: var(--muted);
+            margin-bottom: 15px;
+            font-weight: 700;
+        }
+
+        .progress-wrap {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .progress {
+            height: 9px;
+            background: #e2e8f0;
+            border-radius: 20px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            width: <?= (int)$progressPercent ?>%;
+            height: 100%;
+            background: linear-gradient(90deg, var(--green), var(--green-2));
+            border-radius: 20px;
+            transition: width .25s ease;
+        }
+
+        .progress-percent {
+            color: var(--ink);
+            font-size: 18px;
+            font-weight: 900;
+        }
+
+        .current-status {
+            font-size: 15px;
+            color: var(--muted);
+            margin-bottom: 15px;
+            line-height: 1.4;
+        }
+
+        .current-status strong {
+            color: #44546a;
+            font-weight: 900;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .info-box {
+            background: var(--soft);
+            border: 1px solid #dde7ef;
+            border-radius: 16px;
+            padding: 13px;
+            min-height: 68px;
+        }
+
+        .info-box span {
+            display: block;
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 900;
+            margin-bottom: 6px;
+        }
+
+        .info-box h3 {
+            font-size: 15px;
+            font-weight: 900;
+            color: var(--ink);
+            line-height: 1.3;
+            word-break: break-word;
+        }
+
+        .timeline {
+            padding: 0 14px 18px;
+        }
+
+        .step {
+            background: rgba(255, 255, 255, 0.96);
+            border: 1px solid var(--line);
+            border-radius: 17px;
+            margin-bottom: 10px;
+            overflow: hidden;
+            box-shadow: 0 7px 20px rgba(20, 40, 60, 0.045);
+        }
+
+        .step.active {
+            background: linear-gradient(135deg, #ecfffb, #f4fffb);
+            border-color: #65e6d5;
+            box-shadow: 0 8px 24px rgba(15, 118, 110, 0.12);
+        }
+
+        .step.delay {
+            border-color: #fecaca;
+            background: #fffafa;
+        }
+
+        .step-button {
+            width: 100%;
+            border: 0;
+            background: transparent;
+            min-height: 58px;
+            padding: 11px 13px;
+            display: grid;
+            grid-template-columns: 36px minmax(0, 1fr) auto 20px;
+            align-items: center;
+            gap: 12px;
+            cursor: pointer;
+            text-align: left;
+        }
+
+        .step-icon,
+        .step-number {
+            width: 34px;
+            height: 34px;
+            min-width: 34px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 900;
+        }
+
+        .step-icon {
+            background: var(--success-bg);
+            color: #15803d;
+            font-size: 18px;
+        }
+
+        .step-number {
+            background: #e6edf5;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .step.active .step-number,
+        .step .step-number.live {
+            background: var(--green);
+            color: #fff;
+            box-shadow: 0 6px 15px rgba(15, 118, 110, 0.25);
+        }
+
+        .step .step-number.delay {
+            background: var(--danger);
+            color: #fff;
+        }
+
+        .step-title {
+            min-width: 0;
+            font-size: 15.5px;
+            font-weight: 900;
+            color: var(--ink);
+            line-height: 1.25;
+        }
+
+        .step-status {
+            font-size: 13px;
+            color: var(--muted);
+            font-weight: 800;
+            white-space: nowrap;
+        }
+
+        .step-status.done { color: #15803d; }
+        .step-status.live { color: var(--green); }
+        .step-status.delay { color: var(--danger); }
+        .step-status.cancel { color: #7f1d1d; }
+
+        .step-arrow {
+            color: var(--muted);
+            font-weight: 900;
+            transition: transform .2s ease;
+        }
+
+        .step.open .step-arrow {
+            transform: rotate(180deg);
+        }
+
+        .step-details {
+            display: none;
+            padding: 0 13px 14px 61px;
+        }
+
+        .step.open .step-details {
+            display: block;
+        }
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 2px;
+        }
+
+        .detail-box {
+            background: var(--soft);
+            border: 1px solid #e2e8f0;
+            border-radius: 13px;
+            padding: 10px;
+        }
+
+        .detail-box small {
+            display: block;
+            color: var(--muted);
+            font-size: 10px;
+            font-weight: 900;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: .02em;
+        }
+
+        .detail-box strong {
+            display: block;
+            font-size: 12px;
+            color: var(--ink);
+            line-height: 1.35;
+            word-break: break-word;
+        }
+
+        .remarks {
+            margin-top: 8px;
+            padding: 10px 11px;
+            border-radius: 13px;
+            background: #eff6ff;
+            color: #1d4ed8;
+            font-size: 12px;
+            font-weight: 800;
+            line-height: 1.45;
+        }
+
+        .remarks.delay {
+            background: #fef2f2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
+        }
+
+        .footer-note {
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 800;
+            text-align: center;
+            padding: 4px 16px 0;
+            line-height: 1.5;
+        }
+
+        @media (min-width: 768px) {
+            .page {
+                padding-top: 18px;
+            }
+
+            .header,
+            .search-card,
+            .order-card,
+            .timeline {
+                margin-left: 18px;
+                margin-right: 18px;
+            }
+
+            .header {
+                border-radius: 30px;
+                padding: 34px 32px 38px;
+            }
+
+            .search-card,
+            .order-card {
+                padding: 20px;
+            }
+
+            .timeline {
+                padding-left: 18px;
+                padding-right: 18px;
+            }
+
+            .step-button {
+                grid-template-columns: 40px minmax(0, 1fr) auto 24px;
+                min-height: 62px;
+                padding: 13px 15px;
+            }
+
+            .step-details {
+                padding-left: 70px;
+                padding-right: 15px;
+                padding-bottom: 16px;
+            }
+
+            .detail-grid {
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 430px) {
+            .page {
+                max-width: 100%;
+            }
+
+            .header {
+                padding: 22px 18px 26px;
+            }
+
+            .header h1 {
+                font-size: 25px;
+            }
+
+            .search-row {
+                gap: 8px;
+            }
+
+            .search-row button {
+                width: 74px;
+                font-size: 14px;
+            }
+
+            .order-head {
+                align-items: center;
+            }
+
+            .status-badge {
+                font-size: 11px;
+                padding: 7px 10px;
+            }
+
+            .info-grid {
+                gap: 8px;
+            }
+
+            .step-button {
+                grid-template-columns: 34px minmax(0, 1fr) auto 16px;
+                gap: 10px;
+                padding: 10px 11px;
+            }
+
+            .step-title {
+                font-size: 14.5px;
+            }
+
+            .step-status {
+                font-size: 12px;
+            }
+
+            .step-details {
+                padding-left: 56px;
+            }
+
+            .detail-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        @media (max-width: 350px) {
+            .search-row {
+                flex-direction: column;
+            }
+
+            .search-row button {
+                width: 100%;
+            }
+
+            .info-grid,
+            .detail-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .step-button {
+                grid-template-columns: 34px minmax(0, 1fr) 16px;
+            }
+
+            .step-status {
+                display: none;
+            }
+        }
     </style>
 </head>
 <body>
-<div class="page">
-    <?php if (!$job): ?>
-        <div class="bad-link mt-3"><?= e($message ?: 'Tracking details not found.') ?></div>
-    <?php else: ?>
-        <section class="hero">
-            <div class="hero-content">
-                <div class="row g-3 align-items-end">
-                    <div class="col-lg-7">
-                        <span class="brand-pill">Subhiksha Cards Live Tracking</span>
-                        <h1 class="title">Your order is moving stage by stage</h1>
-                        <p class="subtitle">Track your job card like shipment tracking with live production updates.</p>
-                    </div>
-                    <div class="col-lg-5">
-                        <div class="hero-card">
-                            <div class="d-flex justify-content-between gap-3 mb-2">
-                                <div><small>Job Card</small><strong><?= e($job['job_card_no'] ?? '-') ?></strong></div>
-                                <div class="text-end"><small>Progress</small><strong><?= (int)$progressPercent ?>%</strong></div>
-                            </div>
-                            <div class="progress-shell"><div class="progress-fill" style="width:<?= (int)$progressPercent ?>%"></div></div>
-                            <div class="mt-2 small fw-bold text-white-50">Current Stage: <?= e($liveStepName) ?></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+    <main class="page">
+        <section class="header">
+            <h4>Subhiksha Cards Customer Portal</h4>
+            <h1>Track Your Invitation Order</h1>
         </section>
 
-        <div class="row g-3 mt-2">
-            <div class="col-md-3 col-6"><div class="color-card blue"><div class="color-icon">#</div><small>Proforma No</small><strong><?= e($job['proforma_no'] ?? '-') ?></strong></div></div>
-            <div class="col-md-3 col-6"><div class="color-card green"><div class="color-icon">✓</div><small>Customer</small><strong><?= e($job['customer_name'] ?? '-') ?></strong></div></div>
-            <div class="col-md-3 col-6"><div class="color-card orange"><div class="color-icon">⏱</div><small>Delivery Date</small><strong><?= e(ctDate($job['delivery_date'] ?? null)) ?></strong></div></div>
-            <div class="col-md-3 col-6"><div class="color-card purple"><div class="color-icon">₹</div><small>Balance</small><strong><?= e(ctMoney($job['balance_amount'] ?? 0)) ?></strong></div></div>
-            <div class="col-md-4"><div class="color-card blue"><div class="color-icon">P</div><small>Product</small><strong><?= e($job['product_name'] ?? '-') ?></strong></div></div>
-            <div class="col-md-4"><div class="color-card green"><div class="color-icon">F</div><small>Function / Type</small><strong><?= e($job['function_name'] ?? '-') ?></strong></div></div>
-            <div class="col-md-4"><div class="color-card orange"><div class="color-icon">🖨</div><small>Printing</small><strong><?= e($job['printing_name'] ?? '-') ?></strong><span class="d-block text-muted small fw-bold mt-1"><?= e($job['sub_type_name'] ?? '') ?></span></div></div>
-        </div>
-
-        <section class="tracker-wrap">
-            <div class="d-flex flex-column flex-md-row justify-content-between gap-2 align-items-md-end">
-                <div>
-                    <h2 class="section-title">Production Journey</h2>
-                    <p class="section-sub">Every stage is shown one by one with planned date, expected date, live status, and completion time.</p>
-                </div>
-                <div class="badge-status <?= e(ctStatusClass($job['status_key'] ?? 'pending')) ?>"><?= e($job['status_name'] ?? 'Status') ?></div>
+        <form method="get" class="search-card card" autocomplete="off">
+            <label for="job_card_no">Enter Job Card Number</label>
+            <div class="search-row">
+                <input
+                    type="text"
+                    id="job_card_no"
+                    name="job_card_no"
+                    value="<?= e($job['job_card_no'] ?? $displayJobNo) ?>"
+                    placeholder="Example: JC-000125"
+                    required>
+                <button type="submit">Track</button>
             </div>
+        </form>
 
-            <?php if (!$steps): ?>
-                <div class="empty mt-3">No tracking stages found for this job card.</div>
-            <?php else: ?>
-                <div class="shipment">
+        <?php if ($message !== ''): ?>
+            <div class="message <?= e($messageType === 'danger' ? 'danger' : '') ?>"><?= e($message) ?></div>
+        <?php endif; ?>
+
+        <?php if ($job): ?>
+            <?php
+                $orderTypeText = trim((string)($job['product_name'] ?? '-'));
+                $qtyText = trim((string)($job['qty'] ?? $job['quantity'] ?? ''));
+                if ($qtyText !== '') {
+                    $orderTypeText .= ' · ' . $qtyText . ' Qty';
+                }
+
+                $mainStatusClass = ctStatusClass((string)($job['status_key'] ?? ''));
+            ?>
+            <section class="order-card card">
+                <div class="order-head">
+                    <h2>Order #<?= e($job['job_card_no'] ?? '-') ?></h2>
+                    <div class="status-badge <?= e($mainStatusClass) ?>"><?= e($publicStatus) ?></div>
+                </div>
+
+                <div class="product"><?= e($orderTypeText) ?></div>
+
+                <div class="progress-wrap">
+                    <div class="progress"><div class="progress-fill"></div></div>
+                    <div class="progress-percent"><?= (int)$progressPercent ?>%</div>
+                </div>
+
+                <div class="current-status">
+                    Current Status: <strong><?= e($currentStage) ?></strong>
+                </div>
+
+                <div class="info-grid">
+                    <div class="info-box">
+                        <span>Customer</span>
+                        <h3><?= e($job['customer_name'] ?? '-') ?></h3>
+                    </div>
+
+                    <div class="info-box">
+                        <span>Delivery</span>
+                        <h3><?= e(ctDate($job['delivery_date'] ?? null)) ?></h3>
+                    </div>
+
+                    <div class="info-box">
+                        <span>Function</span>
+                        <h3><?= e($job['function_name'] ?? '-') ?></h3>
+                    </div>
+
+                    <div class="info-box">
+                        <span>Payment</span>
+                        <h3><?= e($paymentLabel) ?></h3>
+                    </div>
+                </div>
+            </section>
+
+            <section class="timeline" id="trackingTimeline">
+                <?php if (!$steps): ?>
+                    <div class="message">No tracking stages found for this job card.</div>
+                <?php else: ?>
                     <?php foreach ($steps as $index => $step): ?>
                         <?php
                             $status = strtolower((string)($step['status'] ?? 'pending'));
                             $class = ctStatusClass($status);
-                            $icon = $class === 'done' ? '✓' : ($class === 'live' ? '●' : ($class === 'delay' ? '!' : ($class === 'cancel' ? '×' : $index + 1)));
-                        ?>
-                        <article class="step">
-                            <div class="dot <?= e($class) ?>"><?= e($icon) ?></div>
-                            <div class="step-card <?= e($class) ?>">
-                                <div class="step-head">
-                                    <div>
-                                        <h3 class="step-title"><?= e($step['step_name'] ?? '-') ?></h3>
-                                        <div class="step-meta">Department: <?= e($step['role_name'] ?? '-') ?><?= !empty($step['responsible_user_name']) ? ' | User: ' . e($step['responsible_user_name']) : '' ?></div>
-                                    </div>
-                                    <span class="badge-status <?= e($class) ?>"><?= e(ctStatusLabel($status)) ?></span>
-                                </div>
+                            $isDone = $class === 'done';
+                            $isOpen = $index === $openStepIndex;
+                            $isActive = in_array($class, ['live', 'delay'], true) || $isOpen;
+                            $icon = $isDone ? '✓' : (string)($index + 1);
+                            $statusText = ctStatusLabel($status);
 
-                                <div class="info-grid">
-                                    <div class="mini"><small>Planned Start</small><strong><?= e(ctDate($step['planned_start_date'] ?? null)) ?></strong></div>
-                                    <div class="mini"><small>Expected Completion</small><strong><?= e(ctDate($step['planned_completion_date'] ?? null)) ?></strong></div>
-                                    <div class="mini"><small>Actual Start</small><strong><?= e(ctDateTime($step['actual_start_at'] ?? null)) ?></strong></div>
-                                    <div class="mini"><small>Completed At</small><strong><?= e(ctDateTime($step['actual_completed_at'] ?? null)) ?></strong></div>
+                            if ($isOpen && !in_array($class, ['done', 'cancel'], true)) {
+                                $statusText = $class === 'pending' ? 'Next' : $statusText;
+                            }
+                        ?>
+                        <article class="step <?= e($isActive ? 'active' : '') ?> <?= e($class) ?> <?= e($isOpen ? 'open' : '') ?>">
+                            <button type="button" class="step-button" aria-expanded="<?= $isOpen ? 'true' : 'false' ?>">
+                                <?php if ($isDone): ?>
+                                    <span class="step-icon">✓</span>
+                                <?php else: ?>
+                                    <span class="step-number <?= e($class) ?>"><?= e($icon) ?></span>
+                                <?php endif; ?>
+
+                                <span class="step-title"><?= e($step['step_name'] ?? '-') ?></span>
+                                <span class="step-status <?= e($class) ?>"><?= e($statusText) ?></span>
+                                <span class="step-arrow">⌄</span>
+                            </button>
+
+                            <div class="step-details">
+                                <div class="detail-grid">
+                                    <div class="detail-box">
+                                        <small>Department</small>
+                                        <strong><?= e($step['role_name'] ?? '-') ?></strong>
+                                    </div>
+
+                                    <div class="detail-box">
+                                        <small>Responsible User</small>
+                                        <strong><?= e($step['responsible_user_name'] ?? '-') ?></strong>
+                                    </div>
+
+                                    <div class="detail-box">
+                                        <small>Planned Start</small>
+                                        <strong><?= e(ctDate($step['planned_start_date'] ?? null)) ?></strong>
+                                    </div>
+
+                                    <div class="detail-box">
+                                        <small>Expected Completion</small>
+                                        <strong><?= e(ctDate($step['planned_completion_date'] ?? null)) ?></strong>
+                                    </div>
+
+                                    <div class="detail-box">
+                                        <small>Actual Start</small>
+                                        <strong><?= e(ctDateTime($step['actual_start_at'] ?? null)) ?></strong>
+                                    </div>
+
+                                    <div class="detail-box">
+                                        <small>Completed At</small>
+                                        <strong><?= e(ctDateTime($step['actual_completed_at'] ?? null)) ?></strong>
+                                    </div>
+
+                                    <div class="detail-box">
+                                        <small>Completed By</small>
+                                        <strong><?= e($step['completed_by_name'] ?? '-') ?></strong>
+                                    </div>
+
+                                    <div class="detail-box">
+                                        <small>Status</small>
+                                        <strong><?= e(ctStatusLabel($status)) ?></strong>
+                                    </div>
                                 </div>
 
                                 <?php if ($status === 'delayed' || (int)($step['is_delayed'] ?? 0) === 1): ?>
-                                    <div class="delay-note">
+                                    <div class="remarks delay">
                                         Delay Alert: <?= e($step['delay_reason_name'] ?? 'Reason not updated') ?>
                                         <?= !empty($step['delay_days']) ? ' | Delay Days: ' . e($step['delay_days']) : '' ?>
                                         <?= !empty($step['delay_remarks']) ? ' | Remark: ' . e($step['delay_remarks']) : '' ?>
                                     </div>
                                 <?php elseif (!empty($step['remarks'])): ?>
-                                    <div class="delay-note" style="border-color:#bfdbfe;background:#eff6ff;color:#1d4ed8">
-                                        Update: <?= e($step['remarks']) ?>
-                                    </div>
+                                    <div class="remarks">Update: <?= e($step['remarks']) ?></div>
                                 <?php endif; ?>
                             </div>
                         </article>
                     <?php endforeach; ?>
-                </div>
-            <?php endif; ?>
-        </section>
+                <?php endif; ?>
+            </section>
 
-        <p class="footer-note">This is a live customer tracking page from Subhiksha Cards. Please contact the team for urgent changes.</p>
-    <?php endif; ?>
-</div>
+            <p class="footer-note">This is a live customer tracking page from Subhiksha Cards. Please contact the team for urgent changes.</p>
+        <?php endif; ?>
+    </main>
+
+    <script>
+        document.querySelectorAll('.step-button').forEach(function(button) {
+            button.addEventListener('click', function() {
+                const item = button.closest('.step');
+                const isOpen = item.classList.toggle('open');
+                button.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+            });
+        });
+    </script>
 </body>
 </html>
