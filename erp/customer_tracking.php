@@ -46,6 +46,7 @@ function ctStatusClass(string $status): string
     if ($status === 'completed' || $status === 'skipped') return 'done';
     if ($status === 'in_progress' || $status === 'progress') return 'live';
     if ($status === 'delayed') return 'delay';
+    if ($status === 'payment_pending') return 'payment';
     if ($status === 'cancelled') return 'cancel';
     return 'pending';
 }
@@ -56,17 +57,34 @@ function ctStatusLabel(string $status): string
     return ucwords(str_replace('_', ' ', $status !== '' ? $status : 'pending'));
 }
 
-function ctIsDispatchStep(array $step): bool
+function ctIsSendToDispatchStep(array $step): bool
 {
     $key = strtolower(trim((string)($step['step_key'] ?? '')));
     $name = strtolower(trim((string)($step['step_name'] ?? '')));
 
-    // Only merge the customer-facing final dispatch stages.
-    // "Send to Dispatch" is a production handover stage and stays separate.
+    $keyText = str_replace(['-', '_'], ' ', $key);
+
+    return in_array($key, ['send_to_dispatch', 'send_for_dispatch', 'send_dispatch', 'sent_to_dispatch', 'send_to_despatch', 'send_for_despatch'], true)
+        || in_array($name, ['send to dispatch', 'send for dispatch', 'sent to dispatch', 'send to despatch', 'send for despatch'], true)
+        || ((strpos($keyText, 'send') !== false || strpos($keyText, 'sent') !== false) && (strpos($keyText, 'dispatch') !== false || strpos($keyText, 'despatch') !== false))
+        || ((strpos($name, 'send') !== false || strpos($name, 'sent') !== false) && (strpos($name, 'dispatch') !== false || strpos($name, 'despatch') !== false));
+}
+
+function ctIsDispatchStep(array $step): bool
+{
+    if (ctIsSendToDispatchStep($step)) {
+        return false;
+    }
+
+    $key = strtolower(trim((string)($step['step_key'] ?? '')));
+    $name = strtolower(trim((string)($step['step_name'] ?? '')));
+
+    // Customer-facing final dispatch stages are merged as one "Dispatch" row.
     return $key === 'dispatch'
-        || in_array($key, ['ready_for_dispatch', 'dispatched'], true)
-        || in_array($name, ['dispatch', 'ready for dispatch', 'dispatched'], true)
-        || (strpos($key, 'dispatch') !== false && strpos($key, 'send_to') === false);
+        || in_array($key, ['ready_for_dispatch', 'ready_to_dispatch', 'dispatched', 'despatch', 'ready_for_despatch'], true)
+        || in_array($name, ['dispatch', 'ready for dispatch', 'ready to dispatch', 'dispatched', 'despatch', 'ready for despatch'], true)
+        || strpos($key, 'dispatch') !== false
+        || strpos($key, 'despatch') !== false;
 }
 
 function ctFirstNonEmpty(array $rows, string $field): string
@@ -171,6 +189,11 @@ function ctNormalizeCustomerSteps(array $steps): array
     $dispatchPosition = null;
 
     foreach ($steps as $step) {
+        // Internal handover stage. Customer does not need to see this.
+        if (ctIsSendToDispatchStep($step)) {
+            continue;
+        }
+
         if (ctIsDispatchStep($step)) {
             if ($dispatchPosition === null) {
                 $dispatchPosition = count($out);
@@ -238,6 +261,16 @@ function ctPaymentSnapshot(mysqli $conn, array $job): array
         'label' => $label,
         'used_ledger' => $usedLedger,
     ];
+}
+
+function ctDispatchPaymentPending(array $step, array $paymentSnapshot): bool
+{
+    $status = strtolower(trim((string)($step['status'] ?? 'pending')));
+
+    return ctIsDispatchStep($step)
+        && !in_array($status, ['completed', 'skipped', 'cancelled'], true)
+        && empty($paymentSnapshot['is_paid'])
+        && (float)($paymentSnapshot['balance_amount'] ?? 0) > 0.01;
 }
 
 function ctPaymentLabel(array $job): string
@@ -735,6 +768,17 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
         background: #fffafa;
     }
 
+    .step.payment {
+        border-color: #facc15;
+        background: #fffbeb;
+    }
+
+    .step.payment.active {
+        background: linear-gradient(135deg, #fffbeb, #fff7ed);
+        border-color: #facc15;
+        box-shadow: 0 8px 24px rgba(245, 158, 11, 0.14);
+    }
+
     .step-button {
         width: 100%;
         border: 0;
@@ -785,12 +829,42 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
         color: #fff;
     }
 
+    .step .step-number.payment {
+        background: #f59e0b;
+        color: #fff;
+        box-shadow: 0 6px 15px rgba(245, 158, 11, 0.24);
+    }
+
+    .step-title-wrap {
+        min-width: 0;
+        display: block;
+    }
+
     .step-title {
+        display: block;
         min-width: 0;
         font-size: 15.5px;
         font-weight: 900;
         color: var(--ink);
         line-height: 1.25;
+    }
+
+    .step-date-line {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        line-height: 1.35;
+    }
+
+    .step-payment-note {
+        display: block;
+        margin-top: 4px;
+        color: #92400e;
+        font-size: 11px;
+        font-weight: 900;
+        line-height: 1.35;
     }
 
     .step-status {
@@ -810,6 +884,10 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
 
     .step-status.delay {
         color: var(--danger);
+    }
+
+    .step-status.payment {
+        color: #b45309;
     }
 
     .step-status.cancel {
@@ -882,6 +960,12 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
         background: #fef2f2;
         color: #991b1b;
         border: 1px solid #fecaca;
+    }
+
+    .remarks.payment {
+        background: #fffbeb;
+        color: #92400e;
+        border: 1px solid #fde68a;
     }
 
     .footer-note {
@@ -1106,12 +1190,29 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
             <?php
                             $status = strtolower((string)($step['status'] ?? 'pending'));
                             $isOpen = $index === $openStepIndex;
+                            $isDispatchPaymentPending = ctDispatchPaymentPending($step, $paymentSnapshot);
                             $displayStatus = ($isOpen && $status === 'pending') ? 'in_progress' : $status;
+
+                            if ($isDispatchPaymentPending) {
+                                $displayStatus = 'payment_pending';
+                            }
+
                             $class = ctStatusClass($displayStatus);
                             $isDone = ctStatusClass($status) === 'done';
-                            $isActive = in_array($class, ['live', 'delay'], true) || $isOpen;
+                            $isActive = in_array($class, ['live', 'delay', 'payment'], true) || $isOpen;
                             $icon = $isDone ? '✓' : (string)($index + 1);
-                            $statusText = ctStatusLabel($displayStatus);
+                            $statusText = $isDispatchPaymentPending ? 'Payment Pending' : ctStatusLabel($displayStatus);
+
+                            $summaryParts = [];
+                            if (!empty($step['actual_start_at'])) {
+                                $summaryParts[] = 'Start: ' . ctDateTime($step['actual_start_at']);
+                            }
+                            if ($isDone && !empty($step['actual_completed_at'])) {
+                                $summaryParts[] = 'Completed: ' . ctDateTime($step['actual_completed_at']);
+                            } elseif (!$isDone && !empty($step['planned_completion_date'])) {
+                                $summaryParts[] = 'Expected: ' . ctDate($step['planned_completion_date']);
+                            }
+                            $summaryText = implode(' · ', $summaryParts);
                         ?>
             <article class="step <?= e($isActive ? 'active' : '') ?> <?= e($class) ?> <?= e($isOpen ? 'open' : '') ?>">
                 <button type="button" class="step-button" aria-expanded="<?= $isOpen ? 'true' : 'false' ?>">
@@ -1121,7 +1222,16 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
                     <span class="step-number <?= e($class) ?>"><?= e($icon) ?></span>
                     <?php endif; ?>
 
-                    <span class="step-title"><?= e($step['step_name'] ?? '-') ?></span>
+                    <span class="step-title-wrap">
+                        <span class="step-title"><?= e($step['step_name'] ?? '-') ?></span>
+                        <?php if ($summaryText !== ''): ?>
+                        <span class="step-date-line"><?= e($summaryText) ?></span>
+                        <?php endif; ?>
+                        <?php if ($isDispatchPaymentPending): ?>
+                        <span class="step-payment-note">Balance payment pending:
+                            <?= e(ctMoney($paymentSnapshot['balance_amount'])) ?></span>
+                        <?php endif; ?>
+                    </span>
                     <span class="step-status <?= e($class) ?>"><?= e($statusText) ?></span>
                     <span class="step-arrow">⌄</span>
                 </button>
@@ -1168,6 +1278,13 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
                             <strong><?= e(ctStatusLabel($displayStatus)) ?></strong>
                         </div>
                     </div>
+
+                    <?php if ($isDispatchPaymentPending): ?>
+                    <div class="remarks payment">
+                        Payment Pending: Balance <?= e(ctMoney($paymentSnapshot['balance_amount'])) ?> must be paid
+                        before dispatch completion.
+                    </div>
+                    <?php endif; ?>
 
                     <?php if ($status === 'delayed' || (int)($step['is_delayed'] ?? 0) === 1): ?>
                     <div class="remarks delay">
