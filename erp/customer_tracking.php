@@ -785,45 +785,12 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
         color: #fff;
     }
 
-    .step-main {
-        min-width: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 5px;
-    }
-
     .step-title {
         min-width: 0;
         font-size: 15.5px;
         font-weight: 900;
         color: var(--ink);
         line-height: 1.25;
-    }
-
-    .step-dates {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 5px 12px;
-        color: var(--muted);
-        font-size: 11.5px;
-        font-weight: 800;
-        line-height: 1.25;
-    }
-
-    .step-dates span {
-        display: inline-flex;
-        align-items: center;
-        min-width: 0;
-    }
-
-    .step-dates b {
-        color: var(--ink);
-        font-weight: 900;
-        margin-left: 4px;
-    }
-
-    .step.done .step-dates {
-        color: #15803d;
     }
 
     .step-status {
@@ -1016,12 +983,6 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
             font-size: 14.5px;
         }
 
-        .step-dates {
-            flex-direction: column;
-            gap: 3px;
-            font-size: 10.5px;
-        }
-
         .step-status {
             font-size: 12px;
         }
@@ -1160,22 +1121,7 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
                     <span class="step-number <?= e($class) ?>"><?= e($icon) ?></span>
                     <?php endif; ?>
 
-                    <span class="step-main">
-                        <span class="step-title"><?= e($step['step_name'] ?? '-') ?></span>
-
-                        <?php if ($isDone): ?>
-                        <span class="step-dates">
-                            <span>Start:<b><?= e(ctDateTime($step['actual_start_at'] ?? null)) ?></b></span>
-                            <span>Completed:<b><?= e(ctDateTime($step['actual_completed_at'] ?? null)) ?></b></span>
-                        </span>
-                        <?php elseif (in_array($displayStatus, ['in_progress', 'delayed'], true)): ?>
-                        <span class="step-dates">
-                            <span>Start:<b><?= e(ctDateTime($step['actual_start_at'] ?? null)) ?></b></span>
-                            <span>Expected:<b><?= e(ctDate($step['revised_completion_date'] ?? $step['planned_completion_date'] ?? null)) ?></b></span>
-                        </span>
-                        <?php endif; ?>
-                    </span>
-
+                    <span class="step-title"><?= e($step['step_name'] ?? '-') ?></span>
                     <span class="step-status <?= e($class) ?>"><?= e($statusText) ?></span>
                     <span class="step-arrow">⌄</span>
                 </button>
