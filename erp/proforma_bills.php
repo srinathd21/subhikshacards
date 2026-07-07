@@ -86,6 +86,61 @@ function pb_fast_tracking_url(mysqli $conn, array $row): string
     return pb_fast_base_url($conn) . '/customer_tracking.php?token=' . rawurlencode($token);
 }
 
+
+function pb_fast_col_exists(mysqli $conn, string $table, string $col): bool
+{
+    static $cache = [];
+    $key = $table . '.' . $col;
+    if (array_key_exists($key, $cache)) return $cache[$key];
+
+    try {
+        $tableEsc = $conn->real_escape_string($table);
+        $colEsc = $conn->real_escape_string($col);
+        $res = $conn->query("SHOW COLUMNS FROM `{$tableEsc}` LIKE '{$colEsc}'");
+        $ok = $res && $res->num_rows > 0;
+        if ($res) $res->free();
+        return $cache[$key] = $ok;
+    } catch (Throwable $e) {
+        return $cache[$key] = false;
+    }
+}
+
+function pb_fast_proforma_pdf_url(mysqli $conn, array $row): string
+{
+    $id = (int)($row['id'] ?? 0);
+    $path = trim((string)($row['proforma_pdf_path'] ?? ''));
+
+    if ($path === '' && $id > 0 && pb_fast_col_exists($conn, 'proforma_bills', 'proforma_pdf_path')) {
+        try {
+            $stmt = $conn->prepare("SELECT proforma_pdf_path FROM proforma_bills WHERE id = ? LIMIT 1");
+            $stmt->bind_param('i', $id);
+            $stmt->execute();
+            $path = trim((string)(($stmt->get_result()->fetch_assoc()['proforma_pdf_path'] ?? '')));
+            $stmt->close();
+        } catch (Throwable $e) {
+            $path = '';
+        }
+    }
+
+    if ($path !== '') {
+        if (preg_match('#^https?://#i', $path)) return $path;
+        return pb_fast_base_url($conn) . '/' . ltrim($path, '/');
+    }
+
+    return $id > 0 ? pb_fast_base_url($conn) . '/proforma_bill_pdf.php?id=' . $id : '';
+}
+
+function pb_fast_append_invoice_link(mysqli $conn, array $row, string $message): string
+{
+    $link = pb_fast_proforma_pdf_url($conn, $row);
+    if ($link === '') return $message;
+    if (strpos($message, $link) !== false) return $message;
+
+    $message = rtrim($message);
+    if ($message !== '') $message .= "\n\n";
+    return $message . "Proforma Invoice PDF:\n" . $link;
+}
+
 function pb_fast_whatsapp_template_row(mysqli $conn, string $templateKey): ?array
 {
     try {
@@ -135,6 +190,9 @@ function pb_fast_whatsapp_variables(mysqli $conn, array $row): array
         'balance_amount' => pb_fast_money($row['balance_amount'] ?? 0),
         'delivery_date' => !empty($row['delivery_date']) ? date('d-m-Y', strtotime((string)$row['delivery_date'])) : '-',
         'tracking_link' => pb_fast_tracking_url($conn, $row),
+        'proforma_pdf_link' => pb_fast_proforma_pdf_url($conn, $row),
+        'invoice_link' => pb_fast_proforma_pdf_url($conn, $row),
+        'proforma_view_link' => !empty($row['id']) ? pb_fast_base_url($conn) . '/proforma_bill_view.php?id=' . (int)$row['id'] : '',
         'mobile' => (string)($row['mobile'] ?? '')
     ];
 }
@@ -142,9 +200,13 @@ function pb_fast_whatsapp_variables(mysqli $conn, array $row): array
 function pb_fast_whatsapp_message(mysqli $conn, array $row): string
 {
     $template = pb_fast_whatsapp_template_row($conn, 'proforma_created');
-    if (!$template) return '';
+    if (!$template) {
+        $vars = pb_fast_whatsapp_variables($conn, $row);
+        return pb_fast_append_invoice_link($conn, $row, 'Hi ' . ($vars['customer_name'] ?: 'Customer') . ', your proforma bill ' . ($vars['proforma_no'] ?: '-') . ' has been created. Final Amount: ' . ($vars['final_amount'] ?: '-') . '.');
+    }
 
-    return pb_fast_render_template((string)$template['message_body'], pb_fast_whatsapp_variables($conn, $row));
+    $message = pb_fast_render_template((string)$template['message_body'], pb_fast_whatsapp_variables($conn, $row));
+    return pb_fast_append_invoice_link($conn, $row, $message);
 }
 
 function pb_fast_whatsapp_url(mysqli $conn, array $row): string
@@ -717,6 +779,18 @@ foreach ($rows as $statRow) {
                                                 <i data-lucide="eye"></i>
                                             </a>
 
+                                            <a title="FPDF Proforma" aria-label="FPDF Proforma"
+                                                href="proforma_bill_pdf.php?id=<?= (int)$row['id'] ?>" target="_blank"
+                                                class="btn btn-sm btn-outline-dark rounded-circle fw-bold btn-action-icon">
+                                                <i data-lucide="file-text"></i>
+                                            </a>
+
+                                            <a title="Fallback Print" aria-label="Fallback Print"
+                                                href="proforma_bill_pdf.php?id=<?= (int)$row['id'] ?>&fallback=html" target="_blank"
+                                                class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon">
+                                                <i data-lucide="printer"></i>
+                                            </a>
+
                                             <?php if ($canEdit): ?>
                                             <a title="Edit" aria-label="Edit" href="<?= e($editUrl) ?>"
                                                 class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon">
@@ -810,6 +884,16 @@ foreach ($rows as $statRow) {
                                     href="proforma_bill_view.php?id=<?= (int)$row['id'] ?>"
                                     class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon"><i
                                         data-lucide="eye"></i></a>
+
+                                <a title="FPDF Proforma" aria-label="FPDF Proforma"
+                                    href="proforma_bill_pdf.php?id=<?= (int)$row['id'] ?>" target="_blank"
+                                    class="btn btn-sm btn-outline-dark rounded-circle fw-bold btn-action-icon"><i
+                                        data-lucide="file-text"></i></a>
+
+                                <a title="Fallback Print" aria-label="Fallback Print"
+                                    href="proforma_bill_pdf.php?id=<?= (int)$row['id'] ?>&fallback=html" target="_blank"
+                                    class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon"><i
+                                        data-lucide="printer"></i></a>
 
                                 <?php if ($canEdit): ?>
                                 <a title="Edit" aria-label="Edit" href="<?= e($editUrl) ?>"

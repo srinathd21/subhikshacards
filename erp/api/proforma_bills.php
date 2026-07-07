@@ -11,6 +11,11 @@ require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/auth.php';
 require_permission($conn, 'can_view', 'proforma_bills.php');
 
+$proformaPdfHelper = __DIR__ . '/../includes/proforma-bill-pdf.php';
+if (is_file($proformaPdfHelper)) {
+    require_once $proformaPdfHelper;
+}
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -1101,6 +1106,34 @@ function pb_whatsapp_tracking_url(mysqli $conn, array $row): string
     return pb_whatsapp_base_url($conn) . '/customer_tracking.php?token=' . rawurlencode($token);
 }
 
+
+function pb_proforma_pdf_link(mysqli $conn, array $row): string
+{
+    $id = (int)($row['id'] ?? 0);
+    $path = trim((string)($row['proforma_pdf_path'] ?? ''));
+    if ($path !== '') {
+        if (preg_match('#^https?://#i', $path)) return $path;
+        return pb_whatsapp_base_url($conn) . '/' . ltrim($path, '/');
+    }
+    if ($id > 0 && function_exists('sbp_generate_proforma_pdf_file')) {
+        try {
+            $pdf = sbp_generate_proforma_pdf_file($conn, $id, false);
+            if (!empty($pdf['url'])) return (string)$pdf['url'];
+        } catch (Throwable $e) {
+            // Fall back to the live PDF endpoint below.
+        }
+    }
+    return $id > 0 ? pb_whatsapp_base_url($conn) . '/proforma_bill_pdf.php?id=' . $id : '';
+}
+
+function pb_append_invoice_link_to_message(mysqli $conn, array $row, string $message): string
+{
+    $link = pb_proforma_pdf_link($conn, $row);
+    if ($link === '') return $message;
+    if (strpos($message, $link) !== false) return $message;
+    return rtrim($message) . "\n\nProforma Invoice PDF:\n" . $link;
+}
+
 function pb_whatsapp_variables(mysqli $conn, array $row): array
 {
     return [
@@ -1116,6 +1149,9 @@ function pb_whatsapp_variables(mysqli $conn, array $row): array
         'balance_amount' => '₹' . number_format((float)($row['balance_amount'] ?? 0), 2),
         'delivery_date' => !empty($row['delivery_date']) ? date('d-m-Y', strtotime((string)$row['delivery_date'])) : '-',
         'tracking_link' => pb_whatsapp_tracking_url($conn, $row),
+        'proforma_pdf_link' => pb_proforma_pdf_link($conn, $row),
+        'invoice_link' => pb_proforma_pdf_link($conn, $row),
+        'proforma_view_link' => !empty($row['id']) ? pb_whatsapp_base_url($conn) . '/proforma_bill_view.php?id=' . (int)$row['id'] : '',
         'mobile' => (string)($row['mobile'] ?? '')
     ];
 }
@@ -1127,7 +1163,8 @@ function pb_whatsapp_template_message(mysqli $conn, string $templateKey, array $
         return '';
     }
 
-    return pb_whatsapp_render_template((string)$template['message_body'], pb_whatsapp_variables($conn, $row));
+    $message = pb_whatsapp_render_template((string)$template['message_body'], pb_whatsapp_variables($conn, $row));
+    return pb_append_invoice_link_to_message($conn, $row, $message);
 }
 
 function pb_get_whatsapp_row(mysqli $conn, int $id): ?array
@@ -1315,27 +1352,43 @@ function pb_send_whatsapp_by_api(mysqli $conn, int $id): array
         return ['success' => false, 'message' => 'Proforma bill not found.'];
     }
 
-    $variables = pb_whatsapp_variables($conn, $row);
+    if (function_exists('sbp_generate_proforma_pdf_file')) {
+        try {
+            $pdf = sbp_generate_proforma_pdf_file($conn, $id, false);
+            if (!empty($pdf['url'])) {
+                $row['proforma_pdf_link'] = (string)$pdf['url'];
+                $row['invoice_link'] = (string)$pdf['url'];
+                $row['proforma_pdf_path'] = (string)($pdf['path'] ?? '');
+            }
+        } catch (Throwable $e) {
+            // Do not block WhatsApp because PDF endpoint can still generate on demand.
+        }
+    }
+
+    $message = pb_whatsapp_template_message($conn, 'proforma_created', $row);
+    if (trim($message) === '') {
+        $vars = pb_whatsapp_variables($conn, $row);
+        $message = "Hi " . ($vars['customer_name'] ?: 'Customer') . ",\n\n"
+            . "Your proforma bill " . ($vars['proforma_no'] ?: '-') . " has been created.\n"
+            . "Final Amount: " . ($vars['final_amount'] ?: '-') . "\n"
+            . "Advance Paid: " . ($vars['advance_amount'] ?: '-') . "\n"
+            . "Balance: " . ($vars['balance_amount'] ?: '-') . "\n"
+            . "Delivery Date: " . ($vars['delivery_date'] ?: '-') . "\n\n"
+            . "Proforma Invoice PDF:\n" . ($vars['proforma_pdf_link'] ?: $vars['invoice_link']) . "\n\n"
+            . "Thank you,\nSubhiksha Cards";
+    }
+    $message = pb_append_invoice_link_to_message($conn, $row, $message);
+
     $meta = [
         'related_module' => 'Proforma Bills',
         'related_id' => $id,
-        'customer_id' => $row['customer_id'] ?? null
+        'customer_id' => $row['customer_id'] ?? null,
+        'sent_by' => (int)($_SESSION['user_id'] ?? 0)
     ];
-
-    if (function_exists('subhiksha_send_template_whatsapp')) {
-        return subhiksha_send_template_whatsapp(
-            $conn,
-            'proforma_created',
-            (string)($row['mobile'] ?? ''),
-            $variables,
-            $meta
-        );
-    }
 
     return subhiksha_send_whatsapp($conn, array_merge($meta, [
         'mobile' => (string)($row['mobile'] ?? ''),
-        'template_key' => 'proforma_created',
-        'variables' => $variables
+        'message' => $message
     ]));
 }
 
@@ -1354,9 +1407,17 @@ function pb_send_whatsapp_preferred(mysqli $conn, int $id): array
         $apiResult['mode'] = 'api';
         $apiResult['manual_whatsapp'] = false;
 
-        if (!($apiResult['success'] ?? false)) {
-            $apiResult['message'] = 'WhatsApp API sending failed: ' . (string)($apiResult['response'] ?? $apiResult['message'] ?? 'Unknown error.');
+        if ($apiResult['success'] ?? false) {
+            return $apiResult;
         }
+
+        // Fallback option: if API fails, open WhatsApp Web/App with the same message.
+        $manualLog = pb_whatsapp_log_manual($conn, $id);
+        $apiResult['mode'] = 'api_fallback_manual';
+        $apiResult['manual_whatsapp'] = true;
+        $apiResult['open_whatsapp_url'] = $manualUrl;
+        $apiResult['fallback_log_id'] = $manualLog['log_id'] ?? 0;
+        $apiResult['message'] = 'WhatsApp API sending failed. Manual WhatsApp fallback opened.';
 
         return $apiResult;
     }
@@ -2141,6 +2202,19 @@ try {
                 $responseData['job_id'] = $jobId;
                 $responseData['job_card_no'] = $createdJobCardNo;
                 $responseData['created_job_card'] = true;
+            }
+
+            if (function_exists('sbp_generate_proforma_pdf_file')) {
+                try {
+                    $pdfInfo = sbp_generate_proforma_pdf_file($conn, $proformaId, true);
+                    $responseData['proforma_pdf_path'] = (string)($pdfInfo['path'] ?? '');
+                    $responseData['proforma_pdf_link'] = (string)($pdfInfo['url'] ?? '');
+                    $responseData['invoice_link'] = (string)($pdfInfo['url'] ?? '');
+                    $responseData['pdf_generated'] = true;
+                } catch (Throwable $e) {
+                    $responseData['pdf_generated'] = false;
+                    $responseData['pdf_error'] = $e->getMessage();
+                }
             }
 
             $responseMessage = $createdJobCard
