@@ -46,6 +46,265 @@ function jcvMoney($value): string
     return '₹' . number_format((float)$value, 2);
 }
 
+function jcvIsDispatchStageKey(?string $stepKey, ?string $stepName = ''): bool
+{
+    $key = strtolower(trim((string)$stepKey));
+    $name = strtolower(trim((string)$stepName));
+
+    // Only final dispatch stages are merged/validated here.
+    // "Send to Dispatch" remains a separate production handover stage.
+    return $key === 'dispatch'
+        || in_array($key, ['ready_for_dispatch', 'dispatched'], true)
+        || in_array($name, ['dispatch', 'ready for dispatch', 'dispatched'], true)
+        || (strpos($key, 'dispatch') !== false && strpos($key, 'send_to') === false);
+}
+
+
+function jcvPaymentSnapshot(mysqli $conn, array $job): array
+{
+    $final = (float)($job['final_amount'] ?? 0);
+    $storedAdvance = (float)($job['advance_amount'] ?? 0);
+    $storedBalance = (float)($job['balance_amount'] ?? 0);
+    $paid = $storedAdvance;
+    $usedLedger = false;
+
+    $proformaId = (int)($job['proforma_bill_id'] ?? 0);
+    if ($proformaId > 0 && jcvTableExists($conn, 'payments')) {
+        try {
+            $stmt = $conn->prepare("\n                SELECT\n                    COUNT(*) AS cnt,\n                    COALESCE(SUM(CASE WHEN payment_type = 'refund' THEN -amount ELSE amount END), 0) AS paid_amount\n                FROM payments\n                WHERE proforma_bill_id = ?\n                  AND COALESCE(is_cancelled, 0) = 0\n            ");
+            $stmt->bind_param('i', $proformaId);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if ($row && (int)($row['cnt'] ?? 0) > 0) {
+                $paid = (float)($row['paid_amount'] ?? 0);
+                $usedLedger = true;
+            }
+        } catch (Throwable $e) {
+            $paid = $storedAdvance;
+        }
+    }
+
+    if ($final <= 0 && $storedBalance > 0) {
+        $balance = $storedBalance;
+    } else {
+        $balance = max(0, $final - $paid);
+    }
+
+    $isPaid = ($final > 0 && $balance <= 0.01) || ($final <= 0 && $storedBalance <= 0.01 && $storedAdvance > 0);
+
+    return [
+        'final_amount' => $final,
+        'paid_amount' => $paid,
+        'balance_amount' => $balance,
+        'is_paid' => $isPaid,
+        'used_ledger' => $usedLedger,
+    ];
+}
+
+function jcvAssertDispatchPaymentAllowed(mysqli $conn, array $job, array $step, string $newStatus): void
+{
+    if ($newStatus !== 'completed') return;
+
+    if (!jcvIsDispatchStageKey($step['step_key'] ?? '', $step['step_name'] ?? '')) {
+        return;
+    }
+
+    $payment = jcvPaymentSnapshot($conn, $job);
+    if (!empty($payment['is_paid'])) {
+        return;
+    }
+
+    throw new RuntimeException(
+        'Payment Pending: Balance amount ' . jcvMoney($payment['balance_amount'] ?? 0) .
+        ' must be collected before completing Dispatch.'
+    );
+}
+
+function jcvCompleteDispatchGroup(mysqli $conn, int $jobId, int $userId, string $remarks = ''): void
+{
+    if ($jobId <= 0 || !jcvTableExists($conn, 'job_tracking') || !jcvTableExists($conn, 'workflow_steps')) {
+        return;
+    }
+
+    $stmt = $conn->prepare("\n        UPDATE job_tracking jt\n        INNER JOIN workflow_steps ws\n            ON ws.id = jt.workflow_step_id\n        SET\n            jt.status = 'completed',\n            jt.actual_start_at = COALESCE(jt.actual_start_at, NOW()),\n            jt.actual_completed_at = COALESCE(jt.actual_completed_at, NOW()),\n            jt.completed_by = COALESCE(jt.completed_by, ?),\n            jt.remarks = CASE\n                WHEN TRIM(COALESCE(jt.remarks, '')) = '' THEN ?\n                ELSE jt.remarks\n            END,\n            jt.updated_at = NOW()\n        WHERE jt.job_card_id = ?\n          AND jt.status NOT IN ('completed', 'skipped', 'cancelled')\n          AND (\n                ws.step_key IN ('ready_for_dispatch', 'dispatched', 'dispatch')\n                OR LOWER(ws.step_name) IN ('ready for dispatch', 'dispatched', 'dispatch')\n                OR (ws.step_key LIKE '%dispatch%' AND ws.step_key NOT LIKE 'send_to%')\n          )\n    ");
+    $stmt->bind_param('isi', $userId, $remarks, $jobId);
+    $stmt->execute();
+    $stmt->close();
+}
+
+function jcvAutoStartNextPendingStage(mysqli $conn, int $jobId, int $trackingId): void
+{
+    if ($jobId <= 0 || $trackingId <= 0 || !jcvTableExists($conn, 'job_tracking')) {
+        return;
+    }
+
+    $join = jcvTableExists($conn, 'workflow_steps')
+        ? 'LEFT JOIN workflow_steps ws ON ws.id = jt.workflow_step_id'
+        : '';
+    $sortSelect = jcvTableExists($conn, 'workflow_steps')
+        ? 'COALESCE(ws.sort_order, jt.id) AS sort_order'
+        : 'jt.id AS sort_order';
+    $sortSql = jcvTableExists($conn, 'workflow_steps')
+        ? 'ORDER BY COALESCE(ws.sort_order, jt.id) ASC, jt.id ASC'
+        : 'ORDER BY jt.id ASC';
+
+    $stmt = $conn->prepare("\n        SELECT jt.id, jt.status, {$sortSelect}\n        FROM job_tracking jt\n        {$join}\n        WHERE jt.job_card_id = ?\n        {$sortSql}\n    ");
+    $stmt->bind_param('i', $jobId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+
+    $rows = [];
+    while ($row = $res->fetch_assoc()) {
+        $rows[] = $row;
+    }
+    $stmt->close();
+
+    $foundCurrent = false;
+    $nextId = 0;
+    foreach ($rows as $row) {
+        if ((int)($row['id'] ?? 0) === $trackingId) {
+            $foundCurrent = true;
+            continue;
+        }
+
+        if ($foundCurrent && strtolower(trim((string)($row['status'] ?? 'pending'))) === 'pending') {
+            $nextId = (int)$row['id'];
+            break;
+        }
+    }
+
+    if ($nextId <= 0) return;
+
+    $stmt = $conn->prepare("\n        UPDATE job_tracking\n        SET status = 'in_progress',\n            actual_start_at = COALESCE(actual_start_at, NOW()),\n            updated_at = NOW()\n        WHERE id = ?\n          AND job_card_id = ?\n          AND status = 'pending'\n    ");
+    $stmt->bind_param('ii', $nextId, $jobId);
+    $stmt->execute();
+    $stmt->close();
+}
+
+function jcvFirstNonEmpty(array $rows, string $field): string
+{
+    foreach ($rows as $row) {
+        $value = trim((string)($row[$field] ?? ''));
+        if ($value !== '') return $value;
+    }
+    return '';
+}
+
+function jcvMinDateValue(array $rows, string $field): ?string
+{
+    $min = null;
+    foreach ($rows as $row) {
+        $value = trim((string)($row[$field] ?? ''));
+        if ($value === '') continue;
+        $ts = strtotime($value);
+        if ($ts === false) continue;
+        if ($min === null || $ts < strtotime($min)) $min = $value;
+    }
+    return $min;
+}
+
+function jcvMaxDateValue(array $rows, string $field): ?string
+{
+    $max = null;
+    foreach ($rows as $row) {
+        $value = trim((string)($row[$field] ?? ''));
+        if ($value === '') continue;
+        $ts = strtotime($value);
+        if ($ts === false) continue;
+        if ($max === null || $ts > strtotime($max)) $max = $value;
+    }
+    return $max;
+}
+
+function jcvMergedDispatchStatus(array $rows): string
+{
+    $hasPending = false;
+    $hasProgress = false;
+    $hasDelayed = false;
+    $hasCompleted = false;
+    $allClosed = true;
+
+    foreach ($rows as $row) {
+        $status = strtolower(trim((string)($row['status'] ?? 'pending')));
+        if ($status === 'delayed') $hasDelayed = true;
+        if (in_array($status, ['in_progress', 'progress'], true)) $hasProgress = true;
+        if (in_array($status, ['completed', 'skipped'], true)) $hasCompleted = true;
+        if (!in_array($status, ['completed', 'skipped', 'cancelled'], true)) {
+            $allClosed = false;
+            if ($status === 'pending') $hasPending = true;
+        }
+    }
+
+    if ($hasDelayed) return 'delayed';
+    if ($allClosed && $hasCompleted) return 'completed';
+    if ($hasProgress || $hasCompleted) return 'in_progress';
+    return 'pending';
+}
+
+function jcvMergeDispatchRows(array $rows): array
+{
+    if (!$rows) return [];
+
+    $base = null;
+    foreach ($rows as $row) {
+        $status = strtolower(trim((string)($row['status'] ?? 'pending')));
+        if (!in_array($status, ['completed', 'skipped', 'cancelled'], true)) {
+            $base = $row;
+            break;
+        }
+    }
+    if (!$base) $base = $rows[0];
+
+    $base['step_name'] = 'Dispatch';
+    $base['step_key'] = 'dispatch';
+    $base['responsible_role_name'] = jcvFirstNonEmpty($rows, 'responsible_role_name') ?: 'Sales / Dispatch';
+    $base['responsible_user_name'] = jcvFirstNonEmpty($rows, 'responsible_user_name') ?: '-';
+    $base['completed_by_name'] = jcvFirstNonEmpty(array_reverse($rows), 'completed_by_name') ?: '-';
+    $base['planned_start_date'] = jcvMinDateValue($rows, 'planned_start_date');
+    $base['planned_completion_date'] = jcvMaxDateValue($rows, 'planned_completion_date');
+    $base['actual_start_at'] = jcvMinDateValue($rows, 'actual_start_at');
+    $base['actual_completed_at'] = jcvMaxDateValue($rows, 'actual_completed_at');
+    $base['status'] = jcvMergedDispatchStatus($rows);
+
+    $remarks = [];
+    foreach ($rows as $row) {
+        $text = trim((string)($row['remarks'] ?? ''));
+        if ($text !== '') $remarks[] = $text;
+    }
+    if ($remarks) $base['remarks'] = implode(' | ', array_unique($remarks));
+
+    return $base;
+}
+
+function jcvBuildDisplayTrackingRows(array $rows): array
+{
+    $out = [];
+    $dispatchRows = [];
+    $dispatchPosition = null;
+
+    foreach ($rows as $row) {
+        if (jcvIsDispatchStageKey($row['step_key'] ?? '', $row['step_name'] ?? '')) {
+            if ($dispatchPosition === null) {
+                $dispatchPosition = count($out);
+                $out[] = ['__dispatch_placeholder' => true];
+            }
+            $dispatchRows[] = $row;
+            continue;
+        }
+        $out[] = $row;
+    }
+
+    if ($dispatchPosition !== null) {
+        $out[$dispatchPosition] = jcvMergeDispatchRows($dispatchRows);
+    }
+
+    return array_values(array_filter($out, static function ($row) {
+        return empty($row['__dispatch_placeholder']);
+    }));
+}
+
 function jcvRoleLabel(string $roleKey): string
 {
     $labels = [
@@ -1639,6 +1898,8 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                         throw new RuntimeException('Please upload proof/design photo before completing this stage. In Progress / Pending / Delayed status does not require photo upload.');
                     }
 
+                    jcvAssertDispatchPaymentAllowed($conn, $job, $stepRow, $newStatus);
+
                     if ($newStatus === 'completed' && $isApprovalStage) {
                         $approvalType = jcvApprovalTypeForStep($stepRow);
                         $approval = jcvGetCustomerApproval($conn, $jobId, (int)$stepRow['workflow_step_id'], $approvalType);
@@ -1765,6 +2026,13 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                         $stmt->bind_param('ssii', $newStatus, $remarks, $trackingId, $jobId);
                         $stmt->execute();
                         $stmt->close();
+                    }
+
+                    if ($newStatus === 'completed') {
+                        if (jcvIsDispatchStageKey($stepRow['step_key'] ?? '', $stepRow['step_name'] ?? '')) {
+                            jcvCompleteDispatchGroup($conn, $jobId, $userId, $remarks);
+                        }
+                        jcvAutoStartNextPendingStage($conn, $jobId, $trackingId);
                     }
 
                     $summary = [
@@ -2014,6 +2282,7 @@ if ($job) {
             }
 
             $stmt->close();
+            $trackingRows = jcvBuildDisplayTrackingRows($trackingRows);
         }
     } catch (Throwable $e) {
         $trackingRows = [];
@@ -2024,13 +2293,22 @@ if ($job) {
     $trackingPhotosById = jcvGetTrackingPhotos($conn, $jobId);
 }
 
-$totalSteps = $job ? (int)($job['total_steps'] ?? 0) : 0;
-$completedSteps = $job ? (int)($job['completed_steps'] ?? 0) : 0;
+$totalSteps = $trackingRows ? count($trackingRows) : ($job ? (int)($job['total_steps'] ?? 0) : 0);
+$completedSteps = 0;
+foreach ($trackingRows as $row) {
+    if (in_array(strtolower((string)($row['status'] ?? 'pending')), ['completed', 'skipped'], true)) {
+        $completedSteps++;
+    }
+}
+if (!$trackingRows && $job) {
+    $completedSteps = (int)($job['completed_steps'] ?? 0);
+}
 $progressPercent = $totalSteps > 0 ? round(($completedSteps / $totalSteps) * 100) : 0;
 $progressPercent = max(0, min(100, $progressPercent));
 
 $orderType = $job ? strtolower((string)($job['order_type'] ?? 'readymade')) : '';
 $statusKey = $job ? strtolower((string)($job['status_key'] ?? '')) : '';
+$paymentSnapshot = $job ? jcvPaymentSnapshot($conn, $job) : ['is_paid' => false, 'balance_amount' => 0, 'paid_amount' => 0, 'final_amount' => 0];
 
 if ($message !== '' && $toastTitle === 'Info') {
     $toastTitle = $messageType === 'success' ? 'Success' : ($messageType === 'warning' ? 'Warning' : 'Failed');
@@ -2677,7 +2955,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                         aria-atomic="true" data-bs-delay="4200">
                         <div class="d-flex">
                             <div class="toast-body">
-                                <div class="toast-title"><?= e($toastTitle ?: ($messageType === 'success' ? 'Success' : 'Failed')) ?></div>
+                                <div class="toast-title">
+                                    <?= e($toastTitle ?: ($messageType === 'success' ? 'Success' : 'Failed')) ?></div>
                                 <div class="toast-message"><?= e($message) ?></div>
                             </div>
                             <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
@@ -2869,6 +3148,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                         <?php foreach ($trackingRows as $step): ?>
                         <?php
                             $stepStatus = strtolower((string)($step['status'] ?? 'pending'));
+                            $isDispatchStage = jcvIsDispatchStageKey($step['step_key'] ?? '', $step['step_name'] ?? '');
+                            $dispatchPaymentPending = $isDispatchStage && empty($paymentSnapshot['is_paid']);
                             $statusClass = jcvStatusClass($stepStatus);
                             $stepOwnerRoleKey = $step['responsible_role_key'] ?: ($step['default_owner_role_key'] ?? '');
                             $canUpdateThisStep = jcvCanUpdateStep(
@@ -2915,10 +3196,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                                     <?php endif; ?>
 
                                     <?php if ($canOpenUpdateForm): ?>
-                                    <button type="button"
-                                        class="btn btn-sm btn-primary rounded-pill px-3 fw-bold"
-                                        data-bs-toggle="collapse"
-                                        data-bs-target="#updateStage<?= (int)$step['id'] ?>">
+                                    <button type="button" class="btn btn-sm btn-primary rounded-pill px-3 fw-bold"
+                                        data-bs-toggle="collapse" data-bs-target="#updateStage<?= (int)$step['id'] ?>">
                                         Update Status
                                     </button>
                                     <?php elseif ($canUpdateThisStep && !$previousStepAllowed): ?>
@@ -3033,55 +3312,99 @@ if ($message !== '' && $toastTitle === 'Info') {
                                 ?>
                                 <div class="col-12">
                                     <div class="approval-box <?= e($approvalBoxClass) ?>">
-                                        <strong>Customer Approval: <?= $approvalDone ? 'Approved' : ($approvalRejected ? 'Denied / Not Approved' : 'Pending') ?></strong>
+                                        <strong>Customer Approval:
+                                            <?= $approvalDone ? 'Approved' : ($approvalRejected ? 'Denied / Not Approved' : 'Pending') ?></strong>
                                         <div class="small mt-1">
                                             <?php if ($approvalDone): ?>
-                                                <?php if ((int)($step['approved_by_customer'] ?? 0) === 1): ?>
-                                                    Approved by customer link.
-                                                <?php elseif ((int)($step['approved_by_call'] ?? 0) === 1): ?>
-                                                    Manually approved by call<?= !empty($step['call_confirmed_by_name']) ? ' by ' . e($step['call_confirmed_by_name']) : '' ?>.
-                                                <?php endif; ?>
-                                                <?= !empty($step['approved_at']) ? ' Manual/customer approved time: ' . e(jcvDateTime($step['approved_at'])) : '' ?>
+                                            <?php if ((int)($step['approved_by_customer'] ?? 0) === 1): ?>
+                                            Approved by customer link.
+                                            <?php elseif ((int)($step['approved_by_call'] ?? 0) === 1): ?>
+                                            Manually approved by
+                                            call<?= !empty($step['call_confirmed_by_name']) ? ' by ' . e($step['call_confirmed_by_name']) : '' ?>.
+                                            <?php endif; ?>
+                                            <?= !empty($step['approved_at']) ? ' Manual/customer approved time: ' . e(jcvDateTime($step['approved_at'])) : '' ?>
                                             <?php elseif ($approvalRejected): ?>
-                                                Customer denied / requested correction. This approval stage is locked and the next stage will not open until approval is received.
-                                                <?php if (!empty($step['customer_remarks'])): ?>
-                                                    <br><strong>Customer Remark:</strong> <?= e($step['customer_remarks']) ?>
-                                                <?php endif; ?>
+                                            Customer denied / requested correction. This approval stage is locked and
+                                            the next stage will not open until approval is received.
+                                            <?php if (!empty($step['customer_remarks'])): ?>
+                                            <br><strong>Customer Remark:</strong> <?= e($step['customer_remarks']) ?>
+                                            <?php endif; ?>
                                             <?php else: ?>
-                                                This approval stage cannot be completed until the customer approves it, or Admin/Sales confirms approval by call.
+                                            This approval stage cannot be completed until the customer approves it, or
+                                            Admin/Sales confirms approval by call.
                                             <?php endif; ?>
                                         </div>
 
                                         <?php if (!empty($step['approval_id'])): ?>
                                         <div class="approval-grid">
-                                            <div class="approval-mini"><small>ID</small><strong><?= e($step['approval_id']) ?></strong></div>
-                                            <div class="approval-mini"><small>Job Card ID</small><strong><?= e($step['approval_job_card_id'] ?? '-') ?></strong></div>
-                                            <div class="approval-mini"><small>Workflow Step ID</small><strong><?= e($step['approval_workflow_step_id'] ?? '-') ?></strong></div>
-                                            <div class="approval-mini"><small>Approval Type</small><strong><?= e($step['approval_type'] ?? '-') ?></strong></div>
-                                            <div class="approval-mini"><small>Approval Token</small><span><?= e($step['approval_token'] ?? '-') ?></span></div>
-                                            <div class="approval-mini"><small>Customer Name</small><strong><?= e($step['approval_customer_name'] ?? '-') ?></strong></div>
-                                            <div class="approval-mini"><small>Mobile</small><strong><?= e($step['approval_mobile'] ?? '-') ?></strong></div>
-                                            <div class="approval-mini"><small>Status</small><strong><?= e($step['approval_status'] ?? '-') ?></strong></div>
-                                            <div class="approval-mini"><small>Approved By Customer</small><strong><?= ((int)($step['approved_by_customer'] ?? 0) === 1) ? 'Yes' : 'No' ?></strong></div>
-                                            <div class="approval-mini"><small>Approved By Call</small><strong><?= ((int)($step['approved_by_call'] ?? 0) === 1) ? 'Yes' : 'No' ?></strong></div>
-                                            <div class="approval-mini"><small>Call Confirmed By</small><strong><?= e($step['call_confirmed_by_name'] ?? ($step['call_confirmed_by'] ?? '-')) ?></strong></div>
-                                            <div class="approval-mini"><small>Approved At</small><strong><?= e(jcvDateTime($step['approved_at'] ?? null)) ?></strong></div>
-                                            <div class="approval-mini"><small>Rejected At</small><strong><?= e(jcvDateTime($step['rejected_at'] ?? null)) ?></strong></div>
-                                            <div class="approval-mini"><small>Expires At</small><strong><?= e(jcvDateTime($step['expires_at'] ?? null)) ?></strong></div>
-                                            <div class="approval-mini"><small>IP Address</small><strong><?= e($step['ip_address'] ?? '-') ?></strong></div>
-                                            <div class="approval-mini"><small>Link Sent At</small><strong><?= e(jcvDateTime($step['link_sent_at'] ?? null)) ?></strong></div>
-                                            <div class="approval-mini"><small>Link Sent By</small><strong><?= e($step['link_sent_by_name'] ?? ($step['link_sent_by'] ?? '-')) ?></strong></div>
-                                            <div class="approval-mini"><small>Created At</small><strong><?= e(jcvDateTime($step['approval_created_at'] ?? null)) ?></strong></div>
-                                            <div class="approval-mini"><small>Updated At</small><strong><?= e(jcvDateTime($step['approval_updated_at'] ?? null)) ?></strong></div>
-                                            <div class="approval-mini"><small>User Agent</small><span><?= e($step['user_agent'] ?? '-') ?></span></div>
+                                            <div class="approval-mini">
+                                                <small>ID</small><strong><?= e($step['approval_id']) ?></strong></div>
+                                            <div class="approval-mini"><small>Job Card
+                                                    ID</small><strong><?= e($step['approval_job_card_id'] ?? '-') ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Workflow Step
+                                                    ID</small><strong><?= e($step['approval_workflow_step_id'] ?? '-') ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Approval
+                                                    Type</small><strong><?= e($step['approval_type'] ?? '-') ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Approval
+                                                    Token</small><span><?= e($step['approval_token'] ?? '-') ?></span>
+                                            </div>
+                                            <div class="approval-mini"><small>Customer
+                                                    Name</small><strong><?= e($step['approval_customer_name'] ?? '-') ?></strong>
+                                            </div>
+                                            <div class="approval-mini">
+                                                <small>Mobile</small><strong><?= e($step['approval_mobile'] ?? '-') ?></strong>
+                                            </div>
+                                            <div class="approval-mini">
+                                                <small>Status</small><strong><?= e($step['approval_status'] ?? '-') ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Approved By
+                                                    Customer</small><strong><?= ((int)($step['approved_by_customer'] ?? 0) === 1) ? 'Yes' : 'No' ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Approved By
+                                                    Call</small><strong><?= ((int)($step['approved_by_call'] ?? 0) === 1) ? 'Yes' : 'No' ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Call Confirmed
+                                                    By</small><strong><?= e($step['call_confirmed_by_name'] ?? ($step['call_confirmed_by'] ?? '-')) ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Approved
+                                                    At</small><strong><?= e(jcvDateTime($step['approved_at'] ?? null)) ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Rejected
+                                                    At</small><strong><?= e(jcvDateTime($step['rejected_at'] ?? null)) ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Expires
+                                                    At</small><strong><?= e(jcvDateTime($step['expires_at'] ?? null)) ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>IP
+                                                    Address</small><strong><?= e($step['ip_address'] ?? '-') ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Link Sent
+                                                    At</small><strong><?= e(jcvDateTime($step['link_sent_at'] ?? null)) ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Link Sent
+                                                    By</small><strong><?= e($step['link_sent_by_name'] ?? ($step['link_sent_by'] ?? '-')) ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Created
+                                                    At</small><strong><?= e(jcvDateTime($step['approval_created_at'] ?? null)) ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>Updated
+                                                    At</small><strong><?= e(jcvDateTime($step['approval_updated_at'] ?? null)) ?></strong>
+                                            </div>
+                                            <div class="approval-mini"><small>User
+                                                    Agent</small><span><?= e($step['user_agent'] ?? '-') ?></span></div>
                                         </div>
                                         <?php endif; ?>
 
                                         <?php if (!empty($step['customer_remarks'])): ?>
-                                        <div class="small mt-2"><strong>Customer Remarks:</strong> <?= e($step['customer_remarks']) ?></div>
+                                        <div class="small mt-2"><strong>Customer Remarks:</strong>
+                                            <?= e($step['customer_remarks']) ?></div>
                                         <?php endif; ?>
                                         <?php if (!empty($step['internal_remarks'])): ?>
-                                        <div class="small mt-1"><strong>Internal / Manual Approval Remarks:</strong> <?= e($step['internal_remarks']) ?></div>
+                                        <div class="small mt-1"><strong>Internal / Manual Approval Remarks:</strong>
+                                            <?= e($step['internal_remarks']) ?></div>
                                         <?php endif; ?>
                                     </div>
                                 </div>
@@ -3115,9 +3438,11 @@ if ($message !== '' && $toastTitle === 'Info') {
                                 ?>
                                 <div class="col-12">
                                     <div class="photo-approval-card">
-                                        <div class="d-flex flex-column flex-md-row justify-content-between gap-3 align-items-md-center">
+                                        <div
+                                            class="d-flex flex-column flex-md-row justify-content-between gap-3 align-items-md-center">
                                             <div class="photo-approval-head">
-                                                <small class="text-muted-custom fw-bold text-uppercase">Uploaded Design / Proofing Photos</small>
+                                                <small class="text-muted-custom fw-bold text-uppercase">Uploaded Design
+                                                    / Proofing Photos</small>
                                                 <strong><?= count($stepPhotos) ?> photo(s) uploaded</strong>
                                                 <div class="photo-status-row">
                                                     <span class="photo-status-chip <?= e($photoStatusClass) ?>">
@@ -3125,16 +3450,21 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                         <?= e($photoStatusLabel) ?>
                                                     </span>
                                                     <?php if ($photoApproval && !empty($photoApproval['link_sent_at'])): ?>
-                                                        <span class="text-muted-custom small fw-bold">Sent: <?= e(jcvDateTime($photoApproval['link_sent_at'])) ?></span>
+                                                    <span class="text-muted-custom small fw-bold">Sent:
+                                                        <?= e(jcvDateTime($photoApproval['link_sent_at'])) ?></span>
                                                     <?php endif; ?>
                                                     <?php if ($photoStatusClass === 'approved'): ?>
-                                                        <span class="text-success small fw-bold">Customer approved this proof/design.</span>
+                                                    <span class="text-success small fw-bold">Customer approved this
+                                                        proof/design.</span>
                                                     <?php elseif ($photoStatusClass === 'rejected'): ?>
-                                                        <span class="text-danger small fw-bold">Customer rejected this proof/design. Upload corrected copy.</span>
+                                                    <span class="text-danger small fw-bold">Customer rejected this
+                                                        proof/design. Upload corrected copy.</span>
                                                     <?php elseif ($photoStatusClass === 'expired'): ?>
-                                                        <span class="text-danger small fw-bold">This approval link is cancelled/expired. Upload fresh copy.</span>
+                                                    <span class="text-danger small fw-bold">This approval link is
+                                                        cancelled/expired. Upload fresh copy.</span>
                                                     <?php else: ?>
-                                                        <span class="text-muted-custom small fw-bold">Waiting for customer approval.</span>
+                                                    <span class="text-muted-custom small fw-bold">Waiting for customer
+                                                        approval.</span>
                                                     <?php endif; ?>
                                                 </div>
                                             </div>
@@ -3143,8 +3473,10 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                 <?php if ($canSendPhotoApprovalApi): ?>
                                                 <form method="post" class="m-0">
                                                     <input type="hidden" name="action" value="send_photo_approval_api">
-                                                    <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
-                                                    <button type="submit" class="btn btn-sm wa-photo-btn rounded-pill px-3 fw-bold">
+                                                    <input type="hidden" name="tracking_id"
+                                                        value="<?= (int)$step['id'] ?>">
+                                                    <button type="submit"
+                                                        class="btn btn-sm wa-photo-btn rounded-pill px-3 fw-bold">
                                                         Send WhatsApp Approval Link
                                                     </button>
                                                 </form>
@@ -3155,14 +3487,19 @@ if ($message !== '' && $toastTitle === 'Info') {
                                         <div class="tracking-photo-list">
                                             <?php foreach ($stepPhotos as $photo): ?>
                                             <div class="tracking-photo-item">
-                                                <a href="<?= e($photo['file_path'] ?? '#') ?>" target="_blank" rel="noopener">
-                                                    <img src="<?= e($photo['file_path'] ?? '') ?>" class="tracking-photo-thumb" alt="Tracking photo">
+                                                <a href="<?= e($photo['file_path'] ?? '#') ?>" target="_blank"
+                                                    rel="noopener">
+                                                    <img src="<?= e($photo['file_path'] ?? '') ?>"
+                                                        class="tracking-photo-thumb" alt="Tracking photo">
                                                 </a>
                                                 <?php if ($canCancelUploadedPhoto): ?>
-                                                <form method="post" class="photo-cancel-form" onsubmit="return confirm('Cancel this uploaded proof/design photo? If this is the last photo, the customer approval link will expire and this stage will move back for fresh upload.');">
+                                                <form method="post" class="photo-cancel-form"
+                                                    onsubmit="return confirm('Cancel this uploaded proof/design photo? If this is the last photo, the customer approval link will expire and this stage will move back for fresh upload.');">
                                                     <input type="hidden" name="action" value="cancel_tracking_photo">
-                                                    <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
-                                                    <input type="hidden" name="photo_id" value="<?= (int)($photo['id'] ?? 0) ?>">
+                                                    <input type="hidden" name="tracking_id"
+                                                        value="<?= (int)$step['id'] ?>">
+                                                    <input type="hidden" name="photo_id"
+                                                        value="<?= (int)($photo['id'] ?? 0) ?>">
                                                     <button type="submit" class="photo-cancel-btn">Cancel</button>
                                                 </form>
                                                 <?php endif; ?>
@@ -3176,26 +3513,56 @@ if ($message !== '' && $toastTitle === 'Info') {
                                 <?php if ($canOpenUpdateForm): ?>
                                 <div class="col-12">
                                     <div class="collapse" id="updateStage<?= (int)$step['id'] ?>">
-                                        <form method="post" enctype="multipart/form-data" class="info-card mt-2 stage-update-form compact-update-form" data-approval-stage="<?= $isApprovalStage ? '1' : '0' ?>" data-approval-done="<?= $approvalDone ? '1' : '0' ?>" data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>" data-design-photo-required="<?= $requiresDesignPhotoUpload ? '1' : '0' ?>" data-has-existing-photos="<?= !empty($stepPhotos) ? '1' : '0' ?>">
+                                        <form method="post" enctype="multipart/form-data"
+                                            class="info-card mt-2 stage-update-form compact-update-form"
+                                            data-approval-stage="<?= $isApprovalStage ? '1' : '0' ?>"
+                                            data-approval-done="<?= $approvalDone ? '1' : '0' ?>"
+                                            data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>"
+                                            data-design-photo-required="<?= $requiresDesignPhotoUpload ? '1' : '0' ?>"
+                                            data-has-existing-photos="<?= !empty($stepPhotos) ? '1' : '0' ?>">
                                             <input type="hidden" name="action" value="update_step_status">
                                             <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
 
+                                            <?php if ($dispatchPaymentPending): ?>
+                                            <div class="alert alert-warning rounded-4 fw-bold mb-3">
+                                                Payment Pending: Balance
+                                                <?= e(jcvMoney($paymentSnapshot['balance_amount'] ?? 0)) ?> must be
+                                                collected before completing Dispatch.
+                                            </div>
+                                            <?php endif; ?>
+
                                             <div class="row g-2 align-items-end">
                                                 <div class="col-lg-2 col-md-3">
-                                                    <label class="form-label fw-bold">Update Status <span class="required-star">*</span></label>
+                                                    <label class="form-label fw-bold">Update Status <span
+                                                            class="required-star">*</span></label>
                                                     <select name="status" class="form-select js-stage-status" required>
                                                         <option value="">Select Status</option>
-                                                        <option value="pending" <?= $stepStatus === 'pending' ? 'selected' : '' ?>>Pending</option>
-                                                        <option value="in_progress" <?= $stepStatus === 'in_progress' ? 'selected' : '' ?>>In Progress</option>
-                                                        <option value="completed" <?= $stepStatus === 'completed' ? 'selected' : '' ?>>Completed</option>
-                                                        <option value="delayed" <?= $stepStatus === 'delayed' ? 'selected' : '' ?>>Delayed</option>
-                                                        <option value="skipped" <?= $stepStatus === 'skipped' ? 'selected' : '' ?>>Skipped</option>
-                                                        <option value="cancelled" <?= $stepStatus === 'cancelled' ? 'selected' : '' ?>>Cancelled</option>
+                                                        <option value="pending"
+                                                            <?= $stepStatus === 'pending' ? 'selected' : '' ?>>Pending
+                                                        </option>
+                                                        <option value="in_progress"
+                                                            <?= $stepStatus === 'in_progress' ? 'selected' : '' ?>>In
+                                                            Progress</option>
+                                                        <option value="completed"
+                                                            <?= $stepStatus === 'completed' ? 'selected' : '' ?>
+                                                            <?= $dispatchPaymentPending ? 'disabled' : '' ?>>
+                                                            Completed<?= $dispatchPaymentPending ? ' (Payment Pending)' : '' ?>
+                                                        </option>
+                                                        <option value="delayed"
+                                                            <?= $stepStatus === 'delayed' ? 'selected' : '' ?>>Delayed
+                                                        </option>
+                                                        <option value="skipped"
+                                                            <?= $stepStatus === 'skipped' ? 'selected' : '' ?>>Skipped
+                                                        </option>
+                                                        <option value="cancelled"
+                                                            <?= $stepStatus === 'cancelled' ? 'selected' : '' ?>>
+                                                            Cancelled</option>
                                                     </select>
                                                 </div>
 
                                                 <div class="col-lg-2 col-md-3 delay-field">
-                                                    <label class="form-label fw-bold">Delay Reason <span class="required-star">*</span></label>
+                                                    <label class="form-label fw-bold">Delay Reason <span
+                                                            class="required-star">*</span></label>
                                                     <select name="delay_reason_id" class="form-select">
                                                         <option value="">Select Reason</option>
                                                         <?php foreach ($delayReasons as $reason): ?>
@@ -3208,19 +3575,16 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                 </div>
 
                                                 <div class="col-lg-2 col-md-3 delay-field">
-                                                    <label class="form-label fw-bold">Delay Days <span class="required-star">*</span></label>
-                                                    <input type="number"
-                                                        name="delay_days"
-                                                        class="form-control"
-                                                        min="0"
+                                                    <label class="form-label fw-bold">Delay Days <span
+                                                            class="required-star">*</span></label>
+                                                    <input type="number" name="delay_days" class="form-control" min="0"
                                                         value="<?= e($step['delay_days'] ?? 0) ?>">
                                                 </div>
 
                                                 <div class="col-lg-4 col-md-6">
-                                                    <label class="form-label fw-bold">Remark <span class="required-star js-remark-star d-none">*</span></label>
-                                                    <textarea name="remarks"
-                                                        class="form-control js-remark"
-                                                        rows="2"
+                                                    <label class="form-label fw-bold">Remark <span
+                                                            class="required-star js-remark-star d-none">*</span></label>
+                                                    <textarea name="remarks" class="form-control js-remark" rows="2"
                                                         placeholder="Enter update remark"><?= e($step['remarks'] ?? '') ?></textarea>
                                                 </div>
 
@@ -3228,23 +3592,28 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                 <div class="col-12 design-photo-upload-field">
                                                     <div class="design-photo-box">
                                                         <div class="design-photo-title">
-                                                            <strong>Designing / Proofing Photos <span class="required-star">*</span></strong>
-                                                            <button type="button" class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-add-photo-input">
+                                                            <strong>Designing / Proofing Photos <span
+                                                                    class="required-star">*</span></strong>
+                                                            <button type="button"
+                                                                class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-add-photo-input">
                                                                 + Add More Image
                                                             </button>
                                                         </div>
                                                         <div class="js-photo-input-list">
                                                             <div class="photo-input-row">
-                                                                <input type="file"
-                                                                    name="tracking_photos[]"
+                                                                <input type="file" name="tracking_photos[]"
                                                                     class="form-control js-tracking-photos"
                                                                     accept="image/jpeg,image/png,image/webp,image/gif"
                                                                     data-required-on-completed="1">
-                                                                <button type="button" class="btn btn-outline-danger photo-input-remove js-remove-photo-input" title="Remove image">×</button>
+                                                                <button type="button"
+                                                                    class="btn btn-outline-danger photo-input-remove js-remove-photo-input"
+                                                                    title="Remove image">×</button>
                                                             </div>
                                                         </div>
                                                         <div class="photo-help-text">
-                                                            Photo upload is required only when this stage is marked Completed. Pending / In Progress / Delayed updates do not require photos. Allowed: JPG, PNG, WEBP, GIF. Max 5 MB each.
+                                                            Photo upload is required only when this stage is marked
+                                                            Completed. Pending / In Progress / Delayed updates do not
+                                                            require photos. Allowed: JPG, PNG, WEBP, GIF. Max 5 MB each.
                                                         </div>
                                                     </div>
                                                 </div>
@@ -3255,10 +3624,11 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                     <?php if ($canManualCustomerApproval): ?>
                                                     <div class="approval-box">
                                                         <div class="form-check mb-3">
-                                                            <input class="form-check-input js-manual-approval" type="checkbox"
-                                                                name="manual_customer_approved" value="1"
-                                                                id="manualApproval<?= (int)$step['id'] ?>">
-                                                            <label class="form-check-label fw-bold" for="manualApproval<?= (int)$step['id'] ?>">
+                                                            <input class="form-check-input js-manual-approval"
+                                                                type="checkbox" name="manual_customer_approved"
+                                                                value="1" id="manualApproval<?= (int)$step['id'] ?>">
+                                                            <label class="form-check-label fw-bold"
+                                                                for="manualApproval<?= (int)$step['id'] ?>">
                                                                 Customer approved by call / direct confirmation
                                                                 <span class="required-star">*</span>
                                                             </label>
@@ -3268,27 +3638,31 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                             Approval Remark <span class="required-star">*</span>
                                                         </label>
                                                         <textarea name="approval_remarks"
-                                                            class="form-control js-approval-remarks"
-                                                            rows="2"
+                                                            class="form-control js-approval-remarks" rows="2"
                                                             placeholder="Example: Customer confirmed proof/design approval by phone call"><?= e($step['internal_remarks'] ?? '') ?></textarea>
                                                     </div>
                                                     <?php else: ?>
                                                     <div class="approval-box">
-                                                        Customer approval is pending. Admin or Sales must confirm customer approval before this stage can be completed.
+                                                        Customer approval is pending. Admin or Sales must confirm
+                                                        customer approval before this stage can be completed.
                                                     </div>
                                                     <?php endif; ?>
                                                 </div>
                                                 <?php endif; ?>
 
                                                 <div class="col-12 text-end">
-                                                    <button type="submit" class="btn btn-success rounded-pill px-4 fw-bold">
+                                                    <button type="submit"
+                                                        class="btn btn-success rounded-pill px-4 fw-bold">
                                                         Save Update
                                                     </button>
                                                 </div>
                                             </div>
 
                                             <small class="text-muted-custom d-block mt-2">
-                                                Delay status requires delay reason and remark. Designing / Proofing photos are required only when the production stage is marked Completed. Proofing Approval / Design Approval does not need photo upload; it needs customer approval or Admin/Sales manual confirmation.
+                                                Delay status requires delay reason and remark. Designing / Proofing
+                                                photos are required only when the production stage is marked Completed.
+                                                Proofing Approval / Design Approval does not need photo upload; it needs
+                                                customer approval or Admin/Sales manual confirmation.
                                             </small>
                                         </form>
                                     </div>
@@ -3331,7 +3705,8 @@ if ($message !== '' && $toastTitle === 'Info') {
             toast.setAttribute('aria-live', 'assertive');
             toast.setAttribute('aria-atomic', 'true');
             toast.setAttribute('data-bs-delay', '4200');
-            toast.innerHTML = '<div class="d-flex"><div class="toast-body"><div class="toast-title"></div><div class="toast-message"></div></div><button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button></div>';
+            toast.innerHTML =
+                '<div class="d-flex"><div class="toast-body"><div class="toast-title"></div><div class="toast-message"></div></div><button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button></div>';
             toast.querySelector('.toast-title').textContent = title;
             toast.querySelector('.toast-message').textContent = message;
             container.appendChild(toast);
@@ -3339,9 +3714,13 @@ if ($message !== '' && $toastTitle === 'Info') {
             if (window.bootstrap && bootstrap.Toast) {
                 const instance = bootstrap.Toast.getOrCreateInstance(toast);
                 instance.show();
-                toast.addEventListener('hidden.bs.toast', function() { toast.remove(); });
+                toast.addEventListener('hidden.bs.toast', function() {
+                    toast.remove();
+                });
             } else {
-                setTimeout(function() { toast.remove(); }, 4200);
+                setTimeout(function() {
+                    toast.remove();
+                }, 4200);
             }
         }
 
@@ -3396,7 +3775,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                 if (remarkStar) remarkStar.classList.add('d-none');
             }
 
-            const photoRequiredForCompleted = form.dataset.designPhotoRequired === '1' && select.value === 'completed';
+            const photoRequiredForCompleted = form.dataset.designPhotoRequired === '1' && select.value ===
+                'completed';
             const hasExistingPhotos = form.dataset.hasExistingPhotos === '1';
             form.classList.toggle('needs-photo', photoRequiredForCompleted);
 
@@ -3422,7 +3802,9 @@ if ($message !== '' && $toastTitle === 'Info') {
 
         document.querySelectorAll('.js-locked-stage').forEach(function(btn) {
             btn.addEventListener('click', function() {
-                showActionToast(btn.dataset.message || 'Previous stage must be completed before updating this stage.', 'warning', 'Stage Locked');
+                showActionToast(btn.dataset.message ||
+                    'Previous stage must be completed before updating this stage.', 'warning',
+                    'Stage Locked');
             });
         });
 
@@ -3435,7 +3817,8 @@ if ($message !== '' && $toastTitle === 'Info') {
 
                 const row = document.createElement('div');
                 row.className = 'photo-input-row';
-                row.innerHTML = '<input type="file" name="tracking_photos[]" class="form-control js-tracking-photos" accept="image/jpeg,image/png,image/webp,image/gif"><button type="button" class="btn btn-outline-danger photo-input-remove js-remove-photo-input" title="Remove image">×</button>';
+                row.innerHTML =
+                    '<input type="file" name="tracking_photos[]" class="form-control js-tracking-photos" accept="image/jpeg,image/png,image/webp,image/gif"><button type="button" class="btn btn-outline-danger photo-input-remove js-remove-photo-input" title="Remove image">×</button>';
                 list.appendChild(row);
                 refreshDelayFields(form);
             });
