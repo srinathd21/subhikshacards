@@ -1504,6 +1504,14 @@ function pb_whatsapp_tracking_url(mysqli $conn, array $row): string
     return pb_whatsapp_base_url($conn) . '/customer_tracking.php?token=' . rawurlencode($token);
 }
 
+
+function pb_whatsapp_pdf_url(mysqli $conn, array $row): string
+{
+    $id = (int)($row['id'] ?? 0);
+    if ($id <= 0) return '';
+    return pb_whatsapp_base_url($conn) . '/proforma_bill_pdf.php?id=' . $id;
+}
+
 function pb_whatsapp_variables(mysqli $conn, array $row): array
 {
     return [
@@ -1519,18 +1527,47 @@ function pb_whatsapp_variables(mysqli $conn, array $row): array
         'balance_amount' => '₹' . number_format((float)($row['balance_amount'] ?? 0), 2),
         'delivery_date' => !empty($row['delivery_date']) ? date('d-m-Y', strtotime((string)$row['delivery_date'])) : '-',
         'tracking_link' => pb_whatsapp_tracking_url($conn, $row),
+        'proforma_pdf_link' => pb_whatsapp_pdf_url($conn, $row),
+        'invoice_link' => pb_whatsapp_pdf_url($conn, $row),
         'mobile' => (string)($row['mobile'] ?? '')
     ];
 }
 
 function pb_whatsapp_template_message(mysqli $conn, string $templateKey, array $row): string
 {
+    $vars = pb_whatsapp_variables($conn, $row);
     $template = pb_whatsapp_template_row($conn, $templateKey);
-    if (!$template) {
-        return '';
+
+    if ($template) {
+        $message = pb_whatsapp_render_template((string)$template['message_body'], $vars);
+    } else {
+        $message = "Hello " . ($vars['customer_name'] ?: 'Customer') . ",
+
+"
+            . "Thank you for choosing Subhiksha Cards.
+
+"
+            . "Your Proforma Invoice (No: " . ($vars['proforma_no'] ?: '-') . ") has been generated successfully.
+
+"
+            . "Please find the Proforma PDF link for your reference:
+"
+            . ($vars['proforma_pdf_link'] ?: '-') . "
+
+"
+            . "Thank you,
+Subhiksha Cards";
     }
 
-    return pb_whatsapp_render_template((string)$template['message_body'], pb_whatsapp_variables($conn, $row));
+    $pdfLink = (string)($vars['proforma_pdf_link'] ?? '');
+    if ($pdfLink !== '' && strpos($message, $pdfLink) === false) {
+        $message = rtrim($message) . "
+
+Proforma PDF:
+" . $pdfLink;
+    }
+
+    return $message;
 }
 
 function pb_get_whatsapp_row(mysqli $conn, int $id): ?array
@@ -1719,27 +1756,30 @@ function pb_send_whatsapp_by_api(mysqli $conn, int $id): array
     }
 
     $variables = pb_whatsapp_variables($conn, $row);
+    $messageBody = pb_whatsapp_template_message($conn, 'proforma_created', $row);
     $meta = [
         'related_module' => 'Proforma Bills',
         'related_id' => $id,
-        'customer_id' => $row['customer_id'] ?? null
+        'customer_id' => $row['customer_id'] ?? null,
+        'sent_by' => (int)($_SESSION['user_id'] ?? 0),
+        'extra_payload' => ['type' => 'text']
     ];
 
-    if (function_exists('subhiksha_send_template_whatsapp')) {
-        return subhiksha_send_template_whatsapp(
-            $conn,
-            'proforma_created',
-            (string)($row['mobile'] ?? ''),
-            $variables,
-            $meta
-        );
+    if (function_exists('subhiksha_send_whatsapp')) {
+        return subhiksha_send_whatsapp($conn, array_merge($meta, [
+            'mobile' => (string)($row['mobile'] ?? ''),
+            'message' => $messageBody,
+            'variables' => $variables
+        ]));
     }
 
-    return subhiksha_send_whatsapp($conn, array_merge($meta, [
-        'mobile' => (string)($row['mobile'] ?? ''),
-        'template_key' => 'proforma_created',
-        'variables' => $variables
-    ]));
+    return subhiksha_send_template_whatsapp(
+        $conn,
+        'proforma_created',
+        (string)($row['mobile'] ?? ''),
+        $variables,
+        $meta
+    );
 }
 
 function pb_send_whatsapp_preferred(mysqli $conn, int $id): array
@@ -2046,7 +2086,7 @@ try {
         apiResponse(false, 'Action is required.');
     }
 
-    if (in_array($action, ['save_proforma', 'create', 'update', 'create_proforma', 'update_proforma', 'delete', 'delete_record', 'create_job_card', 'log_manual_whatsapp', 'send_whatsapp_api'], true)) {
+    if (in_array($action, ['save_proforma', 'create', 'update', 'create_proforma', 'update_proforma', 'create_product', 'delete', 'delete_record', 'create_job_card', 'log_manual_whatsapp', 'send_whatsapp_api'], true)) {
         apiCsrf();
     }
 
@@ -2065,6 +2105,38 @@ try {
         }
 
         apiResponse(true, 'Proforma bill loaded successfully.', ['data' => $row]);
+    }
+
+    if ($action === 'create_product') {
+        apiRequireAnyPermission($conn, ['can_create', 'can_edit', 'can_update', 'can_view'], 'You do not have permission to create product master.');
+
+        $productName = pb_post('product_name');
+        $orderType = pb_post('order_type', 'readymade');
+        $rate = pb_float($_POST['rate'] ?? 0);
+
+        if ($productName === '') {
+            throw new RuntimeException('Product name is required.');
+        }
+
+        if (!pb_table_exists($conn, 'products')) {
+            throw new RuntimeException('Products table is missing.');
+        }
+
+        $userId = (int)($_SESSION['user_id'] ?? 0);
+        $product = pb_find_or_create_product($conn, $productName, $productName, $orderType, $rate, $userId);
+
+        if (empty($product['id'])) {
+            throw new RuntimeException('Unable to save product master.');
+        }
+
+        apiResponse(true, 'Product saved successfully.', [
+            'product' => [
+                'id' => (int)$product['id'],
+                'product_name' => (string)$product['name'],
+                'default_order_type' => in_array($orderType, ['readymade', 'customized'], true) ? $orderType : 'readymade',
+                'default_price' => max(0, $rate)
+            ]
+        ]);
     }
 
         $action = pb_post('action');
@@ -2242,7 +2314,7 @@ try {
                 }
 
                 if (!$screeningType) {
-                    throw new RuntimeException('Please select Regular Screening or Special Screening.');
+                    throw new RuntimeException('Please select Regular Scoring or Special Scoring.');
                 }
 
                 if ($laminationRequired === 1 && !$laminationType) {
