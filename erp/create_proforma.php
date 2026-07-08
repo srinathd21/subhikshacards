@@ -1,11 +1,4 @@
 <?php
-/**
- * create_proforma.php
- * Subiksha Card ERP - Create Proforma Bill / Sales Order
- *
- * Uses the current u966043993_subhiksha schema:
- * quotations -> proforma_bills -> payments -> job_cards -> job_tracking -> customer_tracking_links
- */
 
 require_once __DIR__ . '/includes/db.php';
 require_once __DIR__ . '/includes/auth.php';
@@ -638,6 +631,22 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         font-weight: 800;
     }
 
+    .charge-input-row {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+        align-items: end;
+        width: 100%;
+    }
+
+    .charge-input-card {
+        min-width: 0;
+    }
+
+    .charge-input-card .form-control {
+        width: 100%;
+    }
+
     .quotation-select-wrap {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
@@ -651,6 +660,29 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         padding-inline: 18px;
         white-space: nowrap;
         font-weight: 900;
+    }
+
+
+
+    .product-select-wrap {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 46px;
+        gap: 10px;
+        align-items: stretch;
+    }
+
+    .product-clear-btn {
+        min-height: 46px;
+        border-radius: 14px;
+        font-size: 20px;
+        font-weight: 950;
+        line-height: 1;
+    }
+
+    .custom-only-field.hide-field,
+    .screen-subtype-field.hide-field,
+    .colour-type-field.hide-field {
+        display: none !important;
     }
 
     .select2-container--bootstrap-5 .select2-selection--single .select2-selection__clear {
@@ -897,7 +929,108 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         white-space: nowrap;
     }
 
+
+    .cash-denom-dialog {
+        max-width: 540px;
+    }
+
+    .cash-denom-modal-content {
+        border-radius: 28px;
+        overflow: hidden;
+        box-shadow: 0 24px 70px rgba(15, 23, 42, .22);
+    }
+
+    .cash-denom-modal-content .modal-header {
+        padding: 22px 20px 14px;
+    }
+
+    .cash-denom-modal-content .modal-title {
+        font-size: 25px;
+        line-height: 1.1;
+        color: #0f172a;
+    }
+
+    .cash-denom-modal-content .modal-body {
+        max-height: min(68vh, 620px);
+        overflow-y: auto;
+        padding: 18px 20px 12px;
+    }
+
+    .cash-denom-summary-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        border: 1px solid #86efac;
+        background: #dcfce7;
+        color: #0f172a;
+        border-radius: 16px;
+        padding: 12px 14px;
+        font-weight: 950;
+        margin-bottom: 14px;
+    }
+
+    .cash-denom-summary-bar span {
+        font-weight: 950;
+        white-space: nowrap;
+    }
+
+    .cash-denom-modal-content .denom-format-box {
+        border: 0;
+        padding: 0;
+        background: transparent;
+    }
+
+    .cash-denom-modal-content .denom-section-heading {
+        font-size: 15px;
+        margin: 12px 0 8px;
+    }
+
+    .cash-denom-modal-content .denom-format-row {
+        grid-template-columns: 108px 92px minmax(150px, 1fr);
+        gap: 10px;
+        margin-bottom: 10px;
+    }
+
+    .cash-denom-modal-content .denom-equals {
+        display: none;
+    }
+
+    .cash-denom-modal-content .denom-count-input,
+    .cash-denom-modal-content .cash-denom-amount-input {
+        min-height: 46px;
+        border-radius: 13px;
+        font-size: 16px;
+        font-weight: 950;
+    }
+
+    .cash-denom-modal-content .denom-count-input {
+        text-align: center;
+    }
+
+    .cash-denom-modal-content .cash-denom-amount-input {
+        text-align: right;
+    }
+
+    .cash-denom-modal-content .modal-footer {
+        padding: 16px 20px 20px;
+        background: #fff;
+        box-shadow: 0 -8px 20px rgba(15, 23, 42, .04);
+    }
+
+    @media(max-width:575.98px) {
+        .cash-denom-modal-content .denom-format-row {
+            grid-template-columns: 90px 76px minmax(120px, 1fr);
+        }
+
+        .cash-denom-summary-bar {
+            align-items: flex-start;
+            flex-direction: column;
+        }
+    }
+
     @media(max-width:1199.98px) {
+
         .workflow-grid,
         .amount-summary-grid {
             grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -905,8 +1038,10 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     }
 
     @media(max-width:991.98px) {
+
         .workflow-grid,
-        .amount-summary-grid {
+        .amount-summary-grid,
+        .charge-input-row {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
     }
@@ -921,7 +1056,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         }
 
         .workflow-grid,
-        .amount-summary-grid {
+        .amount-summary-grid,
+        .charge-input-row {
             grid-template-columns: 1fr;
         }
 
@@ -995,13 +1131,13 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         border: 1px solid #86efac;
         border-radius: 20px;
         padding: 16px;
-        background: linear-gradient(135deg, rgba(240,253,244,.92), rgba(255,255,255,.98));
+        background: linear-gradient(135deg, rgba(240, 253, 244, .92), rgba(255, 255, 255, .98));
         box-shadow: 0 14px 32px rgba(22, 163, 74, .08);
     }
 
     .pricing-summary-card.no-price {
         border-color: #fecaca;
-        background: linear-gradient(135deg, rgba(254,242,242,.96), rgba(255,255,255,.98));
+        background: linear-gradient(135deg, rgba(254, 242, 242, .96), rgba(255, 255, 255, .98));
         box-shadow: 0 14px 32px rgba(220, 38, 38, .07);
     }
 
@@ -1050,7 +1186,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         border: 1px solid rgba(148, 163, 184, .35);
         border-radius: 14px;
         padding: 10px 12px;
-        background: rgba(255,255,255,.76);
+        background: rgba(255, 255, 255, .76);
         min-height: 68px;
     }
 
@@ -1103,13 +1239,16 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     }
 
     @media(max-width:991.98px) {
-        .pricing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .pricing-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
     }
 
     @media(max-width:575.98px) {
-        .pricing-grid { grid-template-columns: 1fr; }
+        .pricing-grid {
+            grid-template-columns: 1fr;
+        }
     }
-
     </style>
 </head>
 
@@ -1179,11 +1318,13 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                         <?= e($q['mobile']) ?> - <?= e($q['function_name'] ?? '-') ?></option>
                                     <?php endforeach; ?>
                                 </select>
-                                <button type="button" id="clearQuotationBtn" class="btn btn-outline-danger quotation-clear-btn">
+                                <button type="button" id="clearQuotationBtn"
+                                    class="btn btn-outline-danger quotation-clear-btn">
                                     Cancel
                                 </button>
                             </div>
-                            <small class="text-muted-custom d-block mt-2">Use Cancel / × to clear the selected quotation and continue as direct proforma.</small>
+                            <small class="text-muted-custom d-block mt-2">Use Cancel / × to clear the selected quotation
+                                and continue as direct proforma.</small>
                         </div>
                         <div class="col-md-4"><label class="form-label fw-bold">Customer Name *</label><input
                                 type="text" name="customer_name" id="customer_name" class="form-control" required></div>
@@ -1201,8 +1342,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                 type="text" name="groom_name" id="groom_name" class="form-control"></div>
                         <div class="col-md-4 event-field"><label class="form-label fw-bold">Function Date</label><input
                                 type="date" name="function_date" id="function_date" class="form-control"></div>
-                        <div class="col-md-4 event-field"><label class="form-label fw-bold">Function Time <span class="text-muted-custom">(Optional)</span></label><input
-                                type="time" name="function_time" id="function_time" class="form-control"></div>
+                        <div class="col-md-4 event-field"><label class="form-label fw-bold">Function Time <span
+                                    class="text-muted-custom">(Optional)</span></label><input type="time"
+                                name="function_time" id="function_time" class="form-control"></div>
                         <div class="col-md-8 event-field"><label class="form-label fw-bold">Venue</label><input
                                 type="text" name="venue" id="venue" class="form-control"></div>
 
@@ -1234,35 +1376,55 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                     </div>
                                     <div class="col-md-9">
                                         <label class="form-label fw-bold">Product Master *</label>
-                                        <select name="product_id" id="product_id" class="form-select select2-autotype product-master-select"
-                                            data-placeholder="Select product/card name" data-tags="false" required>
-                                            <option value="">Select product/card name</option><?php if ($isEditMode && $editProductSelectValue !== '' && !$editProductExistsInProducts): ?><option
-                                                value="<?= e($editProductSelectValue) ?>" data-name="<?= e($editProductSelectName) ?>"
-                                                data-price="<?= e($editData['item_rate'] ?? 0) ?>"
-                                                data-order-type="<?= e($editData['order_type'] ?? 'readymade') ?>" selected><?= e($editProductSelectName) ?>
-                                            </option><?php endif; ?><?php foreach ($products as $p): ?><option
-                                                value="<?= e($p['id']) ?>" data-name="<?= e($p['product_name']) ?>"
-                                                data-price="<?= e($p['default_price']) ?>"
-                                                data-order-type="<?= e($p['default_order_type']) ?>" <?= ($isEditMode && $editProductSelectValue !== '' && (string)$editProductSelectValue === (string)$p['id']) ? 'selected' : '' ?>><?= e($p['product_name']) ?>
-                                            </option><?php endforeach; ?>
-                                        </select>
+                                        <div class="product-select-wrap">
+                                            <select name="product_id" id="product_id"
+                                                class="form-select select2-autotype product-master-select"
+                                                data-placeholder="Select or type product/card name" data-tags="true"
+                                                required>
+                                                <option value="">Select or type product/card name</option>
+                                                <?php if ($isEditMode && $editProductSelectValue !== '' && !$editProductExistsInProducts): ?>
+                                                <option value="<?= e($editProductSelectValue) ?>"
+                                                    data-name="<?= e($editProductSelectName) ?>"
+                                                    data-price="<?= e($editData['item_rate'] ?? 0) ?>"
+                                                    data-order-type="<?= e($editData['order_type'] ?? 'readymade') ?>"
+                                                    selected><?= e($editProductSelectName) ?>
+                                                </option><?php endif; ?><?php foreach ($products as $p): ?><option
+                                                    value="<?= e($p['id']) ?>" data-name="<?= e($p['product_name']) ?>"
+                                                    data-price="<?= e($p['default_price']) ?>"
+                                                    data-order-type="<?= e($p['default_order_type']) ?>"
+                                                    <?= ($isEditMode && $editProductSelectValue !== '' && (string)$editProductSelectValue === (string)$p['id']) ? 'selected' : '' ?>>
+                                                    <?= e($p['product_name']) ?>
+                                                </option><?php endforeach; ?>
+                                            </select>
+                                            <button type="button" id="clearProductBtn"
+                                                class="btn btn-outline-danger product-clear-btn"
+                                                title="Clear selected product"
+                                                aria-label="Clear selected product">&times;</button>
+                                        </div>
                                         <input type="hidden" name="product_name" id="product_name" value="">
-                                        <small class="text-muted-custom fw-bold">Product / Item Name is removed. This field lists product names from Product Master.</small>
+                                        <small class="text-muted-custom fw-bold">Select existing product or type a new
+                                            product. New product will be saved to Product Master automatically.</small>
                                     </div>
 
                                     <div class="col-md-4">
                                         <label class="form-label fw-bold">Printing Type *</label>
-                                        <select name="printing_type_id" id="printing_type_id" class="form-select" required>
-                                            <option value="">Select Printing Type</option><?php foreach ($printingTypes as $pt): ?>
-                                            <option value="<?= e($pt['id']) ?>" data-readymade="<?= e($pt['is_for_readymade']) ?>"
+                                        <select name="printing_type_id" id="printing_type_id" class="form-select"
+                                            required>
+                                            <option value="">Select Printing Type</option>
+                                            <?php foreach ($printingTypes as $pt): ?>
+                                            <option value="<?= e($pt['id']) ?>"
+                                                data-readymade="<?= e($pt['is_for_readymade']) ?>"
                                                 data-customized="<?= e($pt['is_for_customized']) ?>"
-                                                data-role-key="<?= e($pt['role_key']) ?>"><?= e($pt['printing_name']) ?></option>
+                                                data-role-key="<?= e($pt['role_key']) ?>"><?= e($pt['printing_name']) ?>
+                                            </option>
                                             <?php endforeach; ?>
                                         </select>
                                     </div>
-                                    <div class="col-md-4 readymade-field">
-                                        <label class="form-label fw-bold">Screen Print Sub-Type</label>
-                                        <select name="printing_sub_type_id" id="printing_sub_type_id" class="form-select">
+                                    <div class="col-md-4 screen-subtype-field hide-field" id="screenSubTypeWrap">
+                                        <label class="form-label fw-bold" id="printingSubTypeLabel">Screen Print
+                                            Sub-Type</label>
+                                        <select name="printing_sub_type_id" id="printing_sub_type_id"
+                                            class="form-select">
                                             <option value="">Not Applicable</option>
                                         </select>
                                     </div>
@@ -1273,22 +1435,24 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
                                     <div class="col-12">
                                         <div class="pricing-requirement-title">
-                                            <span><i class="fa fa-sliders-h me-2"></i>Requirement Details & Predefined Printing Charge</span>
-                                            <small class="text-muted-custom fw-bold">No colour selection. Printing charge is auto-filled from predefined quantity slabs and remains editable.</small>
+                                            <span><i class="fa fa-sliders-h me-2"></i>Requirement Details & Predefined
+                                                Printing Charge</span>
+                                            <small class="text-muted-custom fw-bold">Printing charge is auto-filled from
+                                                predefined quantity slabs and remains editable.</small>
                                         </div>
                                     </div>
 
-                                    <div class="col-md-3">
+                                    <div class="col-md-3 custom-only-field">
                                         <label class="form-label fw-bold">Card Size</label>
                                         <input type="text" name="size_text" id="size_text" class="form-control"
                                             placeholder="Eg: 14 x 9.5">
                                     </div>
-                                    <div class="col-md-3">
+                                    <div class="col-md-3 custom-only-field">
                                         <label class="form-label fw-bold">GSM / Thickness</label>
                                         <input type="text" name="gsm_thickness" id="gsm_thickness" class="form-control"
                                             placeholder="Eg: 300 GSM">
                                     </div>
-                                    <div class="col-md-3">
+                                    <div class="col-md-3 custom-only-field">
                                         <label class="form-label fw-bold">Printing Side</label>
                                         <select name="printing_side" id="printing_side" class="form-select">
                                             <option value="">Select</option>
@@ -1296,22 +1460,24 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                             <option value="double">Double Side</option>
                                         </select>
                                     </div>
-                                    <div class="col-md-3 customized-field">
-                                        <label class="form-label fw-bold">Screening</label>
+                                    <div class="col-md-3 custom-only-field customized-field">
+                                        <label class="form-label fw-bold">Scoring Type</label>
                                         <select name="screening_type" id="screening_type" class="form-select">
                                             <option value="">Select</option>
-                                            <option value="regular">Regular Screening</option>
-                                            <option value="special">Special Screening</option>
+                                            <option value="regular">Regular Scoring</option>
+                                            <option value="special">Special Scoring</option>
                                         </select>
                                     </div>
 
-                                    <div class="col-md-3 d-flex align-items-end">
+                                    <div class="col-md-3 custom-only-field d-flex align-items-end">
                                         <div class="form-check form-switch mb-2">
-                                            <input class="form-check-input" type="checkbox" name="lamination_required" id="lamination_required" value="1">
-                                            <label class="form-check-label fw-bold" for="lamination_required">Lamination Required</label>
+                                            <input class="form-check-input" type="checkbox" name="lamination_required"
+                                                id="lamination_required" value="1">
+                                            <label class="form-check-label fw-bold" for="lamination_required">Lamination
+                                                Required</label>
                                         </div>
                                     </div>
-                                    <div class="col-md-3 lamination-type-wrap">
+                                    <div class="col-md-3 custom-only-field lamination-type-wrap">
                                         <label class="form-label fw-bold">Lamination Type</label>
                                         <select name="lamination_type" id="lamination_type" class="form-select">
                                             <option value="none">None</option>
@@ -1322,25 +1488,30 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                     </div>
                                     <div class="col-md-3">
                                         <label class="form-label fw-bold">Quantity *</label>
-                                        <input type="number" step="1" min="1" name="qty" id="qty" class="form-control" value="1" required>
+                                        <input type="number" step="1" min="1" name="qty" id="qty" class="form-control"
+                                            value="1" required>
                                     </div>
                                     <div class="col-md-3">
-                                        <label class="form-label fw-bold">Item Rate *</label>
+                                        <label class="form-label fw-bold">Item Rate</label>
                                         <div class="input-group">
                                             <span class="input-group-text">₹</span>
-                                            <input type="number" step="0.01" min="0" name="rate" id="rate" class="form-control" value="0">
+                                            <input type="number" step="0.01" min="0" name="rate" id="rate"
+                                                class="form-control" value="0">
                                             <span class="input-group-text">/ Unit</span>
                                         </div>
-                                        <small class="text-muted-custom fw-bold">Optional. If entered, item amount = Quantity × Rate. Printing slab fills Printing Charge separately.</small>
+                                        <small class="text-muted-custom fw-bold">Optional. If entered, item amount =
+                                            Quantity × Rate. Printing slab fills Printing Charge separately.</small>
                                     </div>
 
                                     <div class="col-12">
                                         <label class="form-label fw-bold">Item Description</label>
-                                        <textarea name="description" id="description" class="form-control" rows="2"></textarea>
+                                        <textarea name="description" id="description" class="form-control"
+                                            rows="2"></textarea>
                                     </div>
                                     <div class="col-md-4">
                                         <label class="form-label fw-bold">Discount</label>
-                                        <input type="number" step="0.01" min="0" name="discount_amount" id="discount_amount" class="form-control" value="0">
+                                        <input type="number" step="0.01" min="0" name="discount_amount"
+                                            id="discount_amount" class="form-control" value="0">
                                     </div>
                                     <?php if ($proformaStatuses): ?>
                                     <div class="col-md-4">
@@ -1356,8 +1527,10 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                     <?php endif; ?>
                                     <div class="col-md-4 readymade-field d-flex align-items-end">
                                         <div class="form-check form-switch mb-2">
-                                            <input class="form-check-input" type="checkbox" name="finishing_required" id="finishing_required" value="1">
-                                            <label class="form-check-label fw-bold" for="finishing_required">With Finishing</label>
+                                            <input class="form-check-input" type="checkbox" name="finishing_required"
+                                                id="finishing_required" value="1">
+                                            <label class="form-check-label fw-bold" for="finishing_required">With
+                                                Finishing</label>
                                         </div>
                                     </div>
 
@@ -1365,25 +1538,37 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                         <div id="pricingSummaryCard" class="pricing-summary-card no-price">
                                             <div class="pricing-summary-head">
                                                 <strong>Pricing Summary</strong>
-                                                <span id="priceStatusBadge" class="pricing-status-badge warn">No Pricing</span>
+                                                <span id="priceStatusBadge" class="pricing-status-badge warn">No
+                                                    Pricing</span>
                                             </div>
 
                                             <div id="priceMatchedBox" class="pricing-grid d-none">
-                                                <div class="pricing-cell"><small>Applied Quantity Slab</small><strong id="priceSlabText">-</strong></div>
-                                                <div class="pricing-cell"><small>Pricing Mode</small><strong id="priceModeText">-</strong></div>
-                                                <div class="pricing-cell"><small>Entered Quantity</small><strong id="priceQtyText">0 Nos</strong></div>
-                                                <div class="pricing-cell"><small>Item Rate</small><strong id="priceRateText">₹0.00</strong></div>
-                                                <div class="pricing-cell"><small>Auto Printing Charge</small><strong id="pricePrintingText">₹0.00</strong></div>
-                                                <div class="pricing-cell"><small>Plate / Additional</small><strong id="pricePlateText">₹0.00</strong></div>
-                                                <div class="pricing-cell"><small>Package Charge</small><strong id="pricePackageText">₹0.00</strong></div>
-                                                <div class="pricing-cell final"><small>Final Amount GST Inclusive</small><strong id="priceFinalText">₹0.00</strong></div>
+                                                <div class="pricing-cell"><small>Applied Quantity Slab</small><strong
+                                                        id="priceSlabText">-</strong></div>
+                                                <div class="pricing-cell"><small>Pricing Mode</small><strong
+                                                        id="priceModeText">-</strong></div>
+                                                <div class="pricing-cell"><small>Entered Quantity</small><strong
+                                                        id="priceQtyText">0 Nos</strong></div>
+                                                <div class="pricing-cell"><small>Item Rate</small><strong
+                                                        id="priceRateText">₹0.00</strong></div>
+                                                <div class="pricing-cell"><small>Auto Printing Charge</small><strong
+                                                        id="pricePrintingText">₹0.00</strong></div>
+                                                <div class="pricing-cell"><small>Plate / Additional</small><strong
+                                                        id="pricePlateText">₹0.00</strong></div>
+                                                <div class="pricing-cell"><small>Package Charge</small><strong
+                                                        id="pricePackageText">₹0.00</strong></div>
+                                                <div class="pricing-cell final"><small>Final Amount GST
+                                                        Inclusive</small><strong id="priceFinalText">₹0.00</strong>
+                                                </div>
                                             </div>
 
                                             <div id="priceNoMatchBox" class="pricing-note warn">
-                                                No predefined printing charge found for this quantity/selection. Change quantity to a saved slab or edit Rate / Printing Charge manually.
+                                                No predefined printing charge found for this quantity/selection. Change
+                                                quantity to a saved slab or edit Rate / Printing Charge manually.
                                             </div>
                                             <div id="pricingMessage" class="pricing-note info d-none">
-                                                Predefined printing charge applied. Rate, Printing Charge, Plate/Additional and Package Charge are editable.
+                                                Predefined printing charge applied. Rate, Printing Charge,
+                                                Plate/Additional and Package Charge are editable.
                                             </div>
                                         </div>
                                     </div>
@@ -1394,50 +1579,73 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
                         <div class="col-12 mt-3">
                             <div class="section-title">4. Amount / Payment</div>
+                            <div class="col-12">
+                                <div class="charge-input-row">
+                                    <div class="charge-input-card">
+                                        <label class="form-label fw-bold">Plate / Additional Charge</label>
+                                        <input type="number" step="0.01" min="0" name="extra_card_charge"
+                                            id="extra_card_charge" class="form-control" value="0"
+                                            placeholder="Auto / optional">
+                                    </div>
+                                    <div class="charge-input-card">
+                                        <label class="form-label fw-bold">Package Charge <span
+                                                class="text-muted-custom">(Optional)</span></label>
+                                        <input type="number" step="0.01" min="0" name="packing_charge"
+                                            id="packing_charge" class="form-control" value="0" placeholder="Optional">
+                                    </div>
+                                    <div class="charge-input-card">
+                                        <label class="form-label fw-bold">Printing Charge <span
+                                                class="text-muted-custom">(Optional)</span></label>
+                                        <input type="number" step="0.01" min="0" name="printing_charge"
+                                            id="printing_charge" class="form-control" value="0"
+                                            placeholder="Auto from slab / optional">
+                                    </div>
+                                    <div class="charge-input-card">
+                                        <label class="form-label fw-bold">GST % Inclusive</label>
+                                        <input type="number" step="0.01" min="0" name="gst_percent" id="gst_percent"
+                                            class="form-control" value="18">
+                                    </div>
+                                </div>
+                            </div>
                         </div>
 
                         <div class="col-12">
                             <div class="amount-summary-panel">
                                 <div class="amount-summary-grid">
-                                    <div class="amount-summary-item"><small>Sub Total</small><strong id="subTotalText">₹0.00</strong></div>
-                                    <div class="amount-summary-item"><small>Charges</small><strong id="chargeTotalText">₹0.00</strong></div>
-                                    <div class="amount-summary-item"><small>Discount</small><strong id="discountText">₹0.00</strong></div>
-                                    <div class="amount-summary-item"><small>Taxable Value</small><strong id="taxableValueText">₹0.00</strong></div>
-                                    <div class="amount-summary-item"><small>GST Amount</small><strong id="gstAmountText">₹0.00</strong></div>
-                                    <div class="amount-summary-item"><small>Advance Paid Now</small><strong id="advanceAmountText">₹0.00</strong></div>
-                                    <div class="amount-summary-item balance"><small>Balance</small><strong id="balanceAmountText">₹0.00</strong></div>
-                                    <div class="amount-summary-item final"><small>Final Amount</small><strong id="finalAmountText">₹0.00</strong></div>
+                                    <div class="amount-summary-item"><small>Sub Total</small><strong
+                                            id="subTotalText">₹0.00</strong></div>
+                                    <div class="amount-summary-item"><small>Charges</small><strong
+                                            id="chargeTotalText">₹0.00</strong></div>
+                                    <div class="amount-summary-item"><small>Discount</small><strong
+                                            id="discountText">₹0.00</strong></div>
+                                    <div class="amount-summary-item"><small>Taxable Value</small><strong
+                                            id="taxableValueText">₹0.00</strong></div>
+                                    <div class="amount-summary-item"><small>GST Amount</small><strong
+                                            id="gstAmountText">₹0.00</strong></div>
+                                    <div class="amount-summary-item"><small>Advance Paid Now</small><strong
+                                            id="advanceAmountText">₹0.00</strong></div>
+                                    <div class="amount-summary-item balance"><small>Balance</small><strong
+                                            id="balanceAmountText">₹0.00</strong></div>
+                                    <div class="amount-summary-item final"><small>Final Amount</small><strong
+                                            id="finalAmountText">₹0.00</strong></div>
                                 </div>
-                                <div class="amount-summary-note">GST Inclusive: taxable value and GST are shown separately, but both are already included inside the final amount. Package charge and printing charge are optional.</div>
+                                <div class="amount-summary-note">GST Inclusive: taxable value and GST are shown
+                                    separately, but both are already included inside the final amount. Package charge
+                                    and printing charge are optional.</div>
                             </div>
                         </div>
 
-                        <div class="col-md-3">
-                            <label class="form-label fw-bold">Plate / Additional Charge</label>
-                            <input type="number" step="0.01" min="0" name="extra_card_charge" id="extra_card_charge" class="form-control" value="0" placeholder="Auto from pricing master / optional">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label fw-bold">Package Charge <span class="text-muted-custom">(Optional)</span></label>
-                            <input type="number" step="0.01" min="0" name="packing_charge" id="packing_charge" class="form-control" value="0" placeholder="Common optional charge">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label fw-bold">Printing Charge <span class="text-muted-custom">(Optional)</span></label>
-                            <input type="number" step="0.01" min="0" name="printing_charge" id="printing_charge" class="form-control" value="0" placeholder="Optional">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label fw-bold">GST % Inclusive</label>
-                            <input type="number" step="0.01" min="0" name="gst_percent" id="gst_percent" class="form-control" value="18">
-                        </div>
+
 
                         <input type="hidden" name="advance_amount" id="advance_amount" value="0">
-                        <input type="hidden" name="payment_mode" id="payment_mode" value="cash">
+                        <input type="hidden" name="payment_mode" id="payment_mode" value="">
                         <input type="hidden" name="payment_reference" id="payment_reference" value="">
 
                         <div class="col-12">
                             <label class="form-label fw-bold">Split Payment Method</label>
                             <div class="payment-mode-checks">
-                                <label class="payment-check-card active" for="pay_cash" data-payment-card="cash">
-                                    <input type="checkbox" id="pay_cash" class="payment-mode-check" data-mode="cash" checked>
+                                <label class="payment-check-card" for="pay_cash" data-payment-card="cash">
+                                    <input type="checkbox" id="pay_cash" class="payment-mode-check" data-mode="cash">
                                     <strong>Cash</strong>
                                     <small>Cash amount must match denomination total</small>
                                 </label>
@@ -1449,25 +1657,30 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                             </div>
                         </div>
 
-                        <div class="col-md-4 payment-cash-wrap">
+                        <div class="col-md-4 payment-cash-wrap hide-field">
                             <label class="form-label fw-bold">Cash Amount</label>
-                            <input type="number" step="0.01" min="0" name="cash_amount" id="cash_amount" class="form-control" value="0" placeholder="Cash collected">
+                            <input type="number" step="0.01" min="0" name="cash_amount" id="cash_amount"
+                                class="form-control" value="0" placeholder="Cash collected">
                         </div>
-                        <div class="col-md-4 payment-cash-wrap">
+                        <div class="col-md-4 payment-cash-wrap hide-field">
                             <label class="form-label fw-bold">Cash Remarks</label>
-                            <input type="text" name="cash_reference" id="cash_reference" class="form-control" placeholder="Optional cash remarks">
+                            <input type="text" name="cash_reference" id="cash_reference" class="form-control"
+                                placeholder="Optional cash remarks">
                         </div>
-                        <div class="col-md-4 payment-cash-wrap d-flex align-items-end">
-                            <button type="button" class="btn btn-outline-primary rounded-pill fw-bold w-100" id="openCashDenominationBtn">Cash Denomination</button>
+                        <div class="col-md-4 payment-cash-wrap d-flex align-items-end hide-field">
+                            <button type="button" class="btn btn-outline-primary rounded-pill fw-bold w-100"
+                                id="openCashDenominationBtn">Cash Denomination</button>
                         </div>
 
                         <div class="col-md-6 payment-upi-wrap hide-field">
                             <label class="form-label fw-bold">UPI Amount</label>
-                            <input type="number" step="0.01" min="0" name="upi_amount" id="upi_amount" class="form-control" value="0" placeholder="UPI collected">
+                            <input type="number" step="0.01" min="0" name="upi_amount" id="upi_amount"
+                                class="form-control" value="0" placeholder="UPI collected">
                         </div>
                         <div class="col-md-6 payment-upi-wrap hide-field">
                             <label class="form-label fw-bold">UPI Reference / Transaction ID</label>
-                            <input type="text" name="upi_reference" id="upi_reference" class="form-control" placeholder="Enter UPI transaction ID">
+                            <input type="text" name="upi_reference" id="upi_reference" class="form-control"
+                                placeholder="Enter UPI transaction ID">
                         </div>
 
                         <div class="col-12"><label class="form-label fw-bold">Internal Remarks</label><textarea
@@ -1509,108 +1722,142 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                 </form>
 
                 <div class="modal fade" id="advancePaymentModal" tabindex="-1" aria-hidden="true">
-                    <div class="modal-dialog modal-lg modal-dialog-centered">
-                        <div class="modal-content rounded-4 border-0">
+                    <div class="modal-dialog modal-dialog-centered cash-denom-dialog">
+                        <div class="modal-content border-0 cash-denom-modal-content">
                             <div class="modal-header border-0 pb-0">
                                 <div>
-                                    <h5 class="modal-title fw-black fw-bold">Cash Denomination Details</h5>
-                                    <p class="text-muted-custom mb-0 small">Enter note and coin count for the cash amount.</p>
+                                    <h5 class="modal-title fw-black fw-bold">Cash Denomination</h5>
+                                    <p class="text-muted-custom mb-0 fw-bold">Enter count for every note / coin</p>
                                 </div>
                                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                             </div>
                             <div class="modal-body">
-                                <div class="denom-total-box mb-3">
-                                    Cash Amount: <span id="cashModalAmount">₹0.00</span>
+                                <div class="cash-denom-summary-bar">
+                                    <span>Payment Amount: <b id="cashModalAmount">₹0.00</b></span>
+                                    <span>Total: <b id="cashDenomTotal">₹0.00</b></span>
                                 </div>
 
                                 <div id="cashDenominationSection">
-                                    <div class="alert alert-warning rounded-4 fw-bold small mb-3">
-                                        Cash denomination is mandatory. The denomination total must match the cash amount before submit.
-                                    </div>
-                                    <div class="cash-denom-example mb-3">
-                                        Example: If cash collected is ₹1001 → ₹500 notes × 2 = ₹1000 and ₹1 coin × 1 = ₹1.
-                                    </div>
                                     <div class="denom-format-box mb-3">
                                         <div class="denom-section-heading">Notes:</div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_note_500" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="500" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_note_500"
+                                                form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="500"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹500</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_note_200" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="200" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_note_200"
+                                                form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="200"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹200</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_note_100" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="100" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_note_100"
+                                                form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="100"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹100</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_note_50" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="50" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_note_50"
+                                                form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="50"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹50</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_note_20" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="20" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_note_20"
+                                                form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="20"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹20</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_note_10" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="10" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_note_10"
+                                                form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="10"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹10</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
 
                                         <div class="denom-section-heading mt-3">Coins:</div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_coin_20" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="20" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_coin_20"
+                                                form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="20"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹20</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_coin_10" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="10" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_coin_10"
+                                                form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="10"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹10</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_coin_5" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="5" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_coin_5" form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="5"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹5</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_coin_2" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="2" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_coin_2" form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="2"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹2</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
                                         <div class="denom-format-row">
-                                            <input type="number" min="0" step="1" name="cash_coin_1" form="proformaForm" class="form-control cash-denom-count denom-count-input" data-value="1" placeholder="Count">
+                                            <input type="number" min="0" step="1" name="cash_coin_1" form="proformaForm"
+                                                class="form-control cash-denom-count denom-count-input" data-value="1"
+                                                placeholder="Count">
                                             <span class="denom-symbol">x ₹1</span>
                                             <span class="denom-equals">=</span>
-                                            <input type="text" class="form-control cash-denom-amount-input" value="₹0.00" readonly>
+                                            <input type="text" class="form-control cash-denom-amount-input"
+                                                value="₹0.00" readonly>
                                         </div>
-                                    </div>
-                                    <div class="denom-total-box d-flex justify-content-between">
-                                        <span>Cash Denomination Total</span>
-                                        <span id="cashDenomTotal">₹0.00</span>
                                     </div>
                                 </div>
 
                             </div>
                             <div class="modal-footer border-0 pt-0">
-                                <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold" data-bs-dismiss="modal">Cancel</button>
-                                <button type="button" class="btn btn-primary rounded-pill px-4 fw-bold" id="advancePaymentContinueBtn">Continue</button>
+                                <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold"
+                                    data-bs-dismiss="modal">Close</button>
+                                <button type="button" class="btn btn-primary rounded-pill px-4 fw-bold"
+                                    id="advancePaymentContinueBtn">Save Denomination</button>
                             </div>
                         </div>
                     </div>
@@ -1620,9 +1867,11 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                     <div class="loading-card">
                         <div class="spinner-border text-primary mb-3" role="status"></div>
                         <h5 class="fw-bold mb-1" id="pageLoadingTitle">Processing...</h5>
-                        <p class="text-muted-custom mb-3" id="pageLoadingMessage">Please wait. Do not refresh or close this page.</p>
+                        <p class="text-muted-custom mb-3" id="pageLoadingMessage">Please wait. Do not refresh or close
+                            this page.</p>
                         <div class="progress rounded-pill" style="height:10px">
-                            <div class="progress-bar progress-bar-striped progress-bar-animated" style="width:100%"></div>
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" style="width:100%">
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1710,7 +1959,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
             els.forEach(el => {
                 if (el.type === 'checkbox' || el.type === 'radio') {
-                    el.checked = Array.isArray(value) ? value.includes(el.value) : String(value) === String(el.value);
+                    el.checked = Array.isArray(value) ? value.includes(el.value) : String(value) ===
+                        String(el.value);
                 } else {
                     el.value = Array.isArray(value) ? (value[0] || '') : value;
                 }
@@ -1793,8 +2043,17 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             width: '100%',
             allowClear: true,
             closeOnSelect: true,
-            tags: false,
-            placeholder: $product.data('placeholder') || 'Select product/card name'
+            tags: true,
+            placeholder: $product.data('placeholder') || 'Select or type product/card name',
+            createTag: function(params) {
+                const term = $.trim(params.term);
+                if (term === '') return null;
+                return {
+                    id: term,
+                    text: term,
+                    newTag: true
+                };
+            }
         });
     }
 
@@ -1812,19 +2071,20 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         const packingCharge = parseFloat(getValue('packing_charge')) || 0;
         const printingCharge = parseFloat(getValue('printing_charge')) || 0;
         const gstPercent = Math.max(0, parseFloat(getValue('gst_percent')) || 0);
-        const cashChecked = document.getElementById('pay_cash')?.checked !== false;
+        const cashChecked = document.getElementById('pay_cash')?.checked === true;
         const upiChecked = document.getElementById('pay_upi')?.checked === true;
         const cashAmount = cashChecked ? (parseFloat(getValue('cash_amount')) || 0) : 0;
         const upiAmount = upiChecked ? (parseFloat(getValue('upi_amount')) || 0) : 0;
         const advance = Math.max(0, cashAmount + upiAmount);
         setValue('advance_amount', advance.toFixed(2));
 
-        let paymentMode = 'cash';
-        if (cashAmount > 0 && upiAmount > 0) paymentMode = 'split';
-        else if (upiAmount > 0) paymentMode = 'upi';
-        else if (cashAmount > 0) paymentMode = 'cash';
+        let paymentMode = '';
+        if (cashChecked && upiChecked) paymentMode = 'split';
+        else if (upiChecked) paymentMode = 'upi';
+        else if (cashChecked) paymentMode = 'cash';
         setValue('payment_mode', paymentMode);
-        setValue('payment_reference', [getValue('cash_reference'), getValue('upi_reference')].filter(Boolean).join(' | '));
+        setValue('payment_reference', [getValue('cash_reference'), getValue('upi_reference')].filter(Boolean).join(
+            ' | '));
 
         const sub = Math.max(0, qty * rate);
         const chargeTotal = Math.max(0, extraCardCharge + packingCharge + printingCharge);
@@ -1834,15 +2094,40 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         const balance = Math.max(0, final - advance);
 
         document.getElementById('subTotalText').textContent = rupee(sub);
-        document.getElementById('chargeTotalText') && (document.getElementById('chargeTotalText').textContent = rupee(chargeTotal));
-        document.getElementById('discountText') && (document.getElementById('discountText').textContent = rupee(discount));
-        document.getElementById('taxableValueText') && (document.getElementById('taxableValueText').textContent = rupee(taxable));
-        document.getElementById('gstAmountText') && (document.getElementById('gstAmountText').textContent = rupee(gstAmount));
-        document.getElementById('advanceAmountText') && (document.getElementById('advanceAmountText').textContent = rupee(advance));
+        document.getElementById('chargeTotalText') && (document.getElementById('chargeTotalText').textContent = rupee(
+            chargeTotal));
+        document.getElementById('discountText') && (document.getElementById('discountText').textContent = rupee(
+            discount));
+        document.getElementById('taxableValueText') && (document.getElementById('taxableValueText').textContent = rupee(
+            taxable));
+        document.getElementById('gstAmountText') && (document.getElementById('gstAmountText').textContent = rupee(
+            gstAmount));
+        document.getElementById('advanceAmountText') && (document.getElementById('advanceAmountText').textContent =
+            rupee(advance));
         document.getElementById('finalAmountText').textContent = rupee(final);
         document.getElementById('balanceAmountText').textContent = rupee(balance);
-        updatePricingSummaryValues({sub, chargeTotal, final, taxable, gstAmount, advance, balance, cashAmount, upiAmount});
-        return {sub, chargeTotal, final, taxable, gstAmount, advance, balance, cashAmount, upiAmount};
+        updatePricingSummaryValues({
+            sub,
+            chargeTotal,
+            final,
+            taxable,
+            gstAmount,
+            advance,
+            balance,
+            cashAmount,
+            upiAmount
+        });
+        return {
+            sub,
+            chargeTotal,
+            final,
+            taxable,
+            gstAmount,
+            advance,
+            balance,
+            cashAmount,
+            upiAmount
+        };
     }
 
     function functionGroup() {
@@ -1863,7 +2148,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         const label = (opt.textContent || '').toLowerCase();
         const roleKey = (opt.dataset.roleKey || '').toLowerCase();
         return ((label.includes('multicolor') || label.includes('multi color') || label.includes('multicolour')) &&
-            label.includes('offset')) || roleKey.includes('multicolor_offset') || roleKey.includes('multi_color_offset');
+            label.includes('offset')) || roleKey.includes('multicolor_offset') || roleKey.includes(
+            'multi_color_offset');
     }
 
     function findMulticolorOffsetPrintingTypeId() {
@@ -1893,17 +2179,19 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
     function toggleOrderType(forceDefaults = false) {
         const type = getValue('order_type') || 'readymade';
+        const isCustomized = type === 'customized';
         document.querySelectorAll('.readymade-field').forEach(el => el.classList.toggle('hide-field', type !==
             'readymade'));
-        document.querySelectorAll('.customized-field').forEach(el => el.classList.toggle('hide-field', type !==
-            'customized'));
+        document.querySelectorAll('.customized-field').forEach(el => el.classList.toggle('hide-field', !isCustomized));
+        document.querySelectorAll('.custom-only-field').forEach(el => el.classList.toggle('hide-field', !isCustomized));
         document.getElementById('delivery_date').required = true;
         ['size_text', 'gsm_thickness', 'printing_side', 'screening_type'].forEach(id => {
             const el = document.getElementById(id);
-            if (el) el.required = (type === 'customized');
+            if (el) el.required = isCustomized;
         });
         updatePrintingTypeOptions();
         applyCustomizedDefaults(forceDefaults);
+        updateScreenSubTypeVisibility();
         renderWorkflowSteps();
         calculate();
     }
@@ -1923,8 +2211,32 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         updateSubTypes();
     }
 
+    function isScreenPrintingSelected() {
+        const opt = document.getElementById('printing_type_id')?.selectedOptions[0];
+        if (!opt || !opt.value) return false;
+        const text = (opt.textContent || '').toLowerCase();
+        const roleKey = (opt.dataset.roleKey || '').toLowerCase();
+        return text.includes('screen') || roleKey.includes('screen');
+    }
+
+    function updateScreenSubTypeVisibility() {
+        const wrap = document.getElementById('screenSubTypeWrap') || document.getElementById('colourTypeWrap');
+        const label = document.getElementById('printingSubTypeLabel');
+        const sub = document.getElementById('printing_sub_type_id');
+        const show = isScreenPrintingSelected();
+
+        if (wrap) wrap.classList.toggle('hide-field', !show);
+        if (label) label.textContent = 'Screen Print Sub-Type';
+        if (sub) sub.required = show;
+        if (!show && sub) {
+            sub.value = '';
+            refreshSelect('printing_sub_type_id');
+        }
+    }
+
     function updateSubTypes() {
         const pt = parseInt(getValue('printing_type_id') || 0, 10);
+        const current = getValue('printing_sub_type_id');
         const sub = document.getElementById('printing_sub_type_id');
         sub.innerHTML = '<option value="">Not Applicable</option>';
         printingSubTypes.filter(s => parseInt(s.printing_type_id, 10) === pt).forEach(s => {
@@ -1933,6 +2245,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             opt.textContent = s.sub_type_name;
             sub.appendChild(opt);
         });
+        if (current) sub.value = current;
+        updateScreenSubTypeVisibility();
+        refreshSelect('printing_sub_type_id');
     }
 
     function toggleLamination() {
@@ -1943,7 +2258,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             refreshSelect('lamination_type');
         }
         syncProductNameFromMaster();
-    schedulePriceLookup();
+        schedulePriceLookup();
     }
 
     function normalizeDateValue(value) {
@@ -2039,7 +2354,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                 (normalizeDateValue(saved.start || saved.planned_start_date || '') || defaultStart);
             const completionValue = (previousValues[stepId] && previousValues[stepId].completion) ?
                 previousValues[stepId].completion :
-                (normalizeDateValue(saved.completion || saved.planned_completion_date || '') || defaultCompletion);
+                (normalizeDateValue(saved.completion || saved.planned_completion_date || '') ||
+                    defaultCompletion);
 
             const div = document.createElement('div');
             div.className = 'workflow-step';
@@ -2148,7 +2464,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         calculate();
         saveFormDraft();
         if (showMessage) {
-            showActionToast('Quotation selection cancelled. You can continue as Direct Proforma Bill.', 'success', 'Quotation Cleared');
+            showActionToast('Quotation selection cancelled. You can continue as Direct Proforma Bill.', 'success',
+                'Quotation Cleared');
         }
     }
 
@@ -2183,7 +2500,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     }
 
 
-    function clearPricingSelection(message = 'No predefined printing charge found for this quantity/selection. Change quantity to a saved slab or edit Rate / Printing Charge manually.') {
+    function clearPricingSelection(message =
+        'No predefined printing charge found for this quantity/selection. Change quantity to a saved slab or edit Rate / Printing Charge manually.'
+    ) {
         setValue('printing_price_master_id', '');
         setValue('price_slab_text_input', '');
         setValue('pricing_plate_charge', '0');
@@ -2223,10 +2542,13 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         const printing = parseFloat(getValue('printing_charge')) || 0;
         const packing = parseFloat(getValue('packing_charge')) || 0;
         const itemAmount = qty * rate;
-        const final = amounts && typeof amounts.final === 'number'
-            ? amounts.final
-            : (itemAmount + plate + printing + packing - (parseFloat(getValue('discount_amount')) || 0));
-        const setText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+        const final = amounts && typeof amounts.final === 'number' ?
+            amounts.final :
+            (itemAmount + plate + printing + packing - (parseFloat(getValue('discount_amount')) || 0));
+        const setText = (id, text) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = text;
+        };
         setText('priceRateText', rupee(rate));
         setText('priceQtyText', (qty || 0).toLocaleString('en-IN') + ' Nos');
         setText('pricePlateText', rupee(plate));
@@ -2313,7 +2635,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
     function canLookupPricing(payload) {
         const qty = parseFloat(payload.qty || 0) || 0;
-        return qty > 0 && (String(payload.product_id || '').trim() !== '' || String(payload.product_name || '').trim() !== '') && String(payload.printing_type_id || '').trim() !== '';
+        return qty > 0 && (String(payload.product_id || '').trim() !== '' || String(payload.product_name || '')
+            .trim() !== '') && String(payload.printing_type_id || '').trim() !== '';
     }
 
     function fetchPricing() {
@@ -2325,30 +2648,109 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
         if (pricingLookupController) pricingLookupController.abort();
         pricingLookupController = new AbortController();
-        const params = new URLSearchParams(Object.assign({action: 'find_price'}, payload));
+        const params = new URLSearchParams(Object.assign({
+            action: 'find_price'
+        }, payload));
 
         fetch('api/printing_price_master.php?' + params.toString(), {
-            method: 'GET',
-            credentials: 'same-origin',
-            signal: pricingLookupController.signal
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data && data.status && data.price) {
-                applyPricingResult(data.price);
-            } else {
-                clearPricingSelection((data && data.message) || 'No pricing found. Please add pricing in Printing Price Master.');
-            }
-        })
-        .catch(error => {
-            if (error && error.name === 'AbortError') return;
-            clearPricingSelection('Unable to fetch pricing. Please check the pricing API.');
-        });
+                method: 'GET',
+                credentials: 'same-origin',
+                signal: pricingLookupController.signal
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data && data.status && data.price) {
+                    applyPricingResult(data.price);
+                } else {
+                    clearPricingSelection((data && data.message) ||
+                        'No pricing found. Please add pricing in Printing Price Master.');
+                }
+            })
+            .catch(error => {
+                if (error && error.name === 'AbortError') return;
+                clearPricingSelection('Unable to fetch pricing. Please check the pricing API.');
+            });
     }
 
     function schedulePriceLookup() {
         clearTimeout(pricingLookupTimer);
         pricingLookupTimer = setTimeout(fetchPricing, 350);
+    }
+
+
+    let creatingProductInMaster = false;
+
+    function createProductInMaster(productName) {
+        const form = document.getElementById('proformaForm');
+        const token = form?.querySelector('[name="csrf_token"]')?.value || '';
+        const fd = new FormData();
+        fd.append('csrf_token', token);
+        fd.append('action', 'create_product');
+        fd.append('product_name', productName);
+        fd.append('order_type', getValue('order_type') || 'readymade');
+        fd.append('rate', getValue('rate') || '0');
+
+        return fetch('api/create_proforma.php', {
+            method: 'POST',
+            body: fd,
+            credentials: 'same-origin'
+        }).then(response => response.json());
+    }
+
+    function selectCreatedProduct(product) {
+        if (!product || !product.id) return;
+        const select = document.getElementById('product_id');
+        if (!select) return;
+        const id = String(product.id);
+        const name = String(product.product_name || product.name || '').trim();
+        let opt = Array.from(select.options).find(o => String(o.value) === id);
+        if (!opt) {
+            opt = new Option(name || id, id, true, true);
+            select.appendChild(opt);
+        }
+        opt.value = id;
+        opt.textContent = name || id;
+        opt.dataset.name = name || id;
+        opt.dataset.orderType = product.default_order_type || getValue('order_type') || 'readymade';
+        opt.dataset.price = product.default_price || '0';
+        select.value = id;
+        refreshSelect('product_id');
+        setValue('product_name', name || id);
+    }
+
+    function ensureSelectedProductSaved() {
+        const select = document.getElementById('product_id');
+        const value = String(select?.value || '').trim();
+        const name = selectedProductName();
+        if (!value || /^\d+$/.test(value) || creatingProductInMaster) {
+            productChangedCore();
+            return;
+        }
+
+        creatingProductInMaster = true;
+        showActionToast('Saving new product to Product Master...', 'success', 'Product Master');
+        createProductInMaster(name || value)
+            .then(data => {
+                if (data && data.status && data.product) {
+                    selectCreatedProduct(data.product);
+                    showActionToast('New product saved and selected.', 'success', 'Product Master');
+                } else {
+                    setValue('product_name', name || value);
+                    showActionToast((data && data.message) ||
+                        'Product could not be saved now. It will be saved while creating proforma.', 'danger',
+                        'Product Master');
+                }
+                productChangedCore();
+            })
+            .catch(() => {
+                setValue('product_name', name || value);
+                showActionToast('Product auto-save failed. It will be saved while creating proforma.', 'danger',
+                    'Product Master');
+                productChangedCore();
+            })
+            .finally(() => {
+                creatingProductInMaster = false;
+            });
     }
 
     function selectedProductName() {
@@ -2359,12 +2761,19 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
     function syncProductNameFromMaster() {
         const productName = selectedProductName();
-        if (productName && productName.toLowerCase() !== 'search or type product/card name') {
+        const lowerName = productName.toLowerCase();
+        if (!getValue('product_id')) {
+            setValue('product_name', '');
+            return;
+        }
+        if (productName && !['search or type product/card name', 'select or type product/card name',
+                'select product/card name'
+            ].includes(lowerName)) {
             setValue('product_name', productName);
         }
     }
 
-    function productChanged() {
+    function productChangedCore() {
         syncProductNameFromMaster();
         const select = document.getElementById('product_id');
         const opt = select?.selectedOptions[0];
@@ -2378,26 +2787,56 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         schedulePriceLookup();
         calculate();
     }
-    ['discount_amount', 'extra_card_charge', 'packing_charge', 'printing_charge', 'gst_percent', 'cash_amount', 'upi_amount', 'rate'].forEach(id => document.getElementById(id)?.addEventListener(
+
+    function productChanged() {
+        ensureSelectedProductSaved();
+    }
+    ['discount_amount', 'extra_card_charge', 'packing_charge', 'printing_charge', 'gst_percent', 'cash_amount',
+        'upi_amount', 'rate'
+    ].forEach(id => document.getElementById(id)?.addEventListener(
         'input', calculate));
-    ['qty', 'size_text', 'gsm_thickness'].forEach(id => document.getElementById(id)?.addEventListener('input', schedulePriceLookup));
-    ['printing_type_id', 'printing_sub_type_id', 'printing_side', 'lamination_type'].forEach(id => document.getElementById(id)?.addEventListener('change', schedulePriceLookup));
+    ['qty', 'size_text', 'gsm_thickness'].forEach(id => document.getElementById(id)?.addEventListener('input',
+        schedulePriceLookup));
+    ['printing_type_id', 'printing_sub_type_id', 'printing_side', 'lamination_type'].forEach(id => document
+        .getElementById(id)?.addEventListener('change', schedulePriceLookup));
     document.getElementById('quotation_id')?.addEventListener('change', loadQuotation);
     document.getElementById('clearQuotationBtn')?.addEventListener('click', function() {
         clearQuotationSelection(true);
     });
     document.getElementById('function_type_id')?.addEventListener('change', toggleFunctionFields);
-    document.getElementById('order_type')?.addEventListener('change', () => { toggleOrderType(true); schedulePriceLookup(); });
-    document.getElementById('printing_type_id')?.addEventListener('change', () => { updateSubTypes(); schedulePriceLookup(); });
+    document.getElementById('order_type')?.addEventListener('change', () => {
+        toggleOrderType(true);
+        schedulePriceLookup();
+    });
+    document.getElementById('printing_type_id')?.addEventListener('change', () => {
+        updateSubTypes();
+        schedulePriceLookup();
+    });
     document.getElementById('delivery_date')?.addEventListener('change', () => syncFinalTrackingDate(true));
-    document.getElementById('lamination_required')?.addEventListener('change', () => { toggleLamination(); schedulePriceLookup(); });
-    document.getElementById('product_id')?.addEventListener('change', productChanged);
-    document.getElementById('proformaForm')?.addEventListener('reset', () => { clearFormDraft(); setTimeout(() => {
-        toggleFunctionFields();
-        toggleOrderType(false);
+    document.getElementById('lamination_required')?.addEventListener('change', () => {
         toggleLamination();
+        schedulePriceLookup();
+    });
+    document.getElementById('product_id')?.addEventListener('change', productChanged);
+    document.getElementById('clearProductBtn')?.addEventListener('click', function() {
+        setValue('product_id', '');
+        setValue('product_name', '');
+        if (window.jQuery && $.fn.select2) {
+            $('#product_id').val('').trigger('change.select2');
+            $('#product_id').select2('close');
+        }
+        clearPricingSelection('Select product, printing type and quantity to fetch automatic pricing.');
         calculate();
-    }, 50); });
+    });
+    document.getElementById('proformaForm')?.addEventListener('reset', () => {
+        clearFormDraft();
+        setTimeout(() => {
+            toggleFunctionFields();
+            toggleOrderType(false);
+            toggleLamination();
+            calculate();
+        }, 50);
+    });
     if (window.jQuery) {
         $('#quotation_id').on('select2:select', loadQuotation);
         $('#quotation_id').on('select2:clear', function() {
@@ -2440,7 +2879,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     }
 
     function currentCashAmount() {
-        return (document.getElementById('pay_cash')?.checked !== false) ? (parseFloat(getValue('cash_amount')) || 0) : 0;
+        return (document.getElementById('pay_cash')?.checked === true) ? (parseFloat(getValue('cash_amount')) || 0) :
+            0;
     }
 
     function currentAdvanceAmount() {
@@ -2521,7 +2961,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     function syncPaymentModeUI(openCashModal = false) {
         const cashCheck = document.getElementById('pay_cash');
         const upiCheck = document.getElementById('pay_upi');
-        const cashChecked = cashCheck?.checked !== false;
+        const cashChecked = cashCheck?.checked === true;
         const upiChecked = upiCheck?.checked === true;
 
         document.querySelectorAll('[data-payment-card]').forEach(card => {
@@ -2535,6 +2975,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
         if (!cashChecked) {
             setValue('cash_amount', '0');
+            setValue('cash_reference', '');
         }
         if (!upiChecked) {
             setValue('upi_amount', '0');
@@ -2566,15 +3007,16 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         card.addEventListener('click', function(event) {
             if (event.target && event.target.classList.contains('payment-mode-check')) return;
             event.preventDefault();
-            const mode = this.dataset.paymentCard || this.querySelector('.payment-mode-check')?.dataset.mode || 'cash';
-            setPaymentMode(mode, mode === 'cash', true);
+            const mode = this.dataset.paymentCard || this.querySelector('.payment-mode-check')?.dataset
+                .mode || 'cash';
+            setPaymentMode(mode, false, true);
         });
     });
 
     document.querySelectorAll('.payment-mode-check').forEach(check => {
         check.addEventListener('change', function() {
             advancePaymentConfirmed = false;
-            syncPaymentModeUI(this.dataset.mode === 'cash');
+            syncPaymentModeUI(false);
         });
     });
 
@@ -2601,7 +3043,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
     function maybeOpenAdvanceModalFromPaymentInput(showAmountReminder = false) {
         const cash = currentCashAmount();
-        const cashChecked = document.getElementById('pay_cash')?.checked !== false;
+        const cashChecked = document.getElementById('pay_cash')?.checked === true;
 
         if (!cashChecked || advancePaymentConfirmed) {
             return;
@@ -2613,7 +3055,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         }
 
         if (showAmountReminder) {
-            showActionToast('Enter the cash amount first, then add the cash denomination count.', 'danger', 'Cash Denomination');
+            showActionToast('Enter the cash amount first, then add the cash denomination count.', 'danger',
+                'Cash Denomination');
         }
     }
 
@@ -2623,7 +3066,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         if (cash > 0) {
             const denomTotal = updateCashDenominationTotal();
             if (Math.abs(denomTotal - cash) > 0.009) {
-                showActionToast('Cash denomination total must match the cash amount. Cash: ' + rupee(cash) + ', Denomination: ' + rupee(denomTotal), 'danger', 'Payment Check');
+                showActionToast('Cash denomination total must match the cash amount. Cash: ' + rupee(cash) +
+                    ', Denomination: ' + rupee(denomTotal), 'danger', 'Payment Check');
                 return;
             }
         }
@@ -2648,8 +3092,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         const oldText = btn ? btn.textContent : '';
         const advance = currentAdvanceAmount();
         const cashAmount = currentCashAmount();
-        const upiAmount = (document.getElementById('pay_upi')?.checked === true) ? (parseFloat(getValue('upi_amount')) || 0) : 0;
-        const payMode = getValue('payment_mode') || 'cash';
+        const upiAmount = (document.getElementById('pay_upi')?.checked === true) ? (parseFloat(getValue(
+            'upi_amount')) || 0) : 0;
+        const payMode = getValue('payment_mode');
 
         const isEditSubmit = !!editData;
 
@@ -2665,14 +3110,17 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             return;
         }
 
-        if (!isEditSubmit && document.getElementById('pay_cash')?.checked && cashAmount > 0 && !advancePaymentConfirmed) {
+        if (!isEditSubmit && document.getElementById('pay_cash')?.checked && cashAmount > 0 && !
+            advancePaymentConfirmed) {
             openAdvancePaymentModal();
             return;
         }
 
         advancePaymentConfirmed = false;
         submittingToApi = true;
-        showPageLoading(editData ? 'Updating Proforma...' : 'Creating Proforma...', editData ? 'Please wait. Saving updated proforma details.' : 'Please wait. Job card and tracking stages are being prepared.');
+        showPageLoading(editData ? 'Updating Proforma...' : 'Creating Proforma...', editData ?
+            'Please wait. Saving updated proforma details.' :
+            'Please wait. Job card and tracking stages are being prepared.');
 
         if (btn) {
             btn.disabled = true;
