@@ -550,6 +550,8 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
             'design_approval_required' => ['module' => 'Customer Approvals', 'variables' => ['customer_name', 'job_card_no', 'tracking_link']],
             'design_approved' => ['module' => 'Customer Approvals', 'variables' => ['customer_name', 'job_card_no']],
             'printing_started' => ['module' => 'Job Tracking', 'variables' => ['customer_name', 'job_card_no', 'printing_type', 'current_stage']],
+            'readymade_screen_print_started' => ['module' => 'Job Tracking', 'variables' => ['customer_name', 'job_card_no', 'product_name', 'tracking_link']],
+            'readymade_screen_print_completed' => ['module' => 'Job Tracking', 'variables' => ['customer_name', 'job_card_no', 'product_name', 'tracking_link']],
             'lamination_started' => ['module' => 'Job Tracking', 'variables' => ['customer_name', 'job_card_no', 'lamination_type']],
             'ready_for_delivery' => ['module' => 'Dispatch', 'variables' => ['customer_name', 'job_card_no', 'balance_amount']],
             'dispatch_completed' => ['module' => 'Dispatch', 'variables' => ['customer_name', 'job_card_no', 'dispatch_mode', 'dispatch_reference']],

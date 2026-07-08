@@ -547,6 +547,70 @@ function jcSendReadymadeScreenStartWhatsapp(mysqli $conn, array $job): array
     }
 }
 
+
+function jcSendReadymadeScreenCompleteWhatsapp(mysqli $conn, array $job): array
+{
+    if (!function_exists('subhiksha_send_whatsapp')) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp API helper is not available. Place whatsapp-api.php inside includes/ folder.',
+            'log_id' => 0,
+            'response' => ''
+        ];
+    }
+
+    $mobile = trim((string)($job['mobile'] ?? ''));
+    if ($mobile === '') {
+        return [
+            'success' => false,
+            'message' => 'Customer mobile number is missing.',
+            'log_id' => 0,
+            'response' => ''
+        ];
+    }
+
+    $customerName = trim((string)($job['customer_name'] ?? 'Customer')) ?: 'Customer';
+    $jobNo = trim((string)($job['job_card_no'] ?? ($job['job_no'] ?? '')));
+    $productName = trim((string)($job['product_name'] ?? 'Cards')) ?: 'Cards';
+    $trackingLink = jcBuildCustomerTrackingLink($job);
+
+    $message = "Dear {$customerName},
+
+";
+    $message .= "Your Screen Printing work has been completed for Job Card {$jobNo}.
+";
+    $message .= "Your order has been sent to Dispatch process.
+
+";
+    $message .= "Product: {$productName}
+";
+    if ($trackingLink !== '') {
+        $message .= "Track your order: {$trackingLink}
+
+";
+    }
+    $message .= "- Subhiksha Cards";
+
+    try {
+        return subhiksha_send_whatsapp($conn, [
+            'mobile' => $mobile,
+            'message' => $message,
+            'related_module' => 'Job Tracking',
+            'related_id' => (int)($job['id'] ?? 0),
+            'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
+            'job_card_id' => (int)($job['id'] ?? 0),
+            'sent_by' => (int)($_SESSION['user_id'] ?? 0)
+        ]);
+    } catch (Throwable $e) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp sending failed.',
+            'log_id' => 0,
+            'response' => $e->getMessage()
+        ];
+    }
+}
+
 function jcRunReadymadeScreenShortcut(mysqli $conn, int $jobId, string $shortcutAction, string $roleKey): void
 {
     if ($roleKey !== 'screen_printing') {
@@ -644,6 +708,8 @@ function jcRunReadymadeScreenShortcut(mysqli $conn, int $jobId, string $shortcut
 
         if ($shortcutAction === 'readymade_screen_start') {
             jcSendReadymadeScreenStartWhatsapp($conn, $job);
+        } elseif ($shortcutAction === 'readymade_screen_complete') {
+            jcSendReadymadeScreenCompleteWhatsapp($conn, $job);
         }
     } catch (Throwable $e) {
         $conn->rollback();
@@ -665,7 +731,7 @@ if (!empty($_GET['shortcut_msg'])) {
     if ($_GET['shortcut_msg'] === 'started') {
         $message = 'Readymade Screen Print job started. Master Copy Received message sent/recorded and Printing opened.';
     } elseif ($_GET['shortcut_msg'] === 'completed') {
-        $message = 'Readymade Screen Print job completed up to Send to Dispatch.';
+        $message = 'Readymade Screen Print job completed up to Send to Dispatch. Completion message sent/recorded.';
     }
 }
 
