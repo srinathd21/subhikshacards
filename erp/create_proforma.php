@@ -18,16 +18,74 @@ $currentPage = 'proforma_bills.php';
 $editId = (int)filter_var($_GET['id'] ?? 0, FILTER_SANITIZE_NUMBER_INT);
 $isEditMode = $editId > 0 && (isset($_GET['mode']) && (string)$_GET['mode'] === 'edit');
 
-if (function_exists('require_permission')) {
-    if ($isEditMode) {
-        $canEditThisPage = function_exists('can_edit') ? can_edit($conn, $currentPage) : false;
-        $canUpdateThisPage = function_exists('can_update') ? can_update($conn, $currentPage) : false;
-        if (!$canEditThisPage && !$canUpdateThisPage) {
-            require_permission($conn, 'can_edit', $currentPage);
+/*
+ |--------------------------------------------------------------------------
+ | Permission Fix for Create Proforma Page
+ |--------------------------------------------------------------------------
+ | Earlier this page required only can_create for create mode.
+ | In your ERP, some users open Create Proforma from Proforma Bills using
+ | view/update/edit access, so the page showed "Access Denied".
+ |
+ | This page is now allowed when the logged-in user has ANY Proforma Bills
+ | permission: create, view, update, or edit. Edit mode still prefers edit/update.
+ */
+if (!function_exists('cpCheckPagePermission')) {
+    function cpCheckPagePermission(mysqli $conn, string $page, array $permissionFunctions): bool
+    {
+        foreach ($permissionFunctions as $functionName) {
+            if (!function_exists($functionName)) {
+                continue;
+            }
+
+            try {
+                if ((bool)$functionName($conn, $page)) {
+                    return true;
+                }
+            } catch (ArgumentCountError $e) {
+                try {
+                    if ((bool)$functionName($page)) {
+                        return true;
+                    }
+                } catch (Throwable $inner) {
+                    continue;
+                }
+            } catch (Throwable $e) {
+                continue;
+            }
         }
-    } else {
-        require_permission($conn, 'can_create', $currentPage);
+
+        return false;
     }
+}
+
+$roleKeyForCreatePage = strtolower(trim((string)(
+    $_SESSION['role_key']
+    ?? $_SESSION['role']
+    ?? $_SESSION['user_role']
+    ?? ''
+)));
+
+$createProformaAllowed = in_array($roleKeyForCreatePage, ['admin', 'super_admin', 'superadmin'], true);
+
+if (!$createProformaAllowed && function_exists('is_super_admin')) {
+    try {
+        $createProformaAllowed = (bool)is_super_admin();
+    } catch (Throwable $e) {
+        $createProformaAllowed = false;
+    }
+}
+
+if (!$createProformaAllowed) {
+    $permissionFunctions = $isEditMode
+        ? ['can_edit', 'can_update', 'can_create', 'can_view']
+        : ['can_create', 'can_view', 'can_update', 'can_edit'];
+
+    $createProformaAllowed = cpCheckPagePermission($conn, $currentPage, $permissionFunctions);
+}
+
+if (!$createProformaAllowed && function_exists('require_permission')) {
+    /* Final fallback: ask for view permission instead of create-only permission. */
+    require_permission($conn, 'can_view', $currentPage);
 }
 
 if (!function_exists('e')) {
@@ -398,6 +456,39 @@ if ($defaultProformaStatusId <= 0 && $proformaStatuses) {
 }
 $selectedProformaStatusId = ($isEditMode && $editData && !empty($editData['proforma_status_id'])) ? (int)$editData['proforma_status_id'] : $defaultProformaStatusId;
 $products = cpFetchAll($conn, "SELECT id, product_name, default_order_type, default_price FROM products WHERE is_active = 1 ORDER BY product_name ASC");
+
+/*
+ | Edit Mode Product Fix
+ | Old proforma records may have item_name saved but product_id empty,
+ | or the saved product may now be inactive/missing from products master.
+ | Product Master is required in UI, so add/select the saved item as a valid option.
+ */
+$editProductSelectValue = '';
+$editProductSelectName = '';
+$editProductExistsInProducts = false;
+if ($isEditMode && $editData) {
+    $editItemProductId = (int)($editData['item_product_id'] ?? 0);
+    $editItemName = trim((string)($editData['item_name'] ?? ''));
+    $editProductSelectValue = $editItemProductId > 0 ? (string)$editItemProductId : $editItemName;
+    $editProductSelectName = $editItemName !== '' ? $editItemName : 'Saved Product';
+
+    foreach ($products as $p) {
+        $pid = (int)($p['id'] ?? 0);
+        $pname = trim((string)($p['product_name'] ?? ''));
+        if ($editItemProductId > 0 && $pid === $editItemProductId) {
+            $editProductExistsInProducts = true;
+            $editProductSelectName = $pname !== '' ? $pname : $editProductSelectName;
+            break;
+        }
+        if ($editItemProductId <= 0 && $editItemName !== '' && strcasecmp($pname, $editItemName) === 0) {
+            $editProductExistsInProducts = true;
+            $editProductSelectValue = (string)$pid;
+            $editProductSelectName = $pname;
+            break;
+        }
+    }
+}
+
 $printingTypes = cpFetchAll($conn, "SELECT id, printing_name, printing_key, role_key, is_for_readymade, is_for_customized FROM printing_types WHERE is_active = 1 ORDER BY sort_order ASC, id ASC");
 $printingSubTypes = cpFetchAll($conn, "SELECT id, printing_type_id, sub_type_name FROM printing_sub_types WHERE is_active = 1 ORDER BY printing_type_id ASC, sort_order ASC, id ASC");
 $readymadeSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order, is_final_step FROM workflow_steps WHERE order_type = 'readymade' AND is_active = 1 ORDER BY sort_order ASC");
@@ -885,6 +976,140 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             border-radius: 18px
         }
     }
+
+    .pricing-requirement-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 14px;
+        border-radius: 16px;
+        background: color-mix(in srgb, var(--primary-color, #2563eb) 7%, var(--card-bg));
+        border: 1px dashed color-mix(in srgb, var(--primary-color, #2563eb) 35%, var(--border-soft));
+        color: var(--text-main);
+        font-weight: 950;
+        margin-bottom: 4px;
+    }
+
+    .pricing-summary-card {
+        border: 1px solid #86efac;
+        border-radius: 20px;
+        padding: 16px;
+        background: linear-gradient(135deg, rgba(240,253,244,.92), rgba(255,255,255,.98));
+        box-shadow: 0 14px 32px rgba(22, 163, 74, .08);
+    }
+
+    .pricing-summary-card.no-price {
+        border-color: #fecaca;
+        background: linear-gradient(135deg, rgba(254,242,242,.96), rgba(255,255,255,.98));
+        box-shadow: 0 14px 32px rgba(220, 38, 38, .07);
+    }
+
+    .pricing-summary-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 12px;
+    }
+
+    .pricing-summary-head strong {
+        font-size: 15px;
+        font-weight: 950;
+        color: var(--text-main);
+        text-transform: uppercase;
+    }
+
+    .pricing-status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border-radius: 999px;
+        padding: 6px 10px;
+        font-size: 11px;
+        font-weight: 950;
+        color: #166534;
+        background: #dcfce7;
+        border: 1px solid #86efac;
+        white-space: nowrap;
+    }
+
+    .pricing-status-badge.warn {
+        color: #991b1b;
+        background: #fee2e2;
+        border-color: #fecaca;
+    }
+
+    .pricing-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+    }
+
+    .pricing-cell {
+        border: 1px solid rgba(148, 163, 184, .35);
+        border-radius: 14px;
+        padding: 10px 12px;
+        background: rgba(255,255,255,.76);
+        min-height: 68px;
+    }
+
+    .pricing-cell small {
+        display: block;
+        font-size: 10.5px;
+        font-weight: 900;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        margin-bottom: 5px;
+        letter-spacing: .02em;
+    }
+
+    .pricing-cell strong {
+        display: block;
+        font-size: 15px;
+        font-weight: 950;
+        color: var(--text-main);
+        line-height: 1.15;
+    }
+
+    .pricing-cell.final strong {
+        color: #15803d;
+        font-size: 20px;
+    }
+
+    .pricing-note {
+        border-radius: 14px;
+        padding: 10px 12px;
+        font-size: 12px;
+        font-weight: 850;
+        margin-top: 10px;
+    }
+
+    .pricing-note.info {
+        color: #1d4ed8;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+    }
+
+    .pricing-note.warn {
+        color: #92400e;
+        background: #fffbeb;
+        border: 1px solid #fde68a;
+    }
+
+    .rate-auto-lock {
+        background: color-mix(in srgb, var(--border-soft) 22%, var(--card-bg)) !important;
+        font-weight: 900;
+    }
+
+    @media(max-width:991.98px) {
+        .pricing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media(max-width:575.98px) {
+        .pricing-grid { grid-template-columns: 1fr; }
+    }
+
     </style>
 </head>
 
@@ -930,6 +1155,13 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                     <input type="hidden" name="action"
                         value="<?= $isEditMode ? 'update_proforma' : 'create_proforma' ?>">
                     <input type="hidden" name="id" value="<?= (int)$editId ?>">
+                    <input type="hidden" name="printing_price_master_id" id="printing_price_master_id" value="">
+                    <input type="hidden" name="price_slab_text" id="price_slab_text_input" value="">
+                    <input type="hidden" name="pricing_plate_charge" id="pricing_plate_charge" value="0">
+                    <input type="hidden" name="pricing_printing_charge" id="pricing_printing_charge" value="0">
+                    <input type="hidden" name="pricing_package_charge" id="pricing_package_charge" value="0">
+                    <input type="hidden" name="pricing_additional_charge" id="pricing_additional_charge" value="0">
+                    <input type="hidden" name="pricing_is_gst_inclusive" id="pricing_is_gst_inclusive" value="1">
                     <div class="row g-3">
                         <div class="col-12">
                             <div class="section-title">1. Quotation / Customer Details</div>
@@ -986,102 +1218,179 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                         <div class="col-12"><label class="form-label fw-bold">Billing Address</label><textarea
                                 name="billing_address" id="billing_address" class="form-control" rows="2"></textarea>
                         </div>
-
                         <div class="col-12 mt-3">
                             <div class="section-title">3. Order / Production Details</div>
                         </div>
-                        <div class="col-md-3"><label class="form-label fw-bold">Order Type *</label><select
-                                name="order_type" id="order_type" class="form-select" required>
-                                <option value="readymade">Readymade</option>
-                                <option value="customized">Customized</option>
-                            </select></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">Product Master</label><select
-                                name="product_id" id="product_id" class="form-select select2-autotype product-master-select"
-                                data-placeholder="Search or type product name" data-tags="true">
-                                <option value="">Enter Product Name</option><?php foreach ($products as $p): ?><option
-                                    value="<?= e($p['id']) ?>" data-name="<?= e($p['product_name']) ?>"
-                                    data-price="<?= e($p['default_price']) ?>"
-                                    data-order-type="<?= e($p['default_order_type']) ?>"><?= e($p['product_name']) ?>
-                                </option><?php endforeach; ?>
-                            </select></div>
-                        <div class="col-md-6"><label class="form-label fw-bold">Product / Item Name *</label><input
-                                type="text" name="product_name" id="product_name" class="form-control" required
-                                placeholder="Type new product name if not in master"></div>
-                        <div class="col-md-4"><label class="form-label fw-bold">Printing Type *</label><select
-                                name="printing_type_id" id="printing_type_id" class="form-select" required>
-                                <option value="">Select Printing Type</option><?php foreach ($printingTypes as $pt): ?>
-                                <option value="<?= e($pt['id']) ?>" data-readymade="<?= e($pt['is_for_readymade']) ?>"
-                                    data-customized="<?= e($pt['is_for_customized']) ?>"
-                                    data-role-key="<?= e($pt['role_key']) ?>"><?= e($pt['printing_name']) ?></option>
-                                <?php endforeach; ?>
-                            </select></div>
-                        <div class="col-md-4 readymade-field"><label class="form-label fw-bold">Screen Print
-                                Sub-Type</label><select name="printing_sub_type_id" id="printing_sub_type_id"
-                                class="form-select">
-                                <option value="">Not Applicable</option>
-                            </select></div>
-                        <div class="col-md-4 readymade-field d-flex align-items-end">
-                            <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox"
-                                    name="finishing_required" id="finishing_required" value="1"><label
-                                    class="form-check-label fw-bold" for="finishing_required">With Finishing</label>
+
+                        <div class="col-12">
+                            <div class="soft-panel">
+                                <div class="row g-3">
+                                    <div class="col-md-3">
+                                        <label class="form-label fw-bold">Order Type *</label>
+                                        <select name="order_type" id="order_type" class="form-select" required>
+                                            <option value="readymade">Readymade</option>
+                                            <option value="customized">Customized</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-9">
+                                        <label class="form-label fw-bold">Product Master *</label>
+                                        <select name="product_id" id="product_id" class="form-select select2-autotype product-master-select"
+                                            data-placeholder="Select product/card name" data-tags="false" required>
+                                            <option value="">Select product/card name</option><?php if ($isEditMode && $editProductSelectValue !== '' && !$editProductExistsInProducts): ?><option
+                                                value="<?= e($editProductSelectValue) ?>" data-name="<?= e($editProductSelectName) ?>"
+                                                data-price="<?= e($editData['item_rate'] ?? 0) ?>"
+                                                data-order-type="<?= e($editData['order_type'] ?? 'readymade') ?>" selected><?= e($editProductSelectName) ?>
+                                            </option><?php endif; ?><?php foreach ($products as $p): ?><option
+                                                value="<?= e($p['id']) ?>" data-name="<?= e($p['product_name']) ?>"
+                                                data-price="<?= e($p['default_price']) ?>"
+                                                data-order-type="<?= e($p['default_order_type']) ?>" <?= ($isEditMode && $editProductSelectValue !== '' && (string)$editProductSelectValue === (string)$p['id']) ? 'selected' : '' ?>><?= e($p['product_name']) ?>
+                                            </option><?php endforeach; ?>
+                                        </select>
+                                        <input type="hidden" name="product_name" id="product_name" value="">
+                                        <small class="text-muted-custom fw-bold">Product / Item Name is removed. This field lists product names from Product Master.</small>
+                                    </div>
+
+                                    <div class="col-md-4">
+                                        <label class="form-label fw-bold">Printing Type *</label>
+                                        <select name="printing_type_id" id="printing_type_id" class="form-select" required>
+                                            <option value="">Select Printing Type</option><?php foreach ($printingTypes as $pt): ?>
+                                            <option value="<?= e($pt['id']) ?>" data-readymade="<?= e($pt['is_for_readymade']) ?>"
+                                                data-customized="<?= e($pt['is_for_customized']) ?>"
+                                                data-role-key="<?= e($pt['role_key']) ?>"><?= e($pt['printing_name']) ?></option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4 readymade-field">
+                                        <label class="form-label fw-bold">Screen Print Sub-Type</label>
+                                        <select name="printing_sub_type_id" id="printing_sub_type_id" class="form-select">
+                                            <option value="">Not Applicable</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label fw-bold">Delivery Date *</label>
+                                        <input type="date" name="delivery_date" id="delivery_date" class="form-control">
+                                    </div>
+
+                                    <div class="col-12">
+                                        <div class="pricing-requirement-title">
+                                            <span><i class="fa fa-sliders-h me-2"></i>Requirement Details & Predefined Printing Charge</span>
+                                            <small class="text-muted-custom fw-bold">No colour selection. Printing charge is auto-filled from predefined quantity slabs and remains editable.</small>
+                                        </div>
+                                    </div>
+
+                                    <div class="col-md-3">
+                                        <label class="form-label fw-bold">Card Size</label>
+                                        <input type="text" name="size_text" id="size_text" class="form-control"
+                                            placeholder="Eg: 14 x 9.5">
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label fw-bold">GSM / Thickness</label>
+                                        <input type="text" name="gsm_thickness" id="gsm_thickness" class="form-control"
+                                            placeholder="Eg: 300 GSM">
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label fw-bold">Printing Side</label>
+                                        <select name="printing_side" id="printing_side" class="form-select">
+                                            <option value="">Select</option>
+                                            <option value="single">Single Side</option>
+                                            <option value="double">Double Side</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3 customized-field">
+                                        <label class="form-label fw-bold">Screening</label>
+                                        <select name="screening_type" id="screening_type" class="form-select">
+                                            <option value="">Select</option>
+                                            <option value="regular">Regular Screening</option>
+                                            <option value="special">Special Screening</option>
+                                        </select>
+                                    </div>
+
+                                    <div class="col-md-3 d-flex align-items-end">
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" name="lamination_required" id="lamination_required" value="1">
+                                            <label class="form-check-label fw-bold" for="lamination_required">Lamination Required</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3 lamination-type-wrap">
+                                        <label class="form-label fw-bold">Lamination Type</label>
+                                        <select name="lamination_type" id="lamination_type" class="form-select">
+                                            <option value="none">None</option>
+                                            <option value="glossy">Glossy</option>
+                                            <option value="matte">Matte</option>
+                                            <option value="special">Special</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label fw-bold">Quantity *</label>
+                                        <input type="number" step="1" min="1" name="qty" id="qty" class="form-control" value="1" required>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label fw-bold">Item Rate *</label>
+                                        <div class="input-group">
+                                            <span class="input-group-text">₹</span>
+                                            <input type="number" step="0.01" min="0" name="rate" id="rate" class="form-control" value="0">
+                                            <span class="input-group-text">/ Unit</span>
+                                        </div>
+                                        <small class="text-muted-custom fw-bold">Optional. If entered, item amount = Quantity × Rate. Printing slab fills Printing Charge separately.</small>
+                                    </div>
+
+                                    <div class="col-12">
+                                        <label class="form-label fw-bold">Item Description</label>
+                                        <textarea name="description" id="description" class="form-control" rows="2"></textarea>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label fw-bold">Discount</label>
+                                        <input type="number" step="0.01" min="0" name="discount_amount" id="discount_amount" class="form-control" value="0">
+                                    </div>
+                                    <?php if ($proformaStatuses): ?>
+                                    <div class="col-md-4">
+                                        <label class="form-label fw-bold">Proforma Status</label>
+                                        <select name="proforma_status_id" id="proforma_status_id" class="form-select">
+                                            <?php foreach ($proformaStatuses as $statusRow): ?>
+                                            <option value="<?= (int)$statusRow['id'] ?>"
+                                                <?= (int)$selectedProformaStatusId === (int)$statusRow['id'] ? 'selected' : '' ?>>
+                                                <?= e($statusRow['status_name']) ?></option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+                                    <?php endif; ?>
+                                    <div class="col-md-4 readymade-field d-flex align-items-end">
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" name="finishing_required" id="finishing_required" value="1">
+                                            <label class="form-check-label fw-bold" for="finishing_required">With Finishing</label>
+                                        </div>
+                                    </div>
+
+                                    <div class="col-12">
+                                        <div id="pricingSummaryCard" class="pricing-summary-card no-price">
+                                            <div class="pricing-summary-head">
+                                                <strong>Pricing Summary</strong>
+                                                <span id="priceStatusBadge" class="pricing-status-badge warn">No Pricing</span>
+                                            </div>
+
+                                            <div id="priceMatchedBox" class="pricing-grid d-none">
+                                                <div class="pricing-cell"><small>Applied Quantity Slab</small><strong id="priceSlabText">-</strong></div>
+                                                <div class="pricing-cell"><small>Pricing Mode</small><strong id="priceModeText">-</strong></div>
+                                                <div class="pricing-cell"><small>Entered Quantity</small><strong id="priceQtyText">0 Nos</strong></div>
+                                                <div class="pricing-cell"><small>Item Rate</small><strong id="priceRateText">₹0.00</strong></div>
+                                                <div class="pricing-cell"><small>Auto Printing Charge</small><strong id="pricePrintingText">₹0.00</strong></div>
+                                                <div class="pricing-cell"><small>Plate / Additional</small><strong id="pricePlateText">₹0.00</strong></div>
+                                                <div class="pricing-cell"><small>Package Charge</small><strong id="pricePackageText">₹0.00</strong></div>
+                                                <div class="pricing-cell final"><small>Final Amount GST Inclusive</small><strong id="priceFinalText">₹0.00</strong></div>
+                                            </div>
+
+                                            <div id="priceNoMatchBox" class="pricing-note warn">
+                                                No predefined printing charge found for this quantity/selection. Change quantity to a saved slab or edit Rate / Printing Charge manually.
+                                            </div>
+                                            <div id="pricingMessage" class="pricing-note info d-none">
+                                                Predefined printing charge applied. Rate, Printing Charge, Plate/Additional and Package Charge are editable.
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
-                        <div class="col-md-3 customized-field"><label class="form-label fw-bold">Size *</label><input
-                                type="text" name="size_text" id="size_text" class="form-control"
-                                placeholder="Eg: 19x25"></div>
-                        <div class="col-md-3 customized-field"><label class="form-label fw-bold">GSM Thickness
-                                *</label><input type="text" name="gsm_thickness" id="gsm_thickness"
-                                class="form-control"></div>
-                        <div class="col-md-3 customized-field"><label class="form-label fw-bold">Printing Score
-                                *</label><select name="printing_side" id="printing_side" class="form-select">
-                                <option value="">Select</option>
-                                <option value="single">Single Side Scoring</option>
-                                <option value="double">Double Side Scoring</option>
-                            </select></div>
-                        <div class="col-md-3 customized-field"><label class="form-label fw-bold">Screening
-                                *</label><select name="screening_type" id="screening_type" class="form-select">
-                                <option value="">Select</option>
-                                <option value="regular">Regular Screening</option>
-                                <option value="special">Special Screening</option>
-                            </select></div>
-                        <div class="col-md-3 customized-field d-flex align-items-end">
-                            <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox"
-                                    name="lamination_required" id="lamination_required" value="1"><label
-                                    class="form-check-label fw-bold" for="lamination_required">Lamination
-                                    Required</label></div>
-                        </div>
-                        <div class="col-md-3 customized-field lamination-type-wrap"><label
-                                class="form-label fw-bold">Lamination Type</label><select name="lamination_type"
-                                id="lamination_type" class="form-select">
-                                <option value="">Select</option>
-                                <option value="glossy">Glossy</option>
-                                <option value="matte">Matte</option>
-                                <option value="special">Special</option>
-                            </select></div>
 
-                        <div class="col-12"><label class="form-label fw-bold">Item Description</label><textarea
-                                name="description" id="description" class="form-control" rows="2"></textarea></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">Quantity *</label><input type="number"
-                                step="0.01" min="0" name="qty" id="qty" class="form-control" value="1" required></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">Rate *</label><input type="number"
-                                step="0.01" min="0" name="rate" id="rate" class="form-control" value="0" required></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">Discount</label><input type="number"
-                                step="0.01" min="0" name="discount_amount" id="discount_amount" class="form-control"
-                                value="0"></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">Delivery Date *</label><input
-                                type="date" name="delivery_date" id="delivery_date" class="form-control"></div>
-                        <?php if ($proformaStatuses): ?>
-                        <div class="col-md-3">
-                            <label class="form-label fw-bold">Proforma Status</label>
-                            <select name="proforma_status_id" id="proforma_status_id" class="form-select">
-                                <?php foreach ($proformaStatuses as $statusRow): ?>
-                                <option value="<?= (int)$statusRow['id'] ?>"
-                                    <?= (int)$selectedProformaStatusId === (int)$statusRow['id'] ? 'selected' : '' ?>>
-                                    <?= e($statusRow['status_name']) ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-                        <?php endif; ?>
 
                         <div class="col-12 mt-3">
                             <div class="section-title">4. Amount / Payment</div>
@@ -1099,21 +1408,21 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                     <div class="amount-summary-item balance"><small>Balance</small><strong id="balanceAmountText">₹0.00</strong></div>
                                     <div class="amount-summary-item final"><small>Final Amount</small><strong id="finalAmountText">₹0.00</strong></div>
                                 </div>
-                                <div class="amount-summary-note">Inclusive GST: taxable value and GST are shown separately, but both are already included inside the final amount.</div>
+                                <div class="amount-summary-note">GST Inclusive: taxable value and GST are shown separately, but both are already included inside the final amount. Package charge and printing charge are optional.</div>
                             </div>
                         </div>
 
                         <div class="col-md-3">
-                            <label class="form-label fw-bold">Extra Card Charge</label>
-                            <input type="number" step="0.01" min="0" name="extra_card_charge" id="extra_card_charge" class="form-control" value="0" placeholder="Applicable for both">
+                            <label class="form-label fw-bold">Plate / Additional Charge</label>
+                            <input type="number" step="0.01" min="0" name="extra_card_charge" id="extra_card_charge" class="form-control" value="0" placeholder="Auto from pricing master / optional">
                         </div>
-                        <div class="col-md-3 readymade-field">
-                            <label class="form-label fw-bold">Packing Charge</label>
-                            <input type="number" step="0.01" min="0" name="packing_charge" id="packing_charge" class="form-control" value="0" placeholder="Readymade only">
+                        <div class="col-md-3">
+                            <label class="form-label fw-bold">Package Charge <span class="text-muted-custom">(Optional)</span></label>
+                            <input type="number" step="0.01" min="0" name="packing_charge" id="packing_charge" class="form-control" value="0" placeholder="Common optional charge">
                         </div>
-                        <div class="col-md-3 readymade-field">
-                            <label class="form-label fw-bold">Printing Charge</label>
-                            <input type="number" step="0.01" min="0" name="printing_charge" id="printing_charge" class="form-control" value="0" placeholder="Readymade only">
+                        <div class="col-md-3">
+                            <label class="form-label fw-bold">Printing Charge <span class="text-muted-custom">(Optional)</span></label>
+                            <input type="number" step="0.01" min="0" name="printing_charge" id="printing_charge" class="form-control" value="0" placeholder="Optional">
                         </div>
                         <div class="col-md-3">
                             <label class="form-label fw-bold">GST % Inclusive</label>
@@ -1484,17 +1793,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             width: '100%',
             allowClear: true,
             closeOnSelect: true,
-            tags: true,
-            placeholder: $product.data('placeholder') || 'Search or type product name',
-            createTag: function(params) {
-                const term = $.trim(params.term);
-                if (term === '') return null;
-                return {
-                    id: term,
-                    text: term,
-                    newTag: true
-                };
-            }
+            tags: false,
+            placeholder: $product.data('placeholder') || 'Select product/card name'
         });
     }
 
@@ -1509,9 +1809,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         const rate = parseFloat(getValue('rate')) || 0;
         const discount = parseFloat(getValue('discount_amount')) || 0;
         const extraCardCharge = parseFloat(getValue('extra_card_charge')) || 0;
-        const isReadymade = getValue('order_type') === 'readymade';
-        const packingCharge = isReadymade ? (parseFloat(getValue('packing_charge')) || 0) : 0;
-        const printingCharge = isReadymade ? (parseFloat(getValue('printing_charge')) || 0) : 0;
+        const packingCharge = parseFloat(getValue('packing_charge')) || 0;
+        const printingCharge = parseFloat(getValue('printing_charge')) || 0;
         const gstPercent = Math.max(0, parseFloat(getValue('gst_percent')) || 0);
         const cashChecked = document.getElementById('pay_cash')?.checked !== false;
         const upiChecked = document.getElementById('pay_upi')?.checked === true;
@@ -1542,6 +1841,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         document.getElementById('advanceAmountText') && (document.getElementById('advanceAmountText').textContent = rupee(advance));
         document.getElementById('finalAmountText').textContent = rupee(final);
         document.getElementById('balanceAmountText').textContent = rupee(balance);
+        updatePricingSummaryValues({sub, chargeTotal, final, taxable, gstAmount, advance, balance, cashAmount, upiAmount});
         return {sub, chargeTotal, final, taxable, gstAmount, advance, balance, cashAmount, upiAmount};
     }
 
@@ -1636,8 +1936,14 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     }
 
     function toggleLamination() {
-        document.querySelectorAll('.lamination-type-wrap').forEach(el => el.classList.toggle('hide-field', !document
-            .getElementById('lamination_required').checked));
+        const required = document.getElementById('lamination_required')?.checked === true;
+        document.querySelectorAll('.lamination-type-wrap').forEach(el => el.classList.toggle('hide-field', !required));
+        if (!required) {
+            setValue('lamination_type', 'none');
+            refreshSelect('lamination_type');
+        }
+        syncProductNameFromMaster();
+    schedulePriceLookup();
     }
 
     function normalizeDateValue(value) {
@@ -1799,7 +2105,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         setValue('venue', editData.venue || '');
         setValue('function_date', editData.function_date || '');
         setValue('function_time', editData.function_time || '');
-        setValue('product_id', editData.item_product_id || '');
+        // In older proforma rows product_id may be empty; keep saved item_name selectable for edit.
+        setValue('product_id', editData.item_product_id || editData.item_name || '');
         setValue('product_name', editData.item_name || '');
         setValue('description', editData.item_description || '');
         setValue('qty', editData.item_qty || editData.total_qty || '');
@@ -1875,35 +2182,215 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         calculate();
     }
 
-    function productChanged() {
+
+    function clearPricingSelection(message = 'No predefined printing charge found for this quantity/selection. Change quantity to a saved slab or edit Rate / Printing Charge manually.') {
+        setValue('printing_price_master_id', '');
+        setValue('price_slab_text_input', '');
+        setValue('pricing_plate_charge', '0');
+        setValue('pricing_printing_charge', '0');
+        setValue('pricing_package_charge', '0');
+        setValue('pricing_additional_charge', '0');
+        setValue('pricing_is_gst_inclusive', '1');
+
+        const card = document.getElementById('pricingSummaryCard');
+        const badge = document.getElementById('priceStatusBadge');
+        const matched = document.getElementById('priceMatchedBox');
+        const noMatch = document.getElementById('priceNoMatchBox');
+        const info = document.getElementById('pricingMessage');
+        card?.classList.add('no-price');
+        badge?.classList.add('warn');
+        if (badge) badge.textContent = 'Manual Pricing';
+        matched?.classList.add('d-none');
+        noMatch?.classList.remove('d-none');
+        if (noMatch) noMatch.textContent = message;
+        info?.classList.add('d-none');
+        calculate();
+    }
+
+    function syncPricingHiddenFromEditableFields() {
+        // Store the actual edited values with the item for audit.
+        setValue('pricing_plate_charge', (parseFloat(getValue('extra_card_charge')) || 0).toFixed(2));
+        setValue('pricing_printing_charge', (parseFloat(getValue('printing_charge')) || 0).toFixed(2));
+        setValue('pricing_package_charge', (parseFloat(getValue('packing_charge')) || 0).toFixed(2));
+        setValue('pricing_additional_charge', '0.00');
+    }
+
+    function updatePricingSummaryValues(amounts = null) {
+        syncPricingHiddenFromEditableFields();
+        const rate = parseFloat(getValue('rate')) || 0;
+        const qty = parseFloat(getValue('qty')) || 0;
+        const plate = parseFloat(getValue('extra_card_charge')) || 0;
+        const printing = parseFloat(getValue('printing_charge')) || 0;
+        const packing = parseFloat(getValue('packing_charge')) || 0;
+        const itemAmount = qty * rate;
+        const final = amounts && typeof amounts.final === 'number'
+            ? amounts.final
+            : (itemAmount + plate + printing + packing - (parseFloat(getValue('discount_amount')) || 0));
+        const setText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+        setText('priceRateText', rupee(rate));
+        setText('priceQtyText', (qty || 0).toLocaleString('en-IN') + ' Nos');
+        setText('pricePlateText', rupee(plate));
+        setText('pricePrintingText', rupee(printing));
+        setText('pricePackageText', rupee(packing));
+        setText('priceItemAmountText', rupee(itemAmount));
+        setText('priceFinalText', rupee(Math.max(0, final || 0)));
+    }
+
+    function applyPricingResult(row) {
+        if (!row || !row.id) {
+            clearPricingSelection();
+            return;
+        }
+
+        const masterRate = parseFloat(row.rate || 0) || 0;
+        const ratePerCard = parseFloat(row.rate_per_card || 0) || 0;
+        const plate = parseFloat(row.plate_charge || 0) || 0;
+        const additional = parseFloat(row.additional_charge || 0) || 0;
+        const printing = parseFloat(row.printing_charge || 0) || 0;
+        const packing = parseFloat(row.package_charge || 0) || 0;
+        const slab = String(row.slab_text || ((row.min_qty || '-') + ' - ' + (row.max_qty || '-')));
+        const pricingMode = String(row.pricing_mode || 'total_charge');
+        const autoTarget = String(row.auto_fill_target || 'printing_charge');
+
+        setValue('printing_price_master_id', row.id);
+        setValue('price_slab_text_input', slab);
+        setValue('pricing_is_gst_inclusive', String(row.is_gst_inclusive ?? 1));
+
+        // Your sheet pricing should mostly auto-fill Printing Charge.
+        // Rate remains editable. It is changed only when a pricing row is explicitly configured to auto-fill rate.
+        if ((autoTarget === 'rate' || autoTarget === 'both') && (masterRate > 0 || ratePerCard > 0)) {
+            setValue('rate', (masterRate > 0 ? masterRate : ratePerCard).toFixed(2));
+        }
+
+        if (autoTarget === 'printing_charge' || autoTarget === 'both' || autoTarget === '') {
+            setValue('printing_charge', printing.toFixed(2));
+        }
+
+        setValue('extra_card_charge', (plate + additional).toFixed(2));
+        setValue('packing_charge', packing.toFixed(2));
+        syncPricingHiddenFromEditableFields();
+
+        if (row.gst_percent !== undefined && row.gst_percent !== null) {
+            setValue('gst_percent', parseFloat(row.gst_percent || 18).toFixed(2));
+        }
+
+        const card = document.getElementById('pricingSummaryCard');
+        const badge = document.getElementById('priceStatusBadge');
+        const matched = document.getElementById('priceMatchedBox');
+        const noMatch = document.getElementById('priceNoMatchBox');
+        const info = document.getElementById('pricingMessage');
+        card?.classList.remove('no-price');
+        badge?.classList.remove('warn');
+        if (badge) badge.textContent = 'Pricing Matched';
+        matched?.classList.remove('d-none');
+        noMatch?.classList.add('d-none');
+        info?.classList.remove('d-none');
+        const slabEl = document.getElementById('priceSlabText');
+        if (slabEl) slabEl.textContent = slab;
+        const modeEl = document.getElementById('priceModeText');
+        if (modeEl) modeEl.textContent = pricingMode === 'per_card' ? 'Per Card Rule' : 'Fixed Slab Charge';
+        calculate();
+    }
+
+    let pricingLookupTimer = null;
+    let pricingLookupController = null;
+
+    function currentPricingPayload() {
+        const laminationRequired = document.getElementById('lamination_required')?.checked === true;
+        return {
+            product_id: getValue('product_id'),
+            product_name: getValue('product_name'),
+            printing_type_id: getValue('printing_type_id'),
+            printing_sub_type_id: getValue('printing_sub_type_id'),
+            size_text: getValue('size_text'),
+            gsm_thickness: getValue('gsm_thickness'),
+            printing_side: getValue('printing_side'),
+            lamination_type: laminationRequired ? (getValue('lamination_type') || 'none') : 'none',
+            print_type: 'first_print',
+            qty: getValue('qty') || '0'
+        };
+    }
+
+    function canLookupPricing(payload) {
+        const qty = parseFloat(payload.qty || 0) || 0;
+        return qty > 0 && (String(payload.product_id || '').trim() !== '' || String(payload.product_name || '').trim() !== '') && String(payload.printing_type_id || '').trim() !== '';
+    }
+
+    function fetchPricing() {
+        const payload = currentPricingPayload();
+        if (!canLookupPricing(payload)) {
+            clearPricingSelection('Select product, printing type and quantity to fetch automatic pricing.');
+            return;
+        }
+
+        if (pricingLookupController) pricingLookupController.abort();
+        pricingLookupController = new AbortController();
+        const params = new URLSearchParams(Object.assign({action: 'find_price'}, payload));
+
+        fetch('api/printing_price_master.php?' + params.toString(), {
+            method: 'GET',
+            credentials: 'same-origin',
+            signal: pricingLookupController.signal
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data && data.status && data.price) {
+                applyPricingResult(data.price);
+            } else {
+                clearPricingSelection((data && data.message) || 'No pricing found. Please add pricing in Printing Price Master.');
+            }
+        })
+        .catch(error => {
+            if (error && error.name === 'AbortError') return;
+            clearPricingSelection('Unable to fetch pricing. Please check the pricing API.');
+        });
+    }
+
+    function schedulePriceLookup() {
+        clearTimeout(pricingLookupTimer);
+        pricingLookupTimer = setTimeout(fetchPricing, 350);
+    }
+
+    function selectedProductName() {
         const select = document.getElementById('product_id');
         const opt = select?.selectedOptions[0];
-        if (!opt) return;
+        return (opt?.dataset?.name || opt?.textContent || opt?.value || '').trim();
+    }
 
-        const chosenText = (opt.dataset.name || opt.textContent || opt.value || '').trim();
-        if (opt.value) setValue('product_name', chosenText);
+    function syncProductNameFromMaster() {
+        const productName = selectedProductName();
+        if (productName && productName.toLowerCase() !== 'search or type product/card name') {
+            setValue('product_name', productName);
+        }
+    }
 
-        if (parseFloat(opt.dataset.price || 0) > 0) setValue('rate', opt.dataset.price);
-        const ot = opt.dataset.orderType;
+    function productChanged() {
+        syncProductNameFromMaster();
+        const select = document.getElementById('product_id');
+        const opt = select?.selectedOptions[0];
+        const ot = opt?.dataset?.orderType || '';
         if (ot === 'readymade' || ot === 'customized') {
             setValue('order_type', ot);
             toggleOrderType(true);
         } else {
             toggleOrderType(false);
         }
+        schedulePriceLookup();
         calculate();
     }
-    ['qty', 'rate', 'discount_amount', 'extra_card_charge', 'packing_charge', 'printing_charge', 'gst_percent', 'cash_amount', 'upi_amount'].forEach(id => document.getElementById(id)?.addEventListener(
+    ['discount_amount', 'extra_card_charge', 'packing_charge', 'printing_charge', 'gst_percent', 'cash_amount', 'upi_amount', 'rate'].forEach(id => document.getElementById(id)?.addEventListener(
         'input', calculate));
+    ['qty', 'size_text', 'gsm_thickness'].forEach(id => document.getElementById(id)?.addEventListener('input', schedulePriceLookup));
+    ['printing_type_id', 'printing_sub_type_id', 'printing_side', 'lamination_type'].forEach(id => document.getElementById(id)?.addEventListener('change', schedulePriceLookup));
     document.getElementById('quotation_id')?.addEventListener('change', loadQuotation);
     document.getElementById('clearQuotationBtn')?.addEventListener('click', function() {
         clearQuotationSelection(true);
     });
     document.getElementById('function_type_id')?.addEventListener('change', toggleFunctionFields);
-    document.getElementById('order_type')?.addEventListener('change', () => toggleOrderType(true));
-    document.getElementById('printing_type_id')?.addEventListener('change', updateSubTypes);
+    document.getElementById('order_type')?.addEventListener('change', () => { toggleOrderType(true); schedulePriceLookup(); });
+    document.getElementById('printing_type_id')?.addEventListener('change', () => { updateSubTypes(); schedulePriceLookup(); });
     document.getElementById('delivery_date')?.addEventListener('change', () => syncFinalTrackingDate(true));
-    document.getElementById('lamination_required')?.addEventListener('change', toggleLamination);
+    document.getElementById('lamination_required')?.addEventListener('change', () => { toggleLamination(); schedulePriceLookup(); });
     document.getElementById('product_id')?.addEventListener('change', productChanged);
     document.getElementById('proformaForm')?.addEventListener('reset', () => { clearFormDraft(); setTimeout(() => {
         toggleFunctionFields();
@@ -1931,6 +2418,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     }
     toggleLamination();
     calculate();
+    schedulePriceLookup();
     showToastOnLoad();
     document.getElementById('proformaForm')?.addEventListener('input', saveFormDraft);
     document.getElementById('proformaForm')?.addEventListener('change', saveFormDraft);
@@ -2163,24 +2651,28 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         const upiAmount = (document.getElementById('pay_upi')?.checked === true) ? (parseFloat(getValue('upi_amount')) || 0) : 0;
         const payMode = getValue('payment_mode') || 'cash';
 
-        if (!['cash', 'upi', 'split'].includes(payMode)) {
+        const isEditSubmit = !!editData;
+
+        // Payment denomination is mandatory only while creating a new proforma.
+        // In edit mode, existing advance should not block updating customer/order details.
+        if (!isEditSubmit && !['cash', 'upi', 'split'].includes(payMode)) {
             showActionToast('Please select Cash or UPI payment mode.', 'danger', 'Payment Check');
             return;
         }
 
-        if (advance <= 0) {
+        if (!isEditSubmit && advance <= 0) {
             showActionToast('Please enter Cash amount or UPI amount.', 'danger', 'Payment Check');
             return;
         }
 
-        if (document.getElementById('pay_cash')?.checked && cashAmount > 0 && !advancePaymentConfirmed) {
+        if (!isEditSubmit && document.getElementById('pay_cash')?.checked && cashAmount > 0 && !advancePaymentConfirmed) {
             openAdvancePaymentModal();
             return;
         }
 
         advancePaymentConfirmed = false;
         submittingToApi = true;
-        showPageLoading(editData ? 'Updating Proforma...' : 'Creating Proforma...', 'Please wait. Job card and tracking stages are being prepared.');
+        showPageLoading(editData ? 'Updating Proforma...' : 'Creating Proforma...', editData ? 'Please wait. Saving updated proforma details.' : 'Please wait. Job card and tracking stages are being prepared.');
 
         if (btn) {
             btn.disabled = true;

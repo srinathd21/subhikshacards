@@ -214,6 +214,30 @@ function pb_ensure_optional_create_proforma_columns(mysqli $conn): void
         }
     }
 
+    if (pb_table_exists($conn, 'proforma_bill_items')) {
+        if (!apiColumnExists($conn, 'proforma_bill_items', 'printing_price_master_id')) {
+            $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN printing_price_master_id BIGINT UNSIGNED DEFAULT NULL AFTER screening_type");
+        }
+        if (!apiColumnExists($conn, 'proforma_bill_items', 'price_slab_text')) {
+            $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN price_slab_text VARCHAR(100) DEFAULT NULL AFTER printing_price_master_id");
+        }
+        if (!apiColumnExists($conn, 'proforma_bill_items', 'plate_charge')) {
+            $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN plate_charge DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER price_slab_text");
+        }
+        if (!apiColumnExists($conn, 'proforma_bill_items', 'item_printing_charge')) {
+            $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN item_printing_charge DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER plate_charge");
+        }
+        if (!apiColumnExists($conn, 'proforma_bill_items', 'item_package_charge')) {
+            $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN item_package_charge DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER item_printing_charge");
+        }
+        if (!apiColumnExists($conn, 'proforma_bill_items', 'item_additional_charge')) {
+            $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN item_additional_charge DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER item_package_charge");
+        }
+        if (!apiColumnExists($conn, 'proforma_bill_items', 'is_gst_inclusive')) {
+            $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN is_gst_inclusive TINYINT(1) NOT NULL DEFAULT 1 AFTER item_additional_charge");
+        }
+    }
+
     /*
      * Cash denomination details are stored row-wise in a separate table.
      * Example for ₹1001 cash payment:
@@ -2083,6 +2107,13 @@ try {
             $description = pb_post('description');
             $qty = pb_float($_POST['qty'] ?? 1);
             $rate = pb_float($_POST['rate'] ?? 0);
+            $printingPriceMasterId = pb_int($_POST['printing_price_master_id'] ?? 0) ?: null;
+            $priceSlabText = pb_post('price_slab_text');
+            $pricingPlateCharge = pb_float($_POST['pricing_plate_charge'] ?? 0);
+            $pricingPrintingCharge = pb_float($_POST['pricing_printing_charge'] ?? 0);
+            $pricingPackageCharge = pb_float($_POST['pricing_package_charge'] ?? 0);
+            $pricingAdditionalCharge = pb_float($_POST['pricing_additional_charge'] ?? 0);
+            $pricingIsGstInclusive = pb_int($_POST['pricing_is_gst_inclusive'] ?? 1) === 1 ? 1 : 0;
             $printingTypeId = pb_int($_POST['printing_type_id'] ?? 0) ?: null;
             $printingSubTypeId = pb_int($_POST['printing_sub_type_id'] ?? 0) ?: null;
 
@@ -2109,9 +2140,21 @@ try {
             $discountAmount = pb_float($_POST['discount_amount'] ?? 0);
             /* Extra card charge is applicable for both readymade and customized orders. */
             $extraCardCharge = pb_float($_POST['extra_card_charge'] ?? 0);
-            /* Readymade specific charges. They are kept 0 for customized orders. */
-            $packingCharge = $orderType === 'readymade' ? pb_float($_POST['packing_charge'] ?? 0) : 0.0;
-            $printingCharge = $orderType === 'readymade' ? pb_float($_POST['printing_charge'] ?? 0) : 0.0;
+            /* Package charge is common and printing charge is optional for all order types. */
+            $packingCharge = pb_float($_POST['packing_charge'] ?? 0);
+            $printingCharge = pb_float($_POST['printing_charge'] ?? 0);
+
+            /*
+             * Pricing master only pre-fills values in the form.
+             * User can edit Rate / Plate-Additional / Package / Printing Charge.
+             * Save the actual edited values, not only the original hidden master values.
+             */
+            if ($printingPriceMasterId) {
+                $pricingPlateCharge = round(max(0, $extraCardCharge), 2);
+                $pricingPrintingCharge = round(max(0, $printingCharge), 2);
+                $pricingPackageCharge = round(max(0, $packingCharge), 2);
+                $pricingAdditionalCharge = 0.00;
+            }
             $gstPercent = pb_float($_POST['gst_percent'] ?? 18);
             if ($gstPercent < 0) $gstPercent = 0.0;
 
@@ -2178,11 +2221,10 @@ try {
                     throw new RuntimeException('Please select Screen Print sub-type: UV Products or Foil Products.');
                 }
 
-                $sizeText = '';
-                $gsmThickness = '';
-                $laminationRequired = 0;
-                $laminationType = null;
-                $printingSide = null;
+                if (in_array(strtolower((string)$laminationType), ['none', 'not_applicable'], true)) {
+                    $laminationRequired = 0;
+                    $laminationType = null;
+                }
                 $screeningType = null;
             }
 
@@ -2214,8 +2256,13 @@ try {
                 throw new RuntimeException('Quantity must be greater than zero.');
             }
 
-            if ($rate <= 0) {
-                throw new RuntimeException('Price / rate must be greater than zero.');
+            /*
+             * Item rate is optional.
+             * When left blank/0, amount is calculated from Printing Charge + Plate/Additional + Package.
+             * If user manually enters rate, item amount = qty * rate.
+             */
+            if ($rate < 0) {
+                throw new RuntimeException('Price / rate cannot be negative.');
             }
 
             if ($discountAmount < 0) {
@@ -2250,11 +2297,12 @@ try {
             $amount = round($qty * $rate, 2);
             $subTotal = $amount;
 
-            if ($discountAmount > $subTotal) {
-                throw new RuntimeException('Discount cannot be greater than sub total.');
+            $grossBeforeDiscount = round($subTotal + $extraCardCharge + $packingCharge + $printingCharge, 2);
+            if ($discountAmount > $grossBeforeDiscount) {
+                throw new RuntimeException('Discount cannot be greater than total amount.');
             }
 
-            $finalAmount = round(max(0, $subTotal - $discountAmount + $extraCardCharge + $packingCharge + $printingCharge), 2);
+            $finalAmount = round(max(0, $grossBeforeDiscount - $discountAmount), 2);
             /* Inclusive GST breakup: final amount is inclusive of GST. */
             $taxableValue = $gstPercent > 0 ? round($finalAmount / (1 + ($gstPercent / 100)), 2) : $finalAmount;
             $gstAmount = round(max(0, $finalAmount - $taxableValue), 2);
@@ -2469,14 +2517,21 @@ try {
                         lamination_type,
                         printing_side,
                         screening_type,
+                        printing_price_master_id,
+                        price_slab_text,
+                        plate_charge,
+                        item_printing_charge,
+                        item_package_charge,
+                        item_additional_charge,
+                        is_gst_inclusive,
                         sort_order,
                         created_at
                     )
                 VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())
             ");
             $stmt->bind_param(
-                'iissdddiiississs',
+                'iissdddiiississsisddddi',
                 $proformaId,
                 $productId,
                 $productName,
@@ -2492,7 +2547,14 @@ try {
                 $laminationRequired,
                 $laminationType,
                 $printingSide,
-                $screeningType
+                $screeningType,
+                $printingPriceMasterId,
+                $priceSlabText,
+                $pricingPlateCharge,
+                $pricingPrintingCharge,
+                $pricingPackageCharge,
+                $pricingAdditionalCharge,
+                $pricingIsGstInclusive
             );
             $stmt->execute();
             $stmt->close();
