@@ -64,39 +64,42 @@ function ctIsSendToDispatchStep(array $step): bool
 
     $keyText = str_replace(['-', '_'], ' ', $key);
 
-    return in_array($key, [
-            'send_to_dispatch', 'send_for_dispatch', 'send_dispatch', 'sent_to_dispatch',
-            'send_to_despatch', 'send_for_despatch', 'ready_for_dispatch', 'ready_to_dispatch',
-            'ready_for_despatch', 'ready_to_despatch'
-        ], true)
-        || in_array($name, [
-            'send to dispatch', 'send for dispatch', 'sent to dispatch',
-            'send to despatch', 'send for despatch', 'ready for dispatch',
-            'ready to dispatch', 'ready for despatch', 'ready to despatch'
-        ], true)
-        || ((strpos($keyText, 'send') !== false || strpos($keyText, 'sent') !== false || strpos($keyText, 'ready') !== false)
-            && (strpos($keyText, 'dispatch') !== false || strpos($keyText, 'despatch') !== false))
-        || ((strpos($name, 'send') !== false || strpos($name, 'sent') !== false || strpos($name, 'ready') !== false)
-            && (strpos($name, 'dispatch') !== false || strpos($name, 'despatch') !== false));
+    return in_array($key, ['send_to_dispatch', 'send_for_dispatch', 'send_dispatch', 'sent_to_dispatch', 'send_to_despatch', 'send_for_despatch'], true)
+        || in_array($name, ['send to dispatch', 'send for dispatch', 'sent to dispatch', 'send to despatch', 'send for despatch'], true)
+        || ((strpos($keyText, 'send') !== false || strpos($keyText, 'sent') !== false) && (strpos($keyText, 'dispatch') !== false || strpos($keyText, 'despatch') !== false))
+        || ((strpos($name, 'send') !== false || strpos($name, 'sent') !== false) && (strpos($name, 'dispatch') !== false || strpos($name, 'despatch') !== false));
+}
+
+function ctIsReadyForDispatchStep(array $step): bool
+{
+    $key = strtolower(trim((string)($step['step_key'] ?? '')));
+    $name = strtolower(trim((string)($step['step_name'] ?? '')));
+
+    return in_array($key, ['ready_for_dispatch', 'ready_to_dispatch', 'ready_for_despatch', 'ready_to_despatch'], true)
+        || in_array($name, ['ready for dispatch', 'ready to dispatch', 'ready for despatch', 'ready to despatch'], true);
+}
+
+function ctIsInternalDispatchStep(array $step): bool
+{
+    return ctIsSendToDispatchStep($step) || ctIsReadyForDispatchStep($step);
 }
 
 function ctIsDispatchStep(array $step): bool
 {
-    if (ctIsSendToDispatchStep($step)) {
+    // Customer tracking should not show internal handover stages.
+    // Only actual Dispatch / Dispatched is shown as the customer-facing Dispatch row.
+    if (ctIsInternalDispatchStep($step)) {
         return false;
     }
 
     $key = strtolower(trim((string)($step['step_key'] ?? '')));
     $name = strtolower(trim((string)($step['step_name'] ?? '')));
 
-    // Customer-facing final dispatch stage only.
-    // Send to Dispatch and Ready for Dispatch are internal stages and are skipped above.
     return $key === 'dispatch'
-        || in_array($key, ['dispatched', 'despatch', 'dispatch_completed'], true)
-        || in_array($name, ['dispatch', 'dispatched', 'despatch', 'dispatch completed'], true)
-        || ((strpos($key, 'dispatch') !== false || strpos($key, 'despatch') !== false)
-            && strpos($key, 'send') === false
-            && strpos($key, 'ready') === false);
+        || in_array($key, ['dispatched', 'despatch', 'delivered'], true)
+        || in_array($name, ['dispatch', 'dispatched', 'despatch', 'delivered'], true)
+        || strpos($key, 'dispatch') !== false
+        || strpos($key, 'despatch') !== false;
 }
 
 function ctFirstNonEmpty(array $rows, string $field): string
@@ -201,8 +204,8 @@ function ctNormalizeCustomerSteps(array $steps): array
     $dispatchPosition = null;
 
     foreach ($steps as $step) {
-        // Internal handover stage. Customer does not need to see this.
-        if (ctIsSendToDispatchStep($step)) {
+        // Internal handover stages. Customer does not need to see these.
+        if (ctIsInternalDispatchStep($step)) {
             continue;
         }
 

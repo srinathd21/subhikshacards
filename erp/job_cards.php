@@ -709,7 +709,8 @@ function jcRunReadymadeScreenShortcut(mysqli $conn, int $jobId, string $shortcut
         if ($shortcutAction === 'readymade_screen_start') {
             jcSendReadymadeScreenStartWhatsapp($conn, $job);
         } elseif ($shortcutAction === 'readymade_screen_complete') {
-            jcSendReadymadeScreenCompleteWhatsapp($conn, $job);
+            // No customer WhatsApp for internal Send to Dispatch update.
+            // Status update is already saved above.
         }
     } catch (Throwable $e) {
         $conn->rollback();
@@ -731,7 +732,7 @@ if (!empty($_GET['shortcut_msg'])) {
     if ($_GET['shortcut_msg'] === 'started') {
         $message = 'Readymade Screen Print job started. Master Copy Received message sent/recorded and Printing opened.';
     } elseif ($_GET['shortcut_msg'] === 'completed') {
-        $message = 'Readymade Screen Print job completed up to Send to Dispatch. Completion message sent/recorded.';
+        $message = 'Readymade Screen Print job completed up to Send to Dispatch. No WhatsApp sent for internal dispatch handover.';
     }
 }
 

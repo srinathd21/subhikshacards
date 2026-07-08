@@ -46,26 +46,31 @@ function jcvMoney($value): string
     return '₹' . number_format((float)$value, 2);
 }
 
-function jcvIsInternalDispatchHandoverStage(?string $stepKey, ?string $stepName = ''): bool
+function jcvIsSendToDispatchStageKey(?string $stepKey, ?string $stepName = ''): bool
 {
     $key = strtolower(trim((string)$stepKey));
     $name = strtolower(trim((string)$stepName));
     $keyText = str_replace(['-', '_'], ' ', $key);
 
-    return in_array($key, [
-            'send_to_dispatch', 'send_for_dispatch', 'send_dispatch', 'sent_to_dispatch',
-            'send_to_despatch', 'send_for_despatch', 'ready_for_dispatch', 'ready_to_dispatch',
-            'ready_for_despatch', 'ready_to_despatch'
-        ], true)
-        || in_array($name, [
-            'send to dispatch', 'send for dispatch', 'sent to dispatch',
-            'send to despatch', 'send for despatch', 'ready for dispatch',
-            'ready to dispatch', 'ready for despatch', 'ready to despatch'
-        ], true)
-        || ((strpos($keyText, 'send') !== false || strpos($keyText, 'sent') !== false || strpos($keyText, 'ready') !== false)
-            && (strpos($keyText, 'dispatch') !== false || strpos($keyText, 'despatch') !== false))
-        || ((strpos($name, 'send') !== false || strpos($name, 'sent') !== false || strpos($name, 'ready') !== false)
-            && (strpos($name, 'dispatch') !== false || strpos($name, 'despatch') !== false));
+    return in_array($key, ['send_to_dispatch', 'send_for_dispatch', 'send_dispatch', 'sent_to_dispatch', 'send_to_despatch', 'send_for_despatch'], true)
+        || in_array($name, ['send to dispatch', 'send for dispatch', 'sent to dispatch', 'send to despatch', 'send for despatch'], true)
+        || ((strpos($keyText, 'send') !== false || strpos($keyText, 'sent') !== false) && (strpos($keyText, 'dispatch') !== false || strpos($keyText, 'despatch') !== false))
+        || ((strpos($name, 'send') !== false || strpos($name, 'sent') !== false) && (strpos($name, 'dispatch') !== false || strpos($name, 'despatch') !== false));
+}
+
+function jcvIsReadyForDispatchStageKey(?string $stepKey, ?string $stepName = ''): bool
+{
+    $key = strtolower(trim((string)$stepKey));
+    $name = strtolower(trim((string)$stepName));
+
+    return in_array($key, ['ready_for_dispatch', 'ready_to_dispatch', 'ready_for_despatch', 'ready_to_despatch'], true)
+        || in_array($name, ['ready for dispatch', 'ready to dispatch', 'ready for despatch', 'ready to despatch'], true);
+}
+
+function jcvIsInternalDispatchStageKey(?string $stepKey, ?string $stepName = ''): bool
+{
+    return jcvIsSendToDispatchStageKey($stepKey, $stepName)
+        || jcvIsReadyForDispatchStageKey($stepKey, $stepName);
 }
 
 function jcvIsDispatchStageKey(?string $stepKey, ?string $stepName = ''): bool
@@ -73,17 +78,18 @@ function jcvIsDispatchStageKey(?string $stepKey, ?string $stepName = ''): bool
     $key = strtolower(trim((string)$stepKey));
     $name = strtolower(trim((string)$stepName));
 
-    // Final customer-facing dispatch stage only.
-    // Send to Dispatch and Ready for Dispatch are internal stages; keep them separately updateable in Job Card View.
-    if (jcvIsInternalDispatchHandoverStage($key, $name)) {
+    // Final customer-facing dispatch only. Internal handover stages like
+    // Send to Dispatch / Ready for Dispatch stay updateable but do not trigger
+    // WhatsApp, payment lock, or customer-tracking display as Dispatch.
+    if (jcvIsInternalDispatchStageKey($key, $name)) {
         return false;
     }
 
     return $key === 'dispatch'
-        || in_array($key, ['dispatched', 'despatch', 'dispatch_completed'], true)
-        || in_array($name, ['dispatch', 'dispatched', 'despatch', 'dispatch completed'], true)
-        || (strpos($key, 'dispatch') !== false && strpos($key, 'send') === false && strpos($key, 'ready') === false)
-        || (strpos($key, 'despatch') !== false && strpos($key, 'send') === false && strpos($key, 'ready') === false);
+        || in_array($key, ['dispatched', 'despatch', 'delivered'], true)
+        || in_array($name, ['dispatch', 'dispatched', 'despatch', 'delivered'], true)
+        || strpos($key, 'dispatch') !== false
+        || strpos($key, 'despatch') !== false;
 }
 
 
@@ -779,7 +785,7 @@ function jcvSaveTrackingPhotos(mysqli $conn, int $jobId, int $trackingId, int $w
         }
 
         if ($fileSize <= 0) {
-            throw new RuntimeException('Uploaded photo file is empty.');
+            throw new RuntimeException('Uploaded photo is empty. Please upload a valid image file.');
         }
 
         $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
@@ -1090,17 +1096,6 @@ function jcvDelayReasonName(mysqli $conn, int $delayReasonId): string
     }
 }
 
-function jcvShouldSendTrackingWhatsappForStep(array $step, string $newStatus): bool
-{
-    // Send to Dispatch / Ready for Dispatch are internal production handover stages.
-    // They should be updateable internally, but they should not trigger customer WhatsApp messages.
-    if (jcvIsInternalDispatchHandoverStage($step['step_key'] ?? '', $step['step_name'] ?? '')) {
-        return false;
-    }
-
-    return true;
-}
-
 function jcvSendTrackingUpdateByApi(
     mysqli $conn,
     array $job,
@@ -1111,14 +1106,6 @@ function jcvSendTrackingUpdateByApi(
     int $delayDays = 0,
     int $sentBy = 0
 ): array {
-    if (!jcvShouldSendTrackingWhatsappForStep($step, $newStatus)) {
-        return [
-            'success' => true,
-            'skipped' => true,
-            'message' => 'Customer WhatsApp skipped for internal dispatch handover stage.',
-        ];
-    }
-
     $apiFile = __DIR__ . '/includes/whatsapp-api.php';
     if (!is_file($apiFile)) {
         return ['success' => false, 'message' => 'includes/whatsapp-api.php not found.'];
@@ -1587,8 +1574,6 @@ if (($_GET['msg'] ?? '') === 'status_updated') {
         $message .= ' But customer tracking WhatsApp failed. Status is saved.';
         $messageType = 'warning';
         $toastTitle = 'WhatsApp Failed';
-    } elseif ($waStatus === 'tracking_skipped') {
-        $message .= ' Customer WhatsApp skipped for internal dispatch handover stage.';
     }
 }
 
@@ -2217,10 +2202,15 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                     }
 
                     $trackingSendResult = null;
-                    // For normal customer-facing status updates, send customer_tracking.php link to customer.
+                    $skipCustomerWhatsapp = jcvIsInternalDispatchStageKey(
+                        $stepRow['step_key'] ?? '',
+                        $stepRow['step_name'] ?? ''
+                    );
+
+                    // For every normal customer-facing status update, send customer_tracking.php link to customer.
+                    // Internal stages like Send to Dispatch / Ready for Dispatch must update status only; no WhatsApp.
                     // For proof/design completed with photo, the approval WhatsApp already contains both approval_link and tracking_link.
-                    // Send to Dispatch / Ready for Dispatch are internal stages, so WhatsApp is skipped.
-                    if (!is_array($photoApprovalSendResult)) {
+                    if (!is_array($photoApprovalSendResult) && !$skipCustomerWhatsapp) {
                         $trackingSendResult = jcvSendTrackingUpdateByApi(
                             $conn,
                             $job,
@@ -2237,11 +2227,7 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                     if (is_array($photoApprovalSendResult)) {
                         $redirectWa = !empty($photoApprovalSendResult['success']) ? '&wa=approval_sent' : '&wa=approval_failed';
                     } elseif (is_array($trackingSendResult)) {
-                        if (!empty($trackingSendResult['skipped'])) {
-                            $redirectWa = '&wa=tracking_skipped';
-                        } else {
-                            $redirectWa = !empty($trackingSendResult['success']) ? '&wa=tracking_sent' : '&wa=tracking_failed';
-                        }
+                        $redirectWa = !empty($trackingSendResult['success']) ? '&wa=tracking_sent' : '&wa=tracking_failed';
                     }
 
                     header('Location: job_card_view.php?id=' . $jobId . '&msg=status_updated' . $redirectWa);
@@ -3666,7 +3652,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                         <div class="photo-help-text">
                                                             Photo upload is required only when this stage is marked
                                                             Completed. Pending / In Progress / Delayed updates do not
-                                                            require photos. Allowed: JPG, PNG, WEBP, GIF. No fixed file size limit in ERP; server PHP upload limit applies.
+                                                            require photos. Allowed: JPG, PNG, WEBP, GIF. Max 5 MB each.
                                                         </div>
                                                     </div>
                                                 </div>
