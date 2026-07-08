@@ -75,6 +75,379 @@ function pb_int($value): int
     return (int)filter_var($value, FILTER_SANITIZE_NUMBER_INT);
 }
 
+function pb_date_or_null_value($value): ?string
+{
+    $value = trim((string)$value);
+    if ($value === '') {
+        return null;
+    }
+
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
+        return $value;
+    }
+
+    $time = strtotime($value);
+    return $time ? date('Y-m-d', $time) : null;
+}
+
+function pb_slug_key(string $value, string $fallback = 'item'): string
+{
+    $value = strtolower(trim($value));
+    $value = preg_replace('/[^a-z0-9]+/', '_', $value);
+    $value = trim((string)$value, '_');
+
+    return $value !== '' ? substr($value, 0, 140) : $fallback;
+}
+
+function pb_unique_product_key(mysqli $conn, string $productName): string
+{
+    $baseKey = pb_slug_key($productName, 'product');
+    $key = $baseKey;
+    $i = 1;
+
+    while (pb_table_exists($conn, 'products')) {
+        $stmt = $conn->prepare("SELECT id FROM products WHERE product_key = ? LIMIT 1");
+        $stmt->bind_param('s', $key);
+        $stmt->execute();
+        $exists = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$exists) {
+            return $key;
+        }
+
+        $i++;
+        $suffix = '_' . $i;
+        $key = substr($baseKey, 0, 140 - strlen($suffix)) . $suffix;
+    }
+
+    return $key;
+}
+
+function pb_find_or_create_product(mysqli $conn, string $rawProductValue, string $manualItemName, string $orderType, float $rate, int $userId): array
+{
+    $rawProductValue = trim($rawProductValue);
+    $manualItemName = trim($manualItemName);
+    $selectedProductId = ($rawProductValue !== '' && ctype_digit($rawProductValue)) ? (int)$rawProductValue : 0;
+    $productName = $manualItemName;
+
+    if (!pb_table_exists($conn, 'products')) {
+        return [
+            'id' => $selectedProductId > 0 ? $selectedProductId : null,
+            'name' => $productName !== '' ? $productName : ($rawProductValue !== '' && !ctype_digit($rawProductValue) ? $rawProductValue : '')
+        ];
+    }
+
+    if ($selectedProductId > 0) {
+        $stmt = $conn->prepare("SELECT id, product_name FROM products WHERE id = ? LIMIT 1");
+        $stmt->bind_param('i', $selectedProductId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if ($row) {
+            if ($productName === '') {
+                $productName = (string)$row['product_name'];
+            }
+
+            return ['id' => (int)$row['id'], 'name' => $productName];
+        }
+    }
+
+    if ($productName === '' && $rawProductValue !== '' && !ctype_digit($rawProductValue)) {
+        $productName = $rawProductValue;
+    }
+
+    $productName = trim($productName);
+    if ($productName === '') {
+        return ['id' => null, 'name' => ''];
+    }
+
+    $stmt = $conn->prepare("SELECT id, product_name FROM products WHERE LOWER(product_name) = LOWER(?) LIMIT 1");
+    $stmt->bind_param('s', $productName);
+    $stmt->execute();
+    $existing = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if ($existing) {
+        return ['id' => (int)$existing['id'], 'name' => (string)$existing['product_name']];
+    }
+
+    $productKey = pb_unique_product_key($conn, $productName);
+    $defaultOrderType = in_array($orderType, ['readymade', 'customized'], true) ? $orderType : 'both';
+    $defaultPrice = max(0, $rate);
+
+    $stmt = $conn->prepare("
+        INSERT INTO products
+            (category_id, product_name, product_key, default_order_type, description, default_price, is_active, created_by, created_at)
+        VALUES
+            (NULL, ?, ?, ?, NULL, ?, 1, ?, NOW())
+    ");
+    $stmt->bind_param('sssdi', $productName, $productKey, $defaultOrderType, $defaultPrice, $userId);
+    $stmt->execute();
+    $newId = (int)$stmt->insert_id;
+    $stmt->close();
+
+    return ['id' => $newId, 'name' => $productName];
+}
+
+function pb_ensure_optional_create_proforma_columns(mysqli $conn): void
+{
+    if (pb_table_exists($conn, 'proforma_bills')) {
+        if (!apiColumnExists($conn, 'proforma_bills', 'card_extra_charge')) {
+            $conn->query("ALTER TABLE proforma_bills ADD COLUMN card_extra_charge DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER discount_amount");
+        }
+        if (!apiColumnExists($conn, 'proforma_bills', 'packing_charge')) {
+            $conn->query("ALTER TABLE proforma_bills ADD COLUMN packing_charge DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER card_extra_charge");
+        }
+        if (!apiColumnExists($conn, 'proforma_bills', 'printing_charge')) {
+            $conn->query("ALTER TABLE proforma_bills ADD COLUMN printing_charge DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER packing_charge");
+        }
+        if (!apiColumnExists($conn, 'proforma_bills', 'gst_percent')) {
+            $conn->query("ALTER TABLE proforma_bills ADD COLUMN gst_percent DECIMAL(5,2) NOT NULL DEFAULT 18.00 AFTER printing_charge");
+        }
+        if (!apiColumnExists($conn, 'proforma_bills', 'taxable_value')) {
+            $conn->query("ALTER TABLE proforma_bills ADD COLUMN taxable_value DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER gst_percent");
+        }
+        if (!apiColumnExists($conn, 'proforma_bills', 'gst_amount')) {
+            $conn->query("ALTER TABLE proforma_bills ADD COLUMN gst_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER taxable_value");
+        }
+    }
+
+    /*
+     * Cash denomination details are stored row-wise in a separate table.
+     * Example for ₹1001 cash payment:
+     * payment_cash_denominations -> ₹500 x 2 and ₹1 coin x 1.
+     */
+    if (pb_table_exists($conn, 'payments')) {
+        $conn->query("
+            CREATE TABLE IF NOT EXISTS payment_cash_denominations (
+                id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+                payment_id BIGINT(20) UNSIGNED NOT NULL,
+                denomination_type ENUM('note','coin') NOT NULL DEFAULT 'note',
+                denomination_value DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+                denomination_count INT UNSIGNED NOT NULL DEFAULT 0,
+                amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                created_by BIGINT(20) UNSIGNED DEFAULT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_payment_cash_denominations_payment_id (payment_id),
+                KEY idx_payment_cash_denominations_value (denomination_type, denomination_value)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        ");
+
+        try {
+            $conn->query("
+                ALTER TABLE payment_cash_denominations
+                ADD CONSTRAINT fk_payment_cash_denominations_payment
+                FOREIGN KEY (payment_id) REFERENCES payments(id)
+                ON DELETE CASCADE
+            ");
+        } catch (Throwable $e) {
+            /* Foreign key may already exist or the live table may not allow it; inserts still work. */
+        }
+    }
+}
+
+function pb_cash_denomination_payload(): array
+{
+    $map = [
+        'cash_note_500' => ['type' => 'note', 'value' => 500],
+        'cash_note_200' => ['type' => 'note', 'value' => 200],
+        'cash_note_100' => ['type' => 'note', 'value' => 100],
+        'cash_note_50' => ['type' => 'note', 'value' => 50],
+        'cash_note_20' => ['type' => 'note', 'value' => 20],
+        'cash_note_10' => ['type' => 'note', 'value' => 10],
+        'cash_coin_20' => ['type' => 'coin', 'value' => 20],
+        'cash_coin_10' => ['type' => 'coin', 'value' => 10],
+        'cash_coin_5' => ['type' => 'coin', 'value' => 5],
+        'cash_coin_2' => ['type' => 'coin', 'value' => 2],
+        'cash_coin_1' => ['type' => 'coin', 'value' => 1],
+    ];
+
+    $rows = [];
+    $summary = [];
+    $total = 0.0;
+
+    foreach ($map as $field => $meta) {
+        $count = max(0, (int)($_POST[$field] ?? 0));
+        $value = (float)$meta['value'];
+        $amount = round($count * $value, 2);
+        $total += $amount;
+
+        /*
+         * Store every note/coin denomination row, even when the count is 0.
+         * This makes the cash breakup complete for auditing and avoids saving
+         * only the denominations that were used, such as ₹500 and ₹1.
+         */
+        $row = [
+            'field' => $field,
+            'type' => $meta['type'],
+            'value' => $value,
+            'count' => $count,
+            'amount' => $amount,
+            'display' => $count . ' x ₹' . number_format($value, 0) . ' = ₹' . number_format($amount, 2, '.', '')
+        ];
+
+        $rows[] = $row;
+
+        if ($count > 0) {
+            $summary[] = $row['display'];
+        }
+    }
+
+    return [
+        'rows' => $rows,
+        'summary' => $summary,
+        'summary_text' => implode('; ', $summary),
+        'total' => round($total, 2)
+    ];
+}
+
+
+function pb_save_cash_denominations(mysqli $conn, int $paymentId, array $cashDenomination, int $userId): void
+{
+    if ($paymentId <= 0 || !pb_table_exists($conn, 'payment_cash_denominations')) {
+        return;
+    }
+
+    $rows = $cashDenomination['rows'] ?? [];
+    if (!is_array($rows) || !$rows) {
+        return;
+    }
+
+    $stmt = $conn->prepare("
+        INSERT INTO payment_cash_denominations
+            (payment_id, denomination_type, denomination_value, denomination_count, amount, created_by, created_at)
+        VALUES
+            (?, ?, ?, ?, ?, ?, NOW())
+    ");
+
+    foreach ($rows as $row) {
+        $type = strtolower((string)($row['type'] ?? 'note')) === 'coin' ? 'coin' : 'note';
+        $value = (float)($row['value'] ?? 0);
+        $count = max(0, (int)($row['count'] ?? 0));
+        $amount = (float)($row['amount'] ?? ($value * $count));
+
+        if ($value <= 0) {
+            continue;
+        }
+
+        /* Save all denominations, including zero-count rows. */
+        $stmt->bind_param('isdidi', $paymentId, $type, $value, $count, $amount, $userId);
+        $stmt->execute();
+    }
+
+    $stmt->close();
+}
+
+function pb_posted_planned_dates(): array
+{
+    $out = [];
+    $posted = $_POST['planned_step'] ?? [];
+
+    if (!is_array($posted)) {
+        return $out;
+    }
+
+    foreach ($posted as $stepId => $row) {
+        $id = (int)$stepId;
+        if ($id <= 0 || !is_array($row)) {
+            continue;
+        }
+
+        $out[$id] = [
+            'start' => pb_date_or_null_value($row['start'] ?? ''),
+            'completion' => pb_date_or_null_value($row['completion'] ?? '')
+        ];
+    }
+
+    return $out;
+}
+
+function pb_enquiry_completed_date(mysqli $conn, array $bill): string
+{
+    $today = date('Y-m-d');
+
+    try {
+        $enquiryId = !empty($bill['enquiry_id']) ? (int)$bill['enquiry_id'] : 0;
+
+        if ($enquiryId <= 0 && !empty($bill['quotation_id']) && pb_table_exists($conn, 'quotations')) {
+            $quotationId = (int)$bill['quotation_id'];
+            $stmt = $conn->prepare("SELECT enquiry_id FROM quotations WHERE id = ? LIMIT 1");
+            $stmt->bind_param('i', $quotationId);
+            $stmt->execute();
+            $q = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            $enquiryId = !empty($q['enquiry_id']) ? (int)$q['enquiry_id'] : 0;
+        }
+
+        if ($enquiryId > 0 && pb_table_exists($conn, 'enquiries')) {
+            $stmt = $conn->prepare("SELECT updated_at, created_at FROM enquiries WHERE id = ? LIMIT 1");
+            $stmt->bind_param('i', $enquiryId);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if ($row) {
+                $date = !empty($row['updated_at']) ? $row['updated_at'] : ($row['created_at'] ?? '');
+                if ($date !== '') {
+                    return substr((string)$date, 0, 10);
+                }
+            }
+        }
+    } catch (Throwable $e) {
+        return $today;
+    }
+
+    return $today;
+}
+
+function pb_is_final_review_step(array $step): bool
+{
+    $key = strtolower((string)($step['step_key'] ?? ''));
+    $name = strtolower((string)($step['step_name'] ?? ''));
+
+    return (int)($step['is_final_step'] ?? 0) === 1
+        || str_contains($key, 'google')
+        || str_contains($key, 'review')
+        || str_contains($key, 'whatsapp')
+        || str_contains($name, 'google')
+        || str_contains($name, 'review')
+        || str_contains($name, 'whatsapp');
+}
+
+function pb_default_planned_dates(mysqli $conn, array $bill, array $step, array $postedDates): array
+{
+    $stepId = (int)($step['id'] ?? 0);
+    $key = strtolower((string)($step['step_key'] ?? ''));
+    $name = strtolower((string)($step['step_name'] ?? ''));
+    $today = date('Y-m-d');
+
+    $start = $postedDates[$stepId]['start'] ?? null;
+    $completion = $postedDates[$stepId]['completion'] ?? null;
+
+    if (!$start || !$completion) {
+        if ($key === 'enquiry' || str_contains($name, 'enquiry')) {
+            $date = pb_enquiry_completed_date($conn, $bill);
+        } elseif (pb_is_final_review_step($step)) {
+            $date = !empty($bill['delivery_date']) ? substr((string)$bill['delivery_date'], 0, 10) : $today;
+        } else {
+            $date = $today;
+        }
+
+        if (!$start) {
+            $start = $date;
+        }
+
+        if (!$completion) {
+            $completion = $date;
+        }
+    }
+
+    return [$start, $completion];
+}
+
 function pb_redirect(string $query = ''): void
 {
     header('Location: proforma_bills.php' . ($query !== '' ? '?' . $query : ''));
@@ -569,7 +942,7 @@ function pb_first_workflow_step(mysqli $conn, string $orderType): ?int
     }
 }
 
-function pb_create_job_card(mysqli $conn, int $proformaId): int
+function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates = []): int
 {
     if ($proformaId <= 0) {
         throw new RuntimeException('Invalid proforma bill.');
@@ -860,11 +1233,15 @@ function pb_create_job_card(mysqli $conn, int $proformaId): int
             }
         }
 
+        [$plannedStartDate, $plannedCompletionDate] = pb_default_planned_dates($conn, $bill, $step, $plannedDates);
+
         $stmt = $conn->prepare("
             INSERT INTO job_tracking
                 (
                     job_card_id,
                     workflow_step_id,
+                    planned_start_date,
+                    planned_completion_date,
                     status,
                     responsible_role_id,
                     actual_start_at,
@@ -874,13 +1251,15 @@ function pb_create_job_card(mysqli $conn, int $proformaId): int
                     updated_at
                 )
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
             ON DUPLICATE KEY UPDATE
+                planned_start_date = VALUES(planned_start_date),
+                planned_completion_date = VALUES(planned_completion_date),
                 status = VALUES(status),
                 responsible_role_id = VALUES(responsible_role_id),
                 updated_at = NOW()
         ");
-        $stmt->bind_param('iisissi', $jobCardId, $stepId, $status, $roleId, $actualStart, $actualComplete, $completedBy);
+        $stmt->bind_param('iisssissi', $jobCardId, $stepId, $plannedStartDate, $plannedCompletionDate, $status, $roleId, $actualStart, $actualComplete, $completedBy);
         $stmt->execute();
         $stmt->close();
     }
@@ -1647,6 +2026,8 @@ try {
         apiCsrf();
     }
 
+    pb_ensure_optional_create_proforma_columns($conn);
+
     if ($action === 'list') {
         apiResponse(true, 'Proforma bills loaded successfully.', ['data' => apiProformaList($conn)]);
     }
@@ -1691,8 +2072,10 @@ try {
             $deliveryDate = pb_post('delivery_date') ?: null;
             $remarks = pb_post('remarks');
             $createJobCardNow = isset($_POST['create_job_card_now']) || (isset($_POST['auto_create_job_card']) && (string)$_POST['auto_create_job_card'] === '1');
+            $plannedDates = pb_posted_planned_dates();
 
-            $productId = pb_int($_POST['product_id'] ?? 0) ?: null;
+            $rawProductValue = pb_post('product_id');
+            $productId = ($rawProductValue !== '' && ctype_digit($rawProductValue)) ? (int)$rawProductValue : null;
             $manualItemName = pb_post('item_name');
             if ($manualItemName === '') {
                 $manualItemName = pb_post('product_name');
@@ -1704,12 +2087,12 @@ try {
             $printingSubTypeId = pb_int($_POST['printing_sub_type_id'] ?? 0) ?: null;
 
             if ($orderType === 'customized') {
-                $offsetPrintingTypeId = pb_offset_printing_type_id($conn);
-                if (!$offsetPrintingTypeId) {
-                    throw new RuntimeException('Offset Print type is missing. Please add it in Printing Types master.');
+                $multiColorPrintingTypeId = pb_multicolor_printing_type_id($conn);
+                if (!$multiColorPrintingTypeId) {
+                    throw new RuntimeException('Multicolor Offset Print type is missing. Please add it in Printing Types master.');
                 }
 
-                $printingTypeId = $offsetPrintingTypeId;
+                $printingTypeId = $multiColorPrintingTypeId;
                 $printingSubTypeId = null;
             }
             $finishingRequired = pb_int($_POST['finishing_required'] ?? 0) === 1 ? 1 : 0;
@@ -1724,9 +2107,25 @@ try {
             $screeningType = pb_post('screening_type') ?: null;
 
             $discountAmount = pb_float($_POST['discount_amount'] ?? 0);
-            $advanceAmount = pb_float($_POST['advance_amount'] ?? 0);
-            $paymentMode = pb_post('payment_mode', 'cash');
+            /* Extra card charge is applicable for both readymade and customized orders. */
+            $extraCardCharge = pb_float($_POST['extra_card_charge'] ?? 0);
+            /* Readymade specific charges. They are kept 0 for customized orders. */
+            $packingCharge = $orderType === 'readymade' ? pb_float($_POST['packing_charge'] ?? 0) : 0.0;
+            $printingCharge = $orderType === 'readymade' ? pb_float($_POST['printing_charge'] ?? 0) : 0.0;
+            $gstPercent = pb_float($_POST['gst_percent'] ?? 18);
+            if ($gstPercent < 0) $gstPercent = 0.0;
+
+            /* Split payment: cash and UPI can be received together. */
+            $cashAmount = pb_float($_POST['cash_amount'] ?? 0);
+            $upiAmount = pb_float($_POST['upi_amount'] ?? 0);
+            if ($cashAmount < 0 || $upiAmount < 0) {
+                throw new RuntimeException('Cash and UPI amounts cannot be negative.');
+            }
+            $advanceAmount = round($cashAmount + $upiAmount, 2);
+            $paymentMode = ($cashAmount > 0 && $upiAmount > 0) ? 'split' : (($upiAmount > 0) ? 'upi' : 'cash');
             $paymentRef = pb_post('payment_reference');
+            $cashRef = pb_post('cash_reference');
+            $upiRef = pb_post('upi_reference');
 
             if (!in_array($orderType, ['readymade', 'customized'], true)) {
                 throw new RuntimeException('Invalid order type.');
@@ -1749,12 +2148,12 @@ try {
             }
 
             if ($selectedFieldGroup === 'wedding_reception') {
-                if ($brideName === '' || $groomName === '' || $venue === '' || !$functionDate || !$functionTime) {
-                    throw new RuntimeException('Bride, groom, venue, function date and time are required for Wedding / Reception.');
+                if ($brideName === '' || $groomName === '' || $venue === '' || !$functionDate) {
+                    throw new RuntimeException('Bride, groom, venue and function date are required for Wedding / Reception. Function time is optional.');
                 }
             } elseif ($selectedFieldGroup === 'event') {
-                if ($venue === '' || !$functionDate || !$functionTime) {
-                    throw new RuntimeException('Venue, function date and time are required for this function type.');
+                if ($venue === '' || !$functionDate) {
+                    throw new RuntimeException('Venue and function date are required for this function type. Function time is optional.');
                 }
             } elseif ($selectedFieldGroup === 'business_print') {
                 if ($billingAddress === '') {
@@ -1789,15 +2188,15 @@ try {
 
             if ($orderType === 'customized') {
                 if ($sizeText === '') {
-                    throw new RuntimeException('Size is required for customized order.');
+                    $sizeText = '22x8.5';
                 }
 
                 if ($gsmThickness === '') {
-                    throw new RuntimeException('GSM Thickness is required for customized order.');
+                    $gsmThickness = '300';
                 }
 
                 if (!$printingSide) {
-                    throw new RuntimeException('Please select Single Side or Double Side.');
+                    throw new RuntimeException('Please select Single Side Scoring or Double Side Scoring.');
                 }
 
                 if (!$screeningType) {
@@ -1823,19 +2222,26 @@ try {
                 throw new RuntimeException('Discount cannot be negative.');
             }
 
+            if ($extraCardCharge < 0) {
+                throw new RuntimeException('Extra card charge cannot be negative.');
+            }
+
+            if ($packingCharge < 0) {
+                throw new RuntimeException('Packing charge cannot be negative.');
+            }
+
+            if ($printingCharge < 0) {
+                throw new RuntimeException('Printing charge cannot be negative.');
+            }
+
             if ($advanceAmount < 0) {
                 throw new RuntimeException('Advance amount cannot be negative.');
             }
 
-            $productName = $manualItemName;
-            if ($productName === '' && $productId) {
-                foreach ($products as $product) {
-                    if ((int)$product['id'] === $productId) {
-                        $productName = $product['product_name'];
-                        break;
-                    }
-                }
-            }
+            $userId = (int)($_SESSION['user_id'] ?? 0);
+            $productInfo = pb_find_or_create_product($conn, $rawProductValue, $manualItemName, $orderType, $rate, $userId);
+            $productId = $productInfo['id'];
+            $productName = trim((string)$productInfo['name']);
 
             if ($productName === '') {
                 $productName = 'Invitation Cards';
@@ -1848,15 +2254,26 @@ try {
                 throw new RuntimeException('Discount cannot be greater than sub total.');
             }
 
-            $finalAmount = round(max(0, $subTotal - $discountAmount), 2);
+            $finalAmount = round(max(0, $subTotal - $discountAmount + $extraCardCharge + $packingCharge + $printingCharge), 2);
+            /* Inclusive GST breakup: final amount is inclusive of GST. */
+            $taxableValue = $gstPercent > 0 ? round($finalAmount / (1 + ($gstPercent / 100)), 2) : $finalAmount;
+            $gstAmount = round(max(0, $finalAmount - $taxableValue), 2);
 
             if ($advanceAmount > $finalAmount) {
                 throw new RuntimeException('Advance cannot be greater than final amount.');
             }
 
             $balanceAmount = round(max(0, $finalAmount - $advanceAmount), 2);
+
+            $cashDenomination = ['rows' => [], 'summary' => [], 'summary_text' => '', 'total' => 0.0];
+            if ($cashAmount > 0) {
+                $cashDenomination = pb_cash_denomination_payload();
+                if (abs((float)$cashDenomination['total'] - $cashAmount) > 0.009) {
+                    throw new RuntimeException('Cash denomination total must match the cash amount.');
+                }
+            }
+
             $totalQty = $qty;
-            $userId = (int)($_SESSION['user_id'] ?? 0);
             $customerId = pb_customer_id($conn, $customerName, $mobile, $billingAddress, $gstNumber);
 
             $conn->begin_transaction();
@@ -1883,6 +2300,12 @@ try {
                         total_qty = ?,
                         sub_total = ?,
                         discount_amount = ?,
+                        card_extra_charge = ?,
+                        packing_charge = ?,
+                        printing_charge = ?,
+                        gst_percent = ?,
+                        taxable_value = ?,
+                        gst_amount = ?,
                         final_amount = ?,
                         advance_amount = ?,
                         balance_amount = ?,
@@ -1893,7 +2316,7 @@ try {
                     WHERE id = ?
                 ");
                 $stmt->bind_param(
-                    'iiissssssssssssiddddddssii',
+                    'iiissssssssssssiddddddddddddssii',
                     $quotationId,
                     $customerId,
                     $functionTypeId,
@@ -1913,6 +2336,12 @@ try {
                     $totalQty,
                     $subTotal,
                     $discountAmount,
+                    $extraCardCharge,
+                    $packingCharge,
+                    $printingCharge,
+                    $gstPercent,
+                    $taxableValue,
+                    $gstAmount,
                     $finalAmount,
                     $advanceAmount,
                     $balanceAmount,
@@ -1961,6 +2390,12 @@ try {
                             total_qty,
                             sub_total,
                             discount_amount,
+                            card_extra_charge,
+                            packing_charge,
+                            printing_charge,
+                            gst_percent,
+                            taxable_value,
+                            gst_amount,
                             final_amount,
                             advance_amount,
                             balance_amount,
@@ -1971,10 +2406,10 @@ try {
                             updated_at
                         )
                     VALUES
-                        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+                        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
                 ");
                 $stmt->bind_param(
-                    'siiissssssssssssiddddddssi',
+                    'siiissssssssssssiddddddddddddssi',
                     $proformaNo,
                     $quotationId,
                     $customerId,
@@ -1995,6 +2430,12 @@ try {
                     $totalQty,
                     $subTotal,
                     $discountAmount,
+                    $extraCardCharge,
+                    $packingCharge,
+                    $printingCharge,
+                    $gstPercent,
+                    $taxableValue,
+                    $gstAmount,
                     $finalAmount,
                     $advanceAmount,
                     $balanceAmount,
@@ -2057,45 +2498,64 @@ try {
             $stmt->close();
 
             if ($advanceAmount > 0 && $id <= 0) {
-                $paymentNo = pb_next_no($conn, 'payments', 'payment_no', 'SC-PAY');
                 $paymentType = $balanceAmount <= 0 ? 'full' : 'advance';
                 $today = date('Y-m-d');
 
-                $stmt = $conn->prepare("
-                    INSERT INTO payments
-                        (
-                            customer_id,
-                            proforma_bill_id,
-                            payment_no,
-                            payment_type,
-                            payment_mode,
-                            amount,
-                            payment_date,
-                            reference_no,
-                            remarks,
-                            received_by,
-                            created_at
-                        )
-                    VALUES
-                        (?, ?, ?, ?, ?, ?, ?, ?, 'Advance collected from proforma bill', ?, NOW())
-                ");
-                $stmt->bind_param(
-                    'iisssdssi',
-                    $customerId,
-                    $proformaId,
-                    $paymentNo,
-                    $paymentType,
-                    $paymentMode,
-                    $advanceAmount,
-                    $today,
-                    $paymentRef,
-                    $userId
-                );
-                $stmt->execute();
-                $stmt->close();
+                $saveAdvancePayment = function (string $mode, float $amountValue, string $referenceNo, string $remarksText) use ($conn, $customerId, $proformaId, $paymentType, $today, $userId): int {
+                    if ($amountValue <= 0) {
+                        return 0;
+                    }
 
-                pb_log($conn, 'collect_payment', 'Payments', $proformaId, 'Advance payment collected.');
+                    $paymentNo = pb_next_no($conn, 'payments', 'payment_no', 'SC-PAY');
+                    $stmt = $conn->prepare("
+                        INSERT INTO payments
+                            (
+                                customer_id,
+                                proforma_bill_id,
+                                payment_no,
+                                payment_type,
+                                payment_mode,
+                                amount,
+                                payment_date,
+                                reference_no,
+                                remarks,
+                                received_by,
+                                created_at
+                            )
+                        VALUES
+                            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                    "
+                    );
+                    $stmt->bind_param(
+                        'iisssdsssi',
+                        $customerId,
+                        $proformaId,
+                        $paymentNo,
+                        $paymentType,
+                        $mode,
+                        $amountValue,
+                        $today,
+                        $referenceNo,
+                        $remarksText,
+                        $userId
+                    );
+                    $stmt->execute();
+                    $paymentId = (int)$conn->insert_id;
+                    $stmt->close();
+
+                    return $paymentId;
+                };
+
+                $cashPaymentId = $saveAdvancePayment('cash', $cashAmount, $cashRef ?: $paymentRef, 'Advance cash collected from proforma bill');
+                if ($cashPaymentId > 0) {
+                    pb_save_cash_denominations($conn, $cashPaymentId, $cashDenomination, $userId);
+                }
+
+                $saveAdvancePayment('upi', $upiAmount, $upiRef ?: $paymentRef, 'Advance UPI collected from proforma bill');
+
+                pb_log($conn, 'collect_payment', 'Payments', $proformaId, 'Advance split payment collected. Cash: ' . number_format($cashAmount, 2, '.', '') . ', UPI: ' . number_format($upiAmount, 2, '.', ''));
             }
+
 
             $conn->commit();
 
@@ -2105,7 +2565,7 @@ try {
 
             if ($createJobCardNow) {
                 $conn->begin_transaction();
-                $jobId = pb_create_job_card($conn, $proformaId);
+                $jobId = pb_create_job_card($conn, $proformaId, $plannedDates);
                 $conn->commit();
                 $createdJobCard = true;
             }
@@ -2260,6 +2720,18 @@ try {
                 $stmt->close();
             }
 
+            if (pb_table_exists($conn, 'payment_cash_denominations') && pb_table_exists($conn, 'payments') && apiColumnExists($conn, 'payments', 'proforma_bill_id')) {
+                $stmt = $conn->prepare("
+                    DELETE pcd
+                    FROM payment_cash_denominations pcd
+                    INNER JOIN payments p ON p.id = pcd.payment_id
+                    WHERE p.proforma_bill_id = ?
+                ");
+                $stmt->bind_param('i', $id);
+                $stmt->execute();
+                $stmt->close();
+            }
+
             if (pb_table_exists($conn, 'payments') && apiColumnExists($conn, 'payments', 'proforma_bill_id')) {
                 $stmt = $conn->prepare("DELETE FROM payments WHERE proforma_bill_id = ?");
                 $stmt->bind_param('i', $id);
@@ -2294,8 +2766,9 @@ try {
                 throw new RuntimeException('Invalid proforma bill.');
             }
 
+            $plannedDates = pb_posted_planned_dates();
             $conn->begin_transaction();
-            $jobId = pb_create_job_card($conn, $proformaId);
+            $jobId = pb_create_job_card($conn, $proformaId, $plannedDates);
             $conn->commit();
 
             apiResponse(true, 'Job card created successfully with tracking stages.', [

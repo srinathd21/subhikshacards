@@ -653,6 +653,10 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
                     </div>
                     <div class="d-flex gap-2 no-print">
                         <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold" onclick="window.print()">Print</button>
+                        <?php if ($bill): ?>
+                        <a href="proforma_bill_pdf.php?id=<?= (int)$id ?>" target="_blank" class="btn btn-outline-dark rounded-pill px-4 fw-bold">FPDF Proforma</a>
+                        <a href="proforma_bill_pdf.php?id=<?= (int)$id ?>&fallback=html" target="_blank" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Fallback Print</a>
+                        <?php endif; ?>
                         <a href="proforma_bills.php" class="btn btn-primary rounded-pill px-4 fw-bold">Back to List</a>
                     </div>
                 </div>

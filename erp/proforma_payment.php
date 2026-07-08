@@ -60,6 +60,111 @@ function pp_ensure_payment_cancel_columns(mysqli $conn): void
     }
 }
 
+
+function pp_ensure_cash_denomination_table(mysqli $conn): void
+{
+    /* Use the common column name `amount` for denomination amount. */
+    $conn->query("
+        CREATE TABLE IF NOT EXISTS payment_cash_denominations (
+            id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            payment_id INT NOT NULL,
+            denomination_type ENUM('note','coin') NOT NULL,
+            denomination_value DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+            denomination_count INT UNSIGNED NOT NULL DEFAULT 0,
+            amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            created_by INT DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_payment_cash_payment_id (payment_id),
+            KEY idx_payment_cash_type_value (payment_id, denomination_type, denomination_value)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+
+    if (!pp_col_exists($conn, 'payment_cash_denominations', 'amount')) {
+        $conn->query("ALTER TABLE payment_cash_denominations ADD COLUMN amount DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER denomination_count");
+    }
+
+    if (!pp_col_exists($conn, 'payment_cash_denominations', 'created_by')) {
+        $conn->query("ALTER TABLE payment_cash_denominations ADD COLUMN created_by INT DEFAULT NULL AFTER amount");
+    }
+
+}
+
+function pp_cash_denomination_master(): array
+{
+    return [
+        ['field' => 'cash_note_500', 'type' => 'note', 'value' => 500],
+        ['field' => 'cash_note_200', 'type' => 'note', 'value' => 200],
+        ['field' => 'cash_note_100', 'type' => 'note', 'value' => 100],
+        ['field' => 'cash_note_50',  'type' => 'note', 'value' => 50],
+        ['field' => 'cash_note_20',  'type' => 'note', 'value' => 20],
+        ['field' => 'cash_note_10',  'type' => 'note', 'value' => 10],
+        ['field' => 'cash_coin_20',  'type' => 'coin', 'value' => 20],
+        ['field' => 'cash_coin_10',  'type' => 'coin', 'value' => 10],
+        ['field' => 'cash_coin_5',   'type' => 'coin', 'value' => 5],
+        ['field' => 'cash_coin_2',   'type' => 'coin', 'value' => 2],
+        ['field' => 'cash_coin_1',   'type' => 'coin', 'value' => 1],
+    ];
+}
+
+function pp_cash_denomination_payload(): array
+{
+    $rows = [];
+    $total = 0.0;
+
+    foreach (pp_cash_denomination_master() as $meta) {
+        $count = max(0, (int)($_POST[$meta['field']] ?? 0));
+        $value = (float)$meta['value'];
+        $amount = round($count * $value, 2);
+        $total += $amount;
+
+        /* Store every denomination row, including zero-count rows. */
+        $rows[] = [
+            'type' => (string)$meta['type'],
+            'value' => $value,
+            'count' => $count,
+            'amount' => $amount,
+        ];
+    }
+
+    return [
+        'rows' => $rows,
+        'total' => round($total, 2),
+    ];
+}
+
+function pp_save_cash_denominations(mysqli $conn, int $paymentId, array $payload): void
+{
+    if ($paymentId <= 0) return;
+
+    pp_ensure_cash_denomination_table($conn);
+
+    $stmt = $conn->prepare("DELETE FROM payment_cash_denominations WHERE payment_id = ?");
+    $stmt->bind_param('i', $paymentId);
+    $stmt->execute();
+    $stmt->close();
+
+    $stmt = $conn->prepare("
+        INSERT INTO payment_cash_denominations
+            (payment_id, denomination_type, denomination_value, denomination_count, amount, created_by, created_at)
+        VALUES
+            (?, ?, ?, ?, ?, ?, NOW())
+    ");
+
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+
+    foreach (($payload['rows'] ?? []) as $row) {
+        $type = (string)($row['type'] ?? 'note');
+        $value = (float)($row['value'] ?? 0);
+        $count = max(0, (int)($row['count'] ?? 0));
+        $amount = round($count * $value, 2);
+        $stmt->bind_param('isdidi', $paymentId, $type, $value, $count, $amount, $userId);
+        $stmt->execute();
+    }
+
+    $stmt->close();
+}
+
 function pp_money($value): string
 {
     return '₹' . number_format((float)$value, 2);
@@ -379,10 +484,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
             $referenceNo = trim((string)($_POST['reference_no'] ?? ''));
             $remarks = trim((string)($_POST['remarks'] ?? ''));
 
-            $allowedModes = ['cash', 'upi', 'bank', 'cheque', 'card', 'other'];
+            $allowedModes = ['cash', 'upi'];
             if (!in_array($paymentMode, $allowedModes, true)) $paymentMode = 'cash';
             if ($amount <= 0) throw new RuntimeException('Payment amount must be greater than zero.');
             if ($paymentDate === '') $paymentDate = date('Y-m-d');
+
+            $cashDenominationPayload = null;
+            if ($paymentMode === 'cash') {
+                $cashDenominationPayload = pp_cash_denomination_payload();
+                if (abs((float)$cashDenominationPayload['total'] - round($amount, 2)) > 0.009) {
+                    throw new RuntimeException('Cash denomination total must match the collected amount. Denomination total: ' . pp_money($cashDenominationPayload['total']) . ', Payment amount: ' . pp_money($amount));
+                }
+            }
 
             $stmt = $conn->prepare("SELECT id, customer_id, final_amount, advance_amount, balance_amount FROM proforma_bills WHERE id = ? LIMIT 1");
             $stmt->bind_param('i', $id);
@@ -406,6 +519,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
             $stmt->execute();
             $paymentId = (int)$stmt->insert_id;
             $stmt->close();
+
+            if ($paymentMode === 'cash' && is_array($cashDenominationPayload)) {
+                pp_save_cash_denominations($conn, $paymentId, $cashDenominationPayload);
+            }
 
             $newAdvance = (float)$bill['advance_amount'] + $amount;
             pp_update_bill_and_job_amounts($conn, $id, $newAdvance);
@@ -530,6 +647,28 @@ if ($bill && pp_table_exists($conn, 'payments')) {
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
     <style>
     .payment-page .page-head{padding:24px 28px;margin-bottom:18px}.payment-page .page-head h1{font-size:30px;font-weight:900;color:var(--text-main)}.module-card{padding:24px;border-radius:20px;margin-bottom:18px}.section-title{font-size:18px;font-weight:900;color:var(--text-main);margin-bottom:12px}.info-box{border:1px solid var(--border-soft);border-radius:16px;padding:14px;background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg));height:100%}.info-box small{display:block;font-size:11px;text-transform:uppercase;color:var(--text-muted);font-weight:900;margin-bottom:5px}.info-box strong{display:block;font-size:18px;color:var(--text-main);font-weight:900;word-break:break-word}.balance-due strong{color:#991b1b}.paid-box strong{color:#166534}.payment-form{border:1px solid var(--border-soft);border-radius:18px;padding:18px;background:color-mix(in srgb,var(--success-color,#16a34a) 6%,var(--card-bg))}.table-view th{font-size:12px;text-transform:uppercase;color:var(--text-muted);white-space:nowrap}.table-view td{vertical-align:middle}.cancelled-row{background:#fef2f2!important;color:#991b1b}.status-badge{display:inline-flex;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:900;background:#dcfce7;color:#166534}.status-badge.cancelled{background:#fee2e2;color:#991b1b}.toast-ui{border:0;border-radius:18px;box-shadow:0 18px 45px rgba(15,23,42,.18);overflow:hidden;min-width:320px;max-width:420px}.toast-ui.success{background:#dcfce7;color:#14532d}.toast-ui.danger{background:#fee2e2;color:#7f1d1d}.toast-ui.warning{background:#fef3c7;color:#92400e}.toast-title{font-size:14px;font-weight:900}.toast-message{font-size:13px;font-weight:800;line-height:1.45}@media(max-width:767.98px){.payment-page .page-head{padding:18px;border-radius:18px}.payment-page .page-head h1{font-size:24px}.module-card{padding:16px;border-radius:18px}.table-view{font-size:13px}}
+    
+
+    /* Cash / UPI checkbox payment UI */
+    .payment-mode-grid{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:14px}
+    .payment-mode-card{position:relative;display:flex;align-items:flex-start;gap:12px;border:1.5px solid var(--border-soft);border-radius:18px;padding:16px;min-height:92px;background:var(--card-bg);cursor:pointer;transition:.18s ease;user-select:none}
+    .payment-mode-card:hover{transform:translateY(-1px);box-shadow:0 10px 24px rgba(15,23,42,.08)}
+    .payment-mode-card.active{border-color:#2563eb;background:rgba(37,99,235,.08);box-shadow:0 14px 34px rgba(37,99,235,.12)}
+    .payment-mode-card input{width:24px;height:24px;accent-color:#2563eb;margin-top:2px;cursor:pointer}
+    .payment-mode-card strong{display:block;font-size:17px;font-weight:900;color:var(--text-main);line-height:1.2}
+    .payment-mode-card span{display:block;margin-top:3px;font-size:12px;font-weight:900;color:var(--text-muted);line-height:1.25}
+    .denom-modal-compact .modal-dialog{max-width:430px}
+    .denom-modal-compact .modal-content{border:0;border-radius:22px;overflow:hidden;box-shadow:0 24px 70px rgba(15,23,42,.26)}
+    .denom-modal-compact .modal-header,.denom-modal-compact .modal-footer{padding:12px 16px}
+    .denom-modal-compact .modal-body{padding:14px 16px;max-height:70vh;overflow:auto}
+    .denom-section-title{font-size:13px;font-weight:900;color:var(--text-main);margin:8px 0 6px}
+    .denom-line{display:grid;grid-template-columns:86px 72px 1fr;align-items:center;gap:8px;margin-bottom:7px;font-weight:800;font-size:13px}
+    .denom-line input{min-height:36px;border-radius:10px;text-align:center;font-weight:900}
+    .denom-line .denom-amount{min-height:36px;border:1px solid var(--border-soft);border-radius:10px;padding:7px 9px;background:color-mix(in srgb,var(--card-bg) 94%,var(--body-bg));font-weight:900;text-align:right}
+    .denom-total-box{border-radius:14px;background:rgba(22,163,74,.10);border:1px solid rgba(22,163,74,.24);padding:9px 11px;font-weight:900;font-size:13px}
+    body.modal-open-fallback{overflow:hidden}.modal-backdrop-fallback{position:fixed;inset:0;z-index:1040;background:rgba(15,23,42,.50)}.modal.show.modal-fallback{display:block;z-index:1055;background:transparent}
+    @media(max-width:575.98px){.payment-mode-grid{grid-template-columns:1fr}.denom-modal-compact .modal-dialog{max-width:calc(100% - 22px);margin:11px auto}.denom-line{grid-template-columns:76px 66px 1fr;font-size:12px}}
+
     </style>
 </head>
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -571,18 +710,100 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                 <?php if ((float)($bill['balance_amount'] ?? 0) <= 0): ?>
                 <div class="alert alert-success rounded-4 fw-bold mb-0">This proforma bill is fully paid.</div>
                 <?php else: ?>
-                <form method="post" class="payment-form">
+                <form method="post" class="payment-form" id="paymentForm">
                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                     <input type="hidden" name="action" value="collect_payment">
+                    <input type="hidden" name="payment_mode" id="payment_mode" value="cash">
+
                     <div class="row g-3 align-items-end">
-                        <div class="col-md-3"><label class="form-label fw-bold">Amount</label><input type="number" step="0.01" min="0.01" max="<?= e($bill['balance_amount']) ?>" name="amount" class="form-control" value="<?= e(number_format((float)$bill['balance_amount'], 2, '.', '')) ?>" required></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">Payment Mode</label><select name="payment_mode" class="form-select" required><option value="cash">Cash</option><option value="upi">UPI</option><option value="bank">Bank</option><option value="cheque">Cheque</option><option value="card">Card</option><option value="other">Other</option></select></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">Payment Date</label><input type="date" name="payment_date" class="form-control" value="<?= e(date('Y-m-d')) ?>" required></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">Reference No</label><input type="text" name="reference_no" class="form-control" placeholder="UPI / Bank ref"></div>
-                        <div class="col-12"><label class="form-label fw-bold">Remarks</label><textarea name="remarks" class="form-control" rows="2" placeholder="Payment remarks"></textarea></div>
-                        <div class="col-12 text-end"><button type="submit" class="btn btn-success rounded-pill px-4 fw-bold" onclick="return confirm('Collect this payment?')">Save Payment</button></div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">Amount</label>
+                            <input type="number" step="0.01" min="0.01" max="<?= e($bill['balance_amount']) ?>" name="amount" id="paymentAmount" class="form-control" value="<?= e(number_format((float)$bill['balance_amount'], 2, '.', '')) ?>" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold">Payment Date</label>
+                            <input type="date" name="payment_date" class="form-control" value="<?= e(date('Y-m-d')) ?>" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold" id="referenceLabel">UPI Reference / Remarks</label>
+                            <input type="text" name="reference_no" id="referenceNo" class="form-control" placeholder="Optional reference">
+                        </div>
+
+                        <div class="col-12">
+                            <label class="form-label fw-bold">Payment Mode</label>
+                            <div class="payment-mode-grid">
+                                <label class="payment-mode-card active" data-mode="cash" for="mode_cash">
+                                    <input type="checkbox" id="mode_cash" checked>
+                                    <span>
+                                        <strong>Cash</strong>
+                                        <span>Denomination required</span>
+                                    </span>
+                                </label>
+                                <label class="payment-mode-card" data-mode="upi" for="mode_upi">
+                                    <input type="checkbox" id="mode_upi">
+                                    <span>
+                                        <strong>UPI</strong>
+                                        <span>Reference optional</span>
+                                    </span>
+                                </label>
+                            </div>
+                            <small class="text-muted-custom fw-bold mt-2 d-block">Only Cash and UPI payments are allowed on this page.</small>
+                        </div>
+
+                        <div class="col-12">
+                            <label class="form-label fw-bold">Remarks</label>
+                            <textarea name="remarks" class="form-control" rows="2" placeholder="Payment remarks"></textarea>
+                        </div>
+                        <div class="col-12 d-flex flex-wrap justify-content-end gap-2">
+                            <button type="button" id="openCashDenomBtn" class="btn btn-outline-primary rounded-pill px-4 fw-bold">Enter Cash Denomination</button>
+                            <button type="submit" class="btn btn-success rounded-pill px-4 fw-bold">Save Payment</button>
+                        </div>
                     </div>
                 </form>
+
+                <div class="modal fade denom-modal-compact" id="cashDenominationModal" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <div>
+                                    <h5 class="modal-title fw-black mb-0">Cash Denomination</h5>
+                                    <small class="text-muted-custom fw-bold">Enter count for every note / coin</small>
+                                </div>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="denom-total-box d-flex justify-content-between gap-2 mb-2">
+                                    <span>Payment Amount: <span id="denomTarget">₹0.00</span></span>
+                                    <span>Total: <span id="denomTotal">₹0.00</span></span>
+                                </div>
+
+                                <div class="denom-section-title">Notes:</div>
+                                <?php foreach ([500, 200, 100, 50, 20, 10] as $noteValue): ?>
+                                <div class="denom-line">
+                                    <input type="number" min="0" step="1" value="0" class="form-control cash-denom-count" name="cash_note_<?= (int)$noteValue ?>" data-value="<?= (int)$noteValue ?>" form="paymentForm">
+                                    <span>x ₹<?= (int)$noteValue ?></span>
+                                    <span class="denom-amount">₹<span class="denom-row-total">0.00</span></span>
+                                </div>
+                                <?php endforeach; ?>
+
+                                <div class="denom-section-title">Coins:</div>
+                                <?php foreach ([20, 10, 5, 2, 1] as $coinValue): ?>
+                                <div class="denom-line">
+                                    <input type="number" min="0" step="1" value="0" class="form-control cash-denom-count" name="cash_coin_<?= (int)$coinValue ?>" data-value="<?= (int)$coinValue ?>" form="paymentForm">
+                                    <span>x ₹<?= (int)$coinValue ?></span>
+                                    <span class="denom-amount">₹<span class="denom-row-total">0.00</span></span>
+                                </div>
+                                <?php endforeach; ?>
+
+                                <div id="denomError" class="alert alert-danger rounded-4 fw-bold py-2 px-3 mt-2 mb-0 d-none"></div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-outline-secondary rounded-pill px-3 fw-bold" data-bs-dismiss="modal">Close</button>
+                                <button type="button" class="btn btn-primary rounded-pill px-3 fw-bold" id="saveDenomBtn">Save Denomination</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
                 <?php endif; ?>
             </div>
 
@@ -668,6 +889,159 @@ if ($bill && pp_table_exists($conn, 'payments')) {
 (function(){
     const pageToastEl=document.getElementById('pageToast');
     if(pageToastEl&&window.bootstrap&&bootstrap.Toast){bootstrap.Toast.getOrCreateInstance(pageToastEl).show();}
+
+    const form=document.getElementById('paymentForm');
+    if(!form){return;}
+
+    const modeInput=document.getElementById('payment_mode');
+    const cashCheck=document.getElementById('mode_cash');
+    const upiCheck=document.getElementById('mode_upi');
+    const cashCard=document.querySelector('.payment-mode-card[data-mode="cash"]');
+    const upiCard=document.querySelector('.payment-mode-card[data-mode="upi"]');
+    const amountInput=document.getElementById('paymentAmount');
+    const referenceLabel=document.getElementById('referenceLabel');
+    const referenceNo=document.getElementById('referenceNo');
+    const openCashBtn=document.getElementById('openCashDenomBtn');
+    const modalEl=document.getElementById('cashDenominationModal');
+    const denomInputs=[...document.querySelectorAll('.cash-denom-count')];
+    const denomTarget=document.getElementById('denomTarget');
+    const denomTotal=document.getElementById('denomTotal');
+    const denomError=document.getElementById('denomError');
+    const saveDenomBtn=document.getElementById('saveDenomBtn');
+    let fallbackBackdrop=null;
+
+    function money(v){return '₹'+(Number(v||0).toFixed(2));}
+    function amountValue(){return Math.round((parseFloat(amountInput?.value || '0') || 0) * 100) / 100;}
+
+    function denominationTotal(){
+        let total=0;
+        denomInputs.forEach(function(input){
+            const count=Math.max(0, parseInt(input.value || '0', 10) || 0);
+            input.value=count;
+            const value=parseFloat(input.dataset.value || '0') || 0;
+            const rowTotal=count*value;
+            total += rowTotal;
+            const rowTotalEl=input.closest('.denom-line')?.querySelector('.denom-row-total');
+            if(rowTotalEl){rowTotalEl.textContent=rowTotal.toFixed(2);}
+        });
+        total=Math.round(total*100)/100;
+        if(denomTotal){denomTotal.textContent=money(total);}
+        if(denomTarget){denomTarget.textContent=money(amountValue());}
+        return total;
+    }
+
+    function showError(message){
+        if(!denomError){return;}
+        denomError.textContent=message || '';
+        denomError.classList.toggle('d-none', !message);
+    }
+
+    function fallbackShowModal(){
+        if(!modalEl){return;}
+        modalEl.classList.add('show','modal-fallback');
+        modalEl.style.display='block';
+        modalEl.removeAttribute('aria-hidden');
+        document.body.classList.add('modal-open-fallback');
+        if(!fallbackBackdrop){
+            fallbackBackdrop=document.createElement('div');
+            fallbackBackdrop.className='modal-backdrop-fallback';
+            fallbackBackdrop.addEventListener('click', fallbackHideModal);
+            document.body.appendChild(fallbackBackdrop);
+        }
+    }
+
+    function fallbackHideModal(){
+        if(!modalEl){return;}
+        modalEl.classList.remove('show','modal-fallback');
+        modalEl.style.display='none';
+        modalEl.setAttribute('aria-hidden','true');
+        document.body.classList.remove('modal-open-fallback');
+        if(fallbackBackdrop){fallbackBackdrop.remove();fallbackBackdrop=null;}
+    }
+
+    function openDenominationModal(){
+        if(amountValue() <= 0){
+            alert('Please enter payment amount first.');
+            amountInput?.focus();
+            return;
+        }
+        showError('');
+        denominationTotal();
+        if(window.bootstrap && bootstrap.Modal && modalEl){
+            bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        }else{
+            fallbackShowModal();
+        }
+    }
+
+    function closeDenominationModal(){
+        if(window.bootstrap && bootstrap.Modal && modalEl){
+            bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+        }
+        fallbackHideModal();
+    }
+
+    function selectMode(mode, openCash){
+        const isCash=mode==='cash';
+        modeInput.value=isCash?'cash':'upi';
+        cashCheck.checked=isCash;
+        upiCheck.checked=!isCash;
+        cashCard?.classList.toggle('active', isCash);
+        upiCard?.classList.toggle('active', !isCash);
+        if(referenceLabel){referenceLabel.textContent=isCash?'Cash Remarks / Reference':'UPI Reference';}
+        if(referenceNo){referenceNo.placeholder=isCash?'Optional cash reference / remarks':'UPI transaction ID optional';}
+        if(openCashBtn){openCashBtn.style.display=isCash?'inline-flex':'none';}
+        if(isCash && openCash){openDenominationModal();}
+    }
+
+    cashCard?.addEventListener('click', function(e){
+        e.preventDefault();
+        selectMode('cash', true);
+    });
+    upiCard?.addEventListener('click', function(e){
+        e.preventDefault();
+        selectMode('upi', false);
+    });
+    cashCheck?.addEventListener('change', function(){selectMode('cash', true);});
+    upiCheck?.addEventListener('change', function(){selectMode('upi', false);});
+    openCashBtn?.addEventListener('click', function(){selectMode('cash', true);});
+    amountInput?.addEventListener('input', denominationTotal);
+    denomInputs.forEach(function(input){input.addEventListener('input', denominationTotal);});
+
+    document.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function(btn){
+        btn.addEventListener('click', function(){setTimeout(fallbackHideModal, 10);});
+    });
+
+    saveDenomBtn?.addEventListener('click', function(){
+        const expected=amountValue();
+        const total=denominationTotal();
+        if(Math.abs(total-expected) > 0.009){
+            showError('Denomination total '+money(total)+' must match payment amount '+money(expected)+'.');
+            return;
+        }
+        showError('');
+        closeDenominationModal();
+    });
+
+    form.addEventListener('submit', function(e){
+        if(modeInput.value === 'cash'){
+            const expected=amountValue();
+            const total=denominationTotal();
+            if(Math.abs(total-expected) > 0.009){
+                e.preventDefault();
+                showError('Denomination total '+money(total)+' must match payment amount '+money(expected)+'.');
+                openDenominationModal();
+                return false;
+            }
+        }
+        if(!confirm('Collect this payment?')){
+            e.preventDefault();
+            return false;
+        }
+    });
+
+    selectMode('cash', false);
+    denominationTotal();
 })();
 </script>
 </body>
