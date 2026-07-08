@@ -70,19 +70,34 @@ function ctIsSendToDispatchStep(array $step): bool
         || ((strpos($name, 'send') !== false || strpos($name, 'sent') !== false) && (strpos($name, 'dispatch') !== false || strpos($name, 'despatch') !== false));
 }
 
+function ctIsReadyForDispatchStep(array $step): bool
+{
+    $key = strtolower(trim((string)($step['step_key'] ?? '')));
+    $name = strtolower(trim((string)($step['step_name'] ?? '')));
+
+    return in_array($key, ['ready_for_dispatch', 'ready_to_dispatch', 'ready_for_despatch', 'ready_to_despatch'], true)
+        || in_array($name, ['ready for dispatch', 'ready to dispatch', 'ready for despatch', 'ready to despatch'], true);
+}
+
+function ctIsInternalDispatchStep(array $step): bool
+{
+    return ctIsSendToDispatchStep($step) || ctIsReadyForDispatchStep($step);
+}
+
 function ctIsDispatchStep(array $step): bool
 {
-    if (ctIsSendToDispatchStep($step)) {
+    // Customer tracking should not show internal handover stages.
+    // Only actual Dispatch / Dispatched is shown as the customer-facing Dispatch row.
+    if (ctIsInternalDispatchStep($step)) {
         return false;
     }
 
     $key = strtolower(trim((string)($step['step_key'] ?? '')));
     $name = strtolower(trim((string)($step['step_name'] ?? '')));
 
-    // Customer-facing final dispatch stages are merged as one "Dispatch" row.
     return $key === 'dispatch'
-        || in_array($key, ['ready_for_dispatch', 'ready_to_dispatch', 'dispatched', 'despatch', 'ready_for_despatch'], true)
-        || in_array($name, ['dispatch', 'ready for dispatch', 'ready to dispatch', 'dispatched', 'despatch', 'ready for despatch'], true)
+        || in_array($key, ['dispatched', 'despatch', 'delivered'], true)
+        || in_array($name, ['dispatch', 'dispatched', 'despatch', 'delivered'], true)
         || strpos($key, 'dispatch') !== false
         || strpos($key, 'despatch') !== false;
 }
@@ -189,8 +204,8 @@ function ctNormalizeCustomerSteps(array $steps): array
     $dispatchPosition = null;
 
     foreach ($steps as $step) {
-        // Internal handover stage. Customer does not need to see this.
-        if (ctIsSendToDispatchStep($step)) {
+        // Internal handover stages. Customer does not need to see these.
+        if (ctIsInternalDispatchStep($step)) {
             continue;
         }
 

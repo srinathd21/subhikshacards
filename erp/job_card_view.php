@@ -46,17 +46,50 @@ function jcvMoney($value): string
     return '₹' . number_format((float)$value, 2);
 }
 
+function jcvIsSendToDispatchStageKey(?string $stepKey, ?string $stepName = ''): bool
+{
+    $key = strtolower(trim((string)$stepKey));
+    $name = strtolower(trim((string)$stepName));
+    $keyText = str_replace(['-', '_'], ' ', $key);
+
+    return in_array($key, ['send_to_dispatch', 'send_for_dispatch', 'send_dispatch', 'sent_to_dispatch', 'send_to_despatch', 'send_for_despatch'], true)
+        || in_array($name, ['send to dispatch', 'send for dispatch', 'sent to dispatch', 'send to despatch', 'send for despatch'], true)
+        || ((strpos($keyText, 'send') !== false || strpos($keyText, 'sent') !== false) && (strpos($keyText, 'dispatch') !== false || strpos($keyText, 'despatch') !== false))
+        || ((strpos($name, 'send') !== false || strpos($name, 'sent') !== false) && (strpos($name, 'dispatch') !== false || strpos($name, 'despatch') !== false));
+}
+
+function jcvIsReadyForDispatchStageKey(?string $stepKey, ?string $stepName = ''): bool
+{
+    $key = strtolower(trim((string)$stepKey));
+    $name = strtolower(trim((string)$stepName));
+
+    return in_array($key, ['ready_for_dispatch', 'ready_to_dispatch', 'ready_for_despatch', 'ready_to_despatch'], true)
+        || in_array($name, ['ready for dispatch', 'ready to dispatch', 'ready for despatch', 'ready to despatch'], true);
+}
+
+function jcvIsInternalDispatchStageKey(?string $stepKey, ?string $stepName = ''): bool
+{
+    return jcvIsSendToDispatchStageKey($stepKey, $stepName)
+        || jcvIsReadyForDispatchStageKey($stepKey, $stepName);
+}
+
 function jcvIsDispatchStageKey(?string $stepKey, ?string $stepName = ''): bool
 {
     $key = strtolower(trim((string)$stepKey));
     $name = strtolower(trim((string)$stepName));
 
-    // Only final dispatch stages are merged/validated here.
-    // "Send to Dispatch" remains a separate production handover stage.
+    // Final customer-facing dispatch only. Internal handover stages like
+    // Send to Dispatch / Ready for Dispatch stay updateable but do not trigger
+    // WhatsApp, payment lock, or customer-tracking display as Dispatch.
+    if (jcvIsInternalDispatchStageKey($key, $name)) {
+        return false;
+    }
+
     return $key === 'dispatch'
-        || in_array($key, ['ready_for_dispatch', 'dispatched'], true)
-        || in_array($name, ['dispatch', 'ready for dispatch', 'dispatched'], true)
-        || (strpos($key, 'dispatch') !== false && strpos($key, 'send_to') === false);
+        || in_array($key, ['dispatched', 'despatch', 'delivered'], true)
+        || in_array($name, ['dispatch', 'dispatched', 'despatch', 'delivered'], true)
+        || strpos($key, 'dispatch') !== false
+        || strpos($key, 'despatch') !== false;
 }
 
 
@@ -751,8 +784,8 @@ function jcvSaveTrackingPhotos(mysqli $conn, int $jobId, int $trackingId, int $w
             throw new RuntimeException('Invalid uploaded photo.');
         }
 
-        if ($fileSize <= 0 || $fileSize > 5 * 1024 * 1024) {
-            throw new RuntimeException('Each tracking photo must be below 5 MB.');
+        if ($fileSize <= 0) {
+            throw new RuntimeException('Uploaded photo is empty. Please upload a valid image file.');
         }
 
         $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
@@ -2169,9 +2202,15 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                     }
 
                     $trackingSendResult = null;
-                    // For every normal status update, send customer_tracking.php link to customer.
+                    $skipCustomerWhatsapp = jcvIsInternalDispatchStageKey(
+                        $stepRow['step_key'] ?? '',
+                        $stepRow['step_name'] ?? ''
+                    );
+
+                    // For every normal customer-facing status update, send customer_tracking.php link to customer.
+                    // Internal stages like Send to Dispatch / Ready for Dispatch must update status only; no WhatsApp.
                     // For proof/design completed with photo, the approval WhatsApp already contains both approval_link and tracking_link.
-                    if (!is_array($photoApprovalSendResult)) {
+                    if (!is_array($photoApprovalSendResult) && !$skipCustomerWhatsapp) {
                         $trackingSendResult = jcvSendTrackingUpdateByApi(
                             $conn,
                             $job,
