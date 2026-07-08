@@ -3,6 +3,11 @@
 require_once __DIR__ . '/includes/auth.php';
 require_permission($conn, 'can_view', 'job_cards.php');
 
+$whatsappApiPath = __DIR__ . '/includes/whatsapp-api.php';
+if (file_exists($whatsappApiPath)) {
+    require_once $whatsappApiPath;
+}
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -84,8 +89,585 @@ function jcRoleLabel(string $roleKey): string
     return $labels[$roleKey] ?? ucfirst(str_replace('_', ' ', $roleKey));
 }
 
+function jcColumnExists(mysqli $conn, string $table, string $column): bool
+{
+    static $cache = [];
+    $key = $table . '.' . $column;
+    if (array_key_exists($key, $cache)) {
+        return $cache[$key];
+    }
+
+    try {
+        $table = $conn->real_escape_string($table);
+        $column = $conn->real_escape_string($column);
+        $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+        $ok = $res && $res->num_rows > 0;
+        if ($res) {
+            $res->free();
+        }
+        return $cache[$key] = $ok;
+    } catch (Throwable $e) {
+        return $cache[$key] = false;
+    }
+}
+
+function jcStatusIdByKey(mysqli $conn, string $statusKey): ?int
+{
+    if (!jcTableExists($conn, 'job_card_statuses')) {
+        return null;
+    }
+
+    try {
+        $stmt = $conn->prepare("SELECT id FROM job_card_statuses WHERE status_key = ? LIMIT 1");
+        $stmt->bind_param('s', $statusKey);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $row ? (int)$row['id'] : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function jcCurrentFilterQuery(array $extra = []): string
+{
+    $keep = [];
+    foreach (['order_type', 'status', 'search'] as $key) {
+        if (isset($_GET[$key]) && trim((string)$_GET[$key]) !== '') {
+            $keep[$key] = trim((string)$_GET[$key]);
+        }
+    }
+
+    foreach ($extra as $key => $value) {
+        if ($value === null) {
+            unset($keep[$key]);
+        } else {
+            $keep[$key] = $value;
+        }
+    }
+
+    return http_build_query($keep);
+}
+
+function jcRedirectBack(array $extra = []): void
+{
+    $query = jcCurrentFilterQuery($extra);
+    header('Location: job_cards.php' . ($query !== '' ? '?' . $query : ''));
+    exit;
+}
+
+function jcLoadReadymadeTracking(mysqli $conn, int $jobId): array
+{
+    if ($jobId <= 0 || !jcTableExists($conn, 'job_tracking') || !jcTableExists($conn, 'workflow_steps')) {
+        return [];
+    }
+
+    $stmt = $conn->prepare("
+        SELECT
+            jt.*,
+            ws.step_key,
+            ws.step_name,
+            ws.sort_order
+        FROM job_tracking jt
+        INNER JOIN workflow_steps ws
+            ON ws.id = jt.workflow_step_id
+        WHERE jt.job_card_id = ?
+          AND ws.order_type = 'readymade'
+        ORDER BY ws.sort_order ASC, jt.id ASC
+    ");
+    $stmt->bind_param('i', $jobId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+
+    $rows = [];
+    while ($row = $res->fetch_assoc()) {
+        $rows[] = $row;
+    }
+    $stmt->close();
+
+    return $rows;
+}
+
+function jcFindTrackingByStepKey(array $trackingRows, array $keys): ?array
+{
+    $keys = array_map('strtolower', $keys);
+    foreach ($trackingRows as $row) {
+        $stepKey = strtolower(trim((string)($row['step_key'] ?? '')));
+        if (in_array($stepKey, $keys, true)) {
+            return $row;
+        }
+    }
+    return null;
+}
+
+function jcIsReadymadeScreenJob(array $job): bool
+{
+    $orderType = strtolower(trim((string)($job['order_type'] ?? '')));
+    if ($orderType !== 'readymade') {
+        return false;
+    }
+
+    $printingRole = strtolower(trim((string)($job['printing_role_key'] ?? '')));
+    $assignedRole = strtolower(trim((string)($job['assigned_printing_role_key'] ?? '')));
+    $printingName = strtolower(trim((string)($job['printing_name'] ?? '')));
+    $printingKey = strtolower(trim((string)($job['printing_key'] ?? '')));
+
+    return $printingRole === 'screen_printing'
+        || $assignedRole === 'screen_printing'
+        || strpos($printingName, 'screen') !== false
+        || strpos($printingKey, 'screen') !== false;
+}
+
+function jcReadymadeScreenShortcutState(mysqli $conn, int $jobId): array
+{
+    $state = [
+        'eligible' => false,
+        'started' => false,
+        'completed' => false,
+        'start_enabled' => false,
+        'complete_enabled' => false,
+        'start_label' => 'Not Started',
+        'complete_label' => 'Disabled',
+    ];
+
+    $trackingRows = jcLoadReadymadeTracking($conn, $jobId);
+    if (!$trackingRows) {
+        return $state;
+    }
+
+    $printing = jcFindTrackingByStepKey($trackingRows, ['printing', 'print']);
+    $sendToDispatch = jcFindTrackingByStepKey($trackingRows, ['send_to_dispatch', 'send_for_dispatch', 'sent_to_dispatch']);
+
+    if (!$printing || !$sendToDispatch) {
+        return $state;
+    }
+
+    $state['eligible'] = true;
+    $printingStatus = strtolower(trim((string)($printing['status'] ?? 'pending')));
+    $sendStatus = strtolower(trim((string)($sendToDispatch['status'] ?? 'pending')));
+
+    $state['started'] = in_array($printingStatus, ['in_progress', 'completed', 'skipped'], true)
+        || !empty($printing['actual_start_at']);
+    $state['completed'] = in_array($sendStatus, ['completed', 'skipped'], true);
+
+    if (!$state['started']) {
+        $state['start_enabled'] = true;
+        $state['complete_enabled'] = false;
+        $state['start_label'] = 'Not Started';
+        $state['complete_label'] = 'Disabled';
+    } elseif (!$state['completed']) {
+        $state['start_enabled'] = false;
+        $state['complete_enabled'] = true;
+        $state['start_label'] = 'Already Started';
+        $state['complete_label'] = 'Click to finish';
+    } else {
+        $state['start_enabled'] = false;
+        $state['complete_enabled'] = false;
+        $state['start_label'] = 'Already Started';
+        $state['complete_label'] = 'Completed';
+    }
+
+    return $state;
+}
+
+function jcInsertTrackingHistory(mysqli $conn, int $trackingId, int $jobId, int $workflowStepId, string $oldStatus, string $newStatus, string $remarks, int $userId): void
+{
+    if (!jcTableExists($conn, 'job_tracking_history')) {
+        return;
+    }
+
+    try {
+        $cols = [
+            'job_tracking_id' => $trackingId,
+            'job_card_id' => $jobId,
+            'workflow_step_id' => $workflowStepId,
+            'old_status' => $oldStatus,
+            'new_status' => $newStatus,
+            'action_remarks' => $remarks,
+            'changed_by' => $userId > 0 ? $userId : null,
+            'changed_at' => date('Y-m-d H:i:s')
+        ];
+
+        $data = [];
+        foreach ($cols as $col => $value) {
+            if (jcColumnExists($conn, 'job_tracking_history', $col)) {
+                $data[$col] = $value;
+            }
+        }
+
+        if (jcColumnExists($conn, 'job_tracking_history', 'old_data')) {
+            $data['old_data'] = json_encode(['status' => $oldStatus], JSON_UNESCAPED_UNICODE);
+        }
+        if (jcColumnExists($conn, 'job_tracking_history', 'new_data')) {
+            $data['new_data'] = json_encode(['status' => $newStatus], JSON_UNESCAPED_UNICODE);
+        }
+
+        if (!$data) return;
+
+        $fields = array_keys($data);
+        $placeholders = implode(',', array_fill(0, count($fields), '?'));
+        $types = '';
+        $values = [];
+        foreach ($data as $value) {
+            if (is_int($value) || $value === null) {
+                $types .= 'i';
+            } else {
+                $types .= 's';
+            }
+            $values[] = $value;
+        }
+
+        $sql = "INSERT INTO job_tracking_history (`" . implode('`,`', $fields) . "`) VALUES ({$placeholders})";
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param($types, ...$values);
+        $stmt->execute();
+        $stmt->close();
+    } catch (Throwable $e) {
+        // History failure should not block the shortcut action.
+    }
+}
+
+function jcUpdateTrackingStatus(mysqli $conn, array $row, string $newStatus, int $userId, string $remarks, bool $resetToPending = false): void
+{
+    $trackingId = (int)($row['id'] ?? 0);
+    $jobId = (int)($row['job_card_id'] ?? 0);
+    $workflowStepId = (int)($row['workflow_step_id'] ?? 0);
+    $oldStatus = strtolower(trim((string)($row['status'] ?? 'pending')));
+
+    if ($trackingId <= 0 || $jobId <= 0 || $workflowStepId <= 0 || $oldStatus === $newStatus) {
+        return;
+    }
+
+    if ($newStatus === 'completed') {
+        $stmt = $conn->prepare("
+            UPDATE job_tracking
+            SET status = 'completed',
+                actual_start_at = COALESCE(actual_start_at, NOW()),
+                actual_completed_at = COALESCE(actual_completed_at, NOW()),
+                completed_by = COALESCE(completed_by, ?),
+                remarks = CASE WHEN TRIM(COALESCE(remarks, '')) = '' THEN ? ELSE remarks END,
+                updated_at = NOW()
+            WHERE id = ?
+              AND job_card_id = ?
+        ");
+        $stmt->bind_param('isii', $userId, $remarks, $trackingId, $jobId);
+    } elseif ($newStatus === 'in_progress') {
+        $stmt = $conn->prepare("
+            UPDATE job_tracking
+            SET status = 'in_progress',
+                actual_start_at = COALESCE(actual_start_at, NOW()),
+                actual_completed_at = NULL,
+                completed_by = NULL,
+                remarks = CASE WHEN TRIM(COALESCE(remarks, '')) = '' THEN ? ELSE remarks END,
+                updated_at = NOW()
+            WHERE id = ?
+              AND job_card_id = ?
+        ");
+        $stmt->bind_param('sii', $remarks, $trackingId, $jobId);
+    } elseif ($newStatus === 'pending' && $resetToPending) {
+        $stmt = $conn->prepare("
+            UPDATE job_tracking
+            SET status = 'pending',
+                actual_start_at = NULL,
+                actual_completed_at = NULL,
+                completed_by = NULL,
+                updated_at = NOW()
+            WHERE id = ?
+              AND job_card_id = ?
+        ");
+        $stmt->bind_param('ii', $trackingId, $jobId);
+    } else {
+        return;
+    }
+
+    $stmt->execute();
+    $stmt->close();
+
+    jcInsertTrackingHistory($conn, $trackingId, $jobId, $workflowStepId, $oldStatus, $newStatus, $remarks, $userId);
+}
+
+function jcRefreshJobCardFromTracking(mysqli $conn, int $jobId, ?int $forcedCurrentStepId = null): void
+{
+    if ($jobId <= 0 || !jcTableExists($conn, 'job_tracking')) {
+        return;
+    }
+
+    $stmt = $conn->prepare("
+        SELECT
+            jt.workflow_step_id,
+            jt.status,
+            ws.sort_order
+        FROM job_tracking jt
+        LEFT JOIN workflow_steps ws
+            ON ws.id = jt.workflow_step_id
+        WHERE jt.job_card_id = ?
+        ORDER BY COALESCE(ws.sort_order, jt.id) ASC, jt.id ASC
+    ");
+    $stmt->bind_param('i', $jobId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+
+    $total = 0;
+    $completed = 0;
+    $delayed = 0;
+    $currentStepId = $forcedCurrentStepId;
+
+    while ($row = $res->fetch_assoc()) {
+        $total++;
+        $status = strtolower(trim((string)($row['status'] ?? 'pending')));
+        if (in_array($status, ['completed', 'skipped'], true)) {
+            $completed++;
+        }
+        if ($status === 'delayed') {
+            $delayed++;
+        }
+        if ($currentStepId === null && !in_array($status, ['completed', 'skipped', 'cancelled'], true)) {
+            $currentStepId = (int)($row['workflow_step_id'] ?? 0);
+        }
+    }
+    $stmt->close();
+
+    $statusKey = 'in_progress';
+    if ($delayed > 0) {
+        $statusKey = 'delayed';
+    } elseif ($total > 0 && $completed >= $total) {
+        $statusKey = 'completed';
+    }
+
+    $statusId = jcStatusIdByKey($conn, $statusKey);
+    $updatedBy = (int)($_SESSION['user_id'] ?? 0);
+
+    if ($statusId && $currentStepId) {
+        $stmt = $conn->prepare("
+            UPDATE job_cards
+            SET current_workflow_step_id = ?,
+                job_card_status_id = ?,
+                updated_by = ?,
+                updated_at = NOW()
+            WHERE id = ?
+        ");
+        $stmt->bind_param('iiii', $currentStepId, $statusId, $updatedBy, $jobId);
+    } elseif ($statusId) {
+        $stmt = $conn->prepare("
+            UPDATE job_cards
+            SET job_card_status_id = ?,
+                updated_by = ?,
+                updated_at = NOW()
+            WHERE id = ?
+        ");
+        $stmt->bind_param('iii', $statusId, $updatedBy, $jobId);
+    } else {
+        return;
+    }
+
+    $stmt->execute();
+    $stmt->close();
+}
+
+function jcBuildCustomerTrackingLink(array $job): string
+{
+    $scheme = 'http';
+    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        $scheme = 'https';
+    }
+
+    $host = (string)($_SERVER['HTTP_HOST'] ?? '');
+    if ($host === '') {
+        return '';
+    }
+
+    $scriptDir = rtrim(str_replace('\\', '/', dirname((string)($_SERVER['SCRIPT_NAME'] ?? ''))), '/');
+    $baseUrl = $scheme . '://' . $host . ($scriptDir !== '' ? $scriptDir : '');
+
+    $token = trim((string)($job['tracking_token'] ?? ''));
+    if ($token !== '') {
+        return $baseUrl . '/customer_tracking.php?token=' . rawurlencode($token);
+    }
+
+    $jobNo = trim((string)($job['job_card_no'] ?? ($job['job_no'] ?? '')));
+    if ($jobNo !== '') {
+        return $baseUrl . '/customer_tracking.php?job_card_no=' . rawurlencode($jobNo);
+    }
+
+    return $baseUrl . '/customer_tracking.php';
+}
+
+function jcSendReadymadeScreenStartWhatsapp(mysqli $conn, array $job): array
+{
+    if (!function_exists('subhiksha_send_whatsapp')) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp API helper is not available. Place whatsapp-api.php inside includes/ folder.',
+            'log_id' => 0,
+            'response' => ''
+        ];
+    }
+
+    $mobile = trim((string)($job['mobile'] ?? ''));
+    if ($mobile === '') {
+        return [
+            'success' => false,
+            'message' => 'Customer mobile number is missing.',
+            'log_id' => 0,
+            'response' => ''
+        ];
+    }
+
+    $customerName = trim((string)($job['customer_name'] ?? 'Customer')) ?: 'Customer';
+    $jobNo = trim((string)($job['job_card_no'] ?? ($job['job_no'] ?? '')));
+    $productName = trim((string)($job['product_name'] ?? 'Cards')) ?: 'Cards';
+    $trackingLink = jcBuildCustomerTrackingLink($job);
+
+    $message = "Dear {$customerName},\n\n";
+    $message .= "Your Master Copy has been received for Job Card {$jobNo}.\n";
+    $message .= "Printing is now in progress.\n\n";
+    $message .= "Product: {$productName}\n";
+    if ($trackingLink !== '') {
+        $message .= "Track your order: {$trackingLink}\n\n";
+    }
+    $message .= "- Subhiksha Cards";
+
+    try {
+        return subhiksha_send_whatsapp($conn, [
+            'mobile' => $mobile,
+            'message' => $message,
+            'related_module' => 'Job Tracking',
+            'related_id' => (int)($job['id'] ?? 0),
+            'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
+            'job_card_id' => (int)($job['id'] ?? 0),
+            'sent_by' => (int)($_SESSION['user_id'] ?? 0)
+        ]);
+    } catch (Throwable $e) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp sending failed.',
+            'log_id' => 0,
+            'response' => $e->getMessage()
+        ];
+    }
+}
+
+function jcRunReadymadeScreenShortcut(mysqli $conn, int $jobId, string $shortcutAction, string $roleKey): void
+{
+    if ($roleKey !== 'screen_printing') {
+        throw new RuntimeException('Only Screen Printing team can use this shortcut.');
+    }
+
+    if ($jobId <= 0) {
+        throw new RuntimeException('Invalid job card.');
+    }
+
+    $stmt = $conn->prepare("
+        SELECT
+            jc.*,
+            pt.printing_name,
+            pt.printing_key,
+            pt.role_key AS printing_role_key,
+            rprint.role_key AS assigned_printing_role_key
+        FROM job_cards jc
+        LEFT JOIN printing_types pt
+            ON pt.id = jc.printing_type_id
+        LEFT JOIN roles rprint
+            ON rprint.id = jc.assigned_printing_role_id
+        WHERE jc.id = ?
+        LIMIT 1
+    ");
+    $stmt->bind_param('i', $jobId);
+    $stmt->execute();
+    $job = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$job) {
+        throw new RuntimeException('Job card not found.');
+    }
+
+    if (!jcIsReadymadeScreenJob($job)) {
+        throw new RuntimeException('This shortcut is allowed only for Readymade Screen Print job cards.');
+    }
+
+    $trackingRows = jcLoadReadymadeTracking($conn, $jobId);
+    if (!$trackingRows) {
+        throw new RuntimeException('Job tracking stages are missing for this job card.');
+    }
+
+    $masterCopyReceived = jcFindTrackingByStepKey($trackingRows, ['master_copy_received', 'master_copy_recieved']);
+    $printing = jcFindTrackingByStepKey($trackingRows, ['printing', 'print']);
+    $sendToDispatch = jcFindTrackingByStepKey($trackingRows, ['send_to_dispatch', 'send_for_dispatch', 'sent_to_dispatch']);
+
+    if (!$masterCopyReceived || !$printing || !$sendToDispatch) {
+        throw new RuntimeException('Required workflow stages are missing: Master Copy Received, Printing or Send to Dispatch.');
+    }
+
+    $masterSort = (int)$masterCopyReceived['sort_order'];
+    $printingSort = (int)$printing['sort_order'];
+    $sendSort = (int)$sendToDispatch['sort_order'];
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+
+    $conn->begin_transaction();
+
+    try {
+        if ($shortcutAction === 'readymade_screen_start') {
+            foreach ($trackingRows as $row) {
+                $sort = (int)($row['sort_order'] ?? 0);
+                if ($sort <= $masterSort) {
+                    jcUpdateTrackingStatus($conn, $row, 'completed', $userId, 'Screen Printing shortcut: Started job. Completed up to Master Copy Received.');
+                } elseif ($sort === $printingSort) {
+                    jcUpdateTrackingStatus($conn, $row, 'in_progress', $userId, 'Screen Printing shortcut: Printing started.');
+                } elseif ($sort > $printingSort) {
+                    jcUpdateTrackingStatus($conn, $row, 'pending', $userId, '', true);
+                }
+            }
+            jcRefreshJobCardFromTracking($conn, $jobId, (int)$printing['workflow_step_id']);
+        } elseif ($shortcutAction === 'readymade_screen_complete') {
+            foreach ($trackingRows as $row) {
+                $sort = (int)($row['sort_order'] ?? 0);
+                if ($sort >= $printingSort && $sort <= $sendSort) {
+                    jcUpdateTrackingStatus($conn, $row, 'completed', $userId, 'Screen Printing shortcut: Completed Printing to Send to Dispatch.');
+                }
+            }
+
+            $nextStepId = null;
+            foreach ($trackingRows as $row) {
+                $sort = (int)($row['sort_order'] ?? 0);
+                if ($sort > $sendSort) {
+                    $nextStepId = (int)$row['workflow_step_id'];
+                    jcUpdateTrackingStatus($conn, $row, 'in_progress', $userId, 'Screen Printing shortcut: Dispatch stage opened.');
+                    break;
+                }
+            }
+            jcRefreshJobCardFromTracking($conn, $jobId, $nextStepId ?: null);
+        } else {
+            throw new RuntimeException('Invalid shortcut action.');
+        }
+
+        $conn->commit();
+
+        if ($shortcutAction === 'readymade_screen_start') {
+            jcSendReadymadeScreenStartWhatsapp($conn, $job);
+        }
+    } catch (Throwable $e) {
+        $conn->rollback();
+        throw $e;
+    }
+}
+
 $roleKey = strtolower((string)($_SESSION['role_key'] ?? ''));
 $roleId = (int)($_SESSION['role_id'] ?? 0);
+
+if (empty($_SESSION['job_cards_shortcut_csrf'])) {
+    $_SESSION['job_cards_shortcut_csrf'] = bin2hex(random_bytes(32));
+}
+$shortcutCsrfToken = $_SESSION['job_cards_shortcut_csrf'];
+
+$message = '';
+$messageType = 'success';
+if (!empty($_GET['shortcut_msg'])) {
+    if ($_GET['shortcut_msg'] === 'started') {
+        $message = 'Readymade Screen Print job started. Master Copy Received message sent/recorded and Printing opened.';
+    } elseif ($_GET['shortcut_msg'] === 'completed') {
+        $message = 'Readymade Screen Print job completed up to Send to Dispatch.';
+    }
+}
 
 $allAccessRoles = [
     'admin',
@@ -103,6 +685,25 @@ $printingRoleKeys = [
 $hasAllJobCardAccess = in_array($roleKey, $allAccessRoles, true);
 $isSpecificPrintingRole = in_array($roleKey, $printingRoleKeys, true);
 $isGeneralPrintingRole = $roleKey === 'printing';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array(($_POST['action'] ?? ''), ['readymade_screen_start', 'readymade_screen_complete'], true)) {
+    try {
+        if (empty($_POST['csrf_token']) || !hash_equals($shortcutCsrfToken, (string)$_POST['csrf_token'])) {
+            throw new RuntimeException('Invalid request token. Please refresh and try again.');
+        }
+
+        $jobId = (int)($_POST['job_card_id'] ?? 0);
+        $action = (string)$_POST['action'];
+        jcRunReadymadeScreenShortcut($conn, $jobId, $action, $roleKey);
+
+        jcRedirectBack([
+            'shortcut_msg' => $action === 'readymade_screen_start' ? 'started' : 'completed'
+        ]);
+    } catch (Throwable $e) {
+        $message = $e->getMessage();
+        $messageType = 'danger';
+    }
+}
 
 $filterOrderType = trim((string)($_GET['order_type'] ?? ''));
 $filterStatus = trim((string)($_GET['status'] ?? ''));
@@ -195,8 +796,6 @@ try {
 }
 
 $rows = [];
-$message = '';
-$messageType = 'success';
 
 if (!jcTableExists($conn, 'job_cards')) {
     $message = 'job_cards table is missing.';
@@ -492,6 +1091,129 @@ $pageAccessLabel = $hasAllJobCardAccess
         justify-content: center !important;
     }
 
+    .shortcut-actions {
+        display: flex;
+        align-items: flex-start;
+        justify-content: flex-end;
+        gap: 8px;
+        flex-wrap: nowrap;
+    }
+
+    .shortcut-form {
+        margin: 0;
+    }
+
+    .shortcut-action-box {
+        display: inline-flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 3px;
+        min-width: 86px;
+    }
+
+    .shortcut-btn {
+        min-width: 82px;
+        min-height: 34px;
+        border-radius: 9px;
+        font-size: 12px;
+        font-weight: 900;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+        box-shadow: none !important;
+    }
+
+    .shortcut-btn.start {
+        color: #16a34a;
+        border-color: #22c55e;
+        background: #ffffff;
+    }
+
+    .shortcut-btn.start:not(:disabled):hover {
+        color: #ffffff;
+        background: #16a34a;
+        border-color: #16a34a;
+    }
+
+    .shortcut-btn.complete {
+        color: #1d4ed8;
+        border-color: #3b82f6;
+        background: #ffffff;
+    }
+
+    .shortcut-btn.complete:not(:disabled):hover {
+        color: #ffffff;
+        background: #2563eb;
+        border-color: #2563eb;
+    }
+
+    .shortcut-btn:disabled {
+        color: #9ca3af !important;
+        border-color: #d1d5db !important;
+        background: #f8fafc !important;
+        cursor: not-allowed;
+        opacity: .85;
+    }
+
+    .shortcut-note {
+        display: block;
+        font-size: 10px;
+        line-height: 1.1;
+        font-weight: 800;
+        color: var(--text-muted);
+        white-space: nowrap;
+    }
+
+    .shortcut-note.green {
+        color: #16a34a;
+    }
+
+    .shortcut-note.blue {
+        color: #2563eb;
+    }
+
+    .shortcut-note.done {
+        color: #047857;
+    }
+
+    .shortcut-help-bar {
+        border: 1px solid #bfdbfe;
+        background: #eff6ff;
+        color: #0f172a;
+        border-radius: 14px;
+        padding: 10px 14px;
+        font-size: 13px;
+        font-weight: 800;
+        margin-bottom: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+    }
+
+    .shortcut-help-bar span {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    @media (max-width: 767px) {
+        .shortcut-actions {
+            justify-content: flex-start;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+
+        .shortcut-action-box {
+            min-width: 96px;
+        }
+
+        .shortcut-btn {
+            min-width: 92px;
+        }
+    }
+
     .view-info-card {
         border: 1px solid var(--border-soft);
         border-radius: 16px;
@@ -771,6 +1493,13 @@ $pageAccessLabel = $hasAllJobCardAccess
                         </div>
                     </div>
 
+                    <?php if ($roleKey === 'screen_printing'): ?>
+                    <div class="shortcut-help-bar">
+                        <span><i data-lucide="info"></i> Start: Complete Enquiry → Master Copy Received and open Printing.</span>
+                        <span>Complete: Complete Printing → Send to Dispatch.</span>
+                    </div>
+                    <?php endif; ?>
+
                     <div class="table-responsive desktop-table">
                         <table class="table-ui" id="dataTable">
                             <thead>
@@ -867,12 +1596,55 @@ $pageAccessLabel = $hasAllJobCardAccess
 
                                     <td><?= e(jcDate($row['delivery_date'] ?? null)) ?></td>
 
+                                    <?php
+                                        $showScreenShortcut = $roleKey === 'screen_printing' && jcIsReadymadeScreenJob($row);
+                                        $shortcutState = $showScreenShortcut ? jcReadymadeScreenShortcutState($conn, (int)$row['id']) : [];
+                                        $showScreenShortcut = $showScreenShortcut && !empty($shortcutState['eligible']);
+                                    ?>
                                     <td class="text-end">
-                                        <a href="job_card_view.php?id=<?= e($row['id']) ?>"
-                                            class="btn btn-sm btn-outline-secondary rounded-circle btn-action-icon"
-                                            title="View Job Card" aria-label="View Job Card">
-                                            <i data-lucide="eye"></i>
-                                        </a>
+                                        <div class="shortcut-actions">
+                                            <?php if ($showScreenShortcut): ?>
+                                            <form method="post" class="shortcut-form">
+                                                <input type="hidden" name="csrf_token" value="<?= e($shortcutCsrfToken) ?>">
+                                                <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
+                                                <input type="hidden" name="action" value="readymade_screen_start">
+                                                <div class="shortcut-action-box">
+                                                    <button type="submit"
+                                                        class="btn btn-sm shortcut-btn start"
+                                                        <?= !empty($shortcutState['start_enabled']) ? '' : 'disabled' ?>
+                                                        onclick="return confirm('Start this readymade screen printing job? This will complete stages up to Master Copy Received and open Printing.');">
+                                                        <i data-lucide="play"></i> Start
+                                                    </button>
+                                                    <small class="shortcut-note <?= !empty($shortcutState['started']) ? 'green' : '' ?>">
+                                                        <?= e($shortcutState['start_label'] ?? 'Not Started') ?>
+                                                    </small>
+                                                </div>
+                                            </form>
+
+                                            <form method="post" class="shortcut-form">
+                                                <input type="hidden" name="csrf_token" value="<?= e($shortcutCsrfToken) ?>">
+                                                <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
+                                                <input type="hidden" name="action" value="readymade_screen_complete">
+                                                <div class="shortcut-action-box">
+                                                    <button type="submit"
+                                                        class="btn btn-sm shortcut-btn complete"
+                                                        <?= !empty($shortcutState['complete_enabled']) ? '' : 'disabled' ?>
+                                                        onclick="return confirm('Complete this readymade screen printing job? This will complete stages from Printing to Send to Dispatch.');">
+                                                        <i data-lucide="check"></i> Complete
+                                                    </button>
+                                                    <small class="shortcut-note <?= !empty($shortcutState['completed']) ? 'done' : (!empty($shortcutState['complete_enabled']) ? 'blue' : '') ?>">
+                                                        <?= e($shortcutState['complete_label'] ?? 'Disabled') ?>
+                                                    </small>
+                                                </div>
+                                            </form>
+                                            <?php endif; ?>
+
+                                            <a href="job_card_view.php?id=<?= e($row['id']) ?>"
+                                                class="btn btn-sm btn-outline-secondary rounded-circle btn-action-icon"
+                                                title="View Job Card" aria-label="View Job Card">
+                                                <i data-lucide="eye"></i>
+                                            </a>
+                                        </div>
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
@@ -924,7 +1696,46 @@ $pageAccessLabel = $hasAllJobCardAccess
                                 <strong><?= (int)$progressPercent ?>%</strong>
                             </div>
 
-                            <div class="mobile-card-actions">
+                            <?php
+                                $showScreenShortcut = $roleKey === 'screen_printing' && jcIsReadymadeScreenJob($row);
+                                $shortcutState = $showScreenShortcut ? jcReadymadeScreenShortcutState($conn, (int)$row['id']) : [];
+                                $showScreenShortcut = $showScreenShortcut && !empty($shortcutState['eligible']);
+                            ?>
+                            <div class="mobile-card-actions shortcut-actions">
+                                <?php if ($showScreenShortcut): ?>
+                                <form method="post" class="shortcut-form">
+                                    <input type="hidden" name="csrf_token" value="<?= e($shortcutCsrfToken) ?>">
+                                    <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
+                                    <input type="hidden" name="action" value="readymade_screen_start">
+                                    <div class="shortcut-action-box">
+                                        <button type="submit" class="btn btn-sm shortcut-btn start"
+                                            <?= !empty($shortcutState['start_enabled']) ? '' : 'disabled' ?>
+                                            onclick="return confirm('Start this readymade screen printing job?');">
+                                            <i data-lucide="play"></i> Start
+                                        </button>
+                                        <small class="shortcut-note <?= !empty($shortcutState['started']) ? 'green' : '' ?>">
+                                            <?= e($shortcutState['start_label'] ?? 'Not Started') ?>
+                                        </small>
+                                    </div>
+                                </form>
+
+                                <form method="post" class="shortcut-form">
+                                    <input type="hidden" name="csrf_token" value="<?= e($shortcutCsrfToken) ?>">
+                                    <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
+                                    <input type="hidden" name="action" value="readymade_screen_complete">
+                                    <div class="shortcut-action-box">
+                                        <button type="submit" class="btn btn-sm shortcut-btn complete"
+                                            <?= !empty($shortcutState['complete_enabled']) ? '' : 'disabled' ?>
+                                            onclick="return confirm('Complete this readymade screen printing job?');">
+                                            <i data-lucide="check"></i> Complete
+                                        </button>
+                                        <small class="shortcut-note <?= !empty($shortcutState['completed']) ? 'done' : (!empty($shortcutState['complete_enabled']) ? 'blue' : '') ?>">
+                                            <?= e($shortcutState['complete_label'] ?? 'Disabled') ?>
+                                        </small>
+                                    </div>
+                                </form>
+                                <?php endif; ?>
+
                                 <a href="job_card_view.php?id=<?= e($row['id']) ?>"
                                     class="btn btn-sm btn-outline-secondary rounded-circle btn-action-icon"
                                     title="View Job Card" aria-label="View Job Card">
