@@ -779,17 +779,12 @@ foreach ($rows as $statRow) {
                                                 <i data-lucide="eye"></i>
                                             </a>
 
-                                            <a title="FPDF Proforma" aria-label="FPDF Proforma"
+                                            <a title="PDF Proforma" aria-label="PDF Proforma"
                                                 href="proforma_bill_pdf.php?id=<?= (int)$row['id'] ?>" target="_blank"
                                                 class="btn btn-sm btn-outline-dark rounded-circle fw-bold btn-action-icon">
                                                 <i data-lucide="file-text"></i>
                                             </a>
 
-                                            <a title="Fallback Print" aria-label="Fallback Print"
-                                                href="proforma_bill_pdf.php?id=<?= (int)$row['id'] ?>&fallback=html" target="_blank"
-                                                class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon">
-                                                <i data-lucide="printer"></i>
-                                            </a>
 
                                             <?php if ($canEdit): ?>
                                             <a title="Edit" aria-label="Edit" href="<?= e($editUrl) ?>"
@@ -885,15 +880,11 @@ foreach ($rows as $statRow) {
                                     class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon"><i
                                         data-lucide="eye"></i></a>
 
-                                <a title="FPDF Proforma" aria-label="FPDF Proforma"
+                                <a title="PDF Proforma" aria-label="PDF Proforma"
                                     href="proforma_bill_pdf.php?id=<?= (int)$row['id'] ?>" target="_blank"
                                     class="btn btn-sm btn-outline-dark rounded-circle fw-bold btn-action-icon"><i
                                         data-lucide="file-text"></i></a>
 
-                                <a title="Fallback Print" aria-label="Fallback Print"
-                                    href="proforma_bill_pdf.php?id=<?= (int)$row['id'] ?>&fallback=html" target="_blank"
-                                    class="btn btn-sm btn-outline-secondary rounded-circle fw-bold btn-action-icon"><i
-                                        data-lucide="printer"></i></a>
 
                                 <?php if ($canEdit): ?>
                                 <a title="Edit" aria-label="Edit" href="<?= e($editUrl) ?>"

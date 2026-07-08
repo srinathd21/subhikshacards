@@ -47,6 +47,50 @@ function pbv_date($value): string
     return !empty($value) ? date('d-m-Y', strtotime((string)$value)) : '-';
 }
 
+
+function pbv_amount_summary(array $bill): array
+{
+    $subTotal = round((float)($bill['sub_total'] ?? 0), 2);
+    $discount = round((float)($bill['discount_amount'] ?? 0), 2);
+    $extra = round((float)($bill['card_extra_charge'] ?? 0), 2);
+    $packing = round((float)($bill['packing_charge'] ?? 0), 2);
+    $printing = round((float)($bill['printing_charge'] ?? 0), 2);
+    $gstPercent = round((float)($bill['gst_percent'] ?? 0), 2);
+    $storedFinal = round((float)($bill['final_amount'] ?? 0), 2);
+    $grossBeforeDiscount = round($subTotal + $extra + $packing + $printing, 2);
+    $calculatedFinal = round(max(0, $grossBeforeDiscount - $discount), 2);
+    $final = $storedFinal > 0 ? $storedFinal : $calculatedFinal;
+
+    $taxable = round((float)($bill['taxable_value'] ?? 0), 2);
+    $gstAmount = round((float)($bill['gst_amount'] ?? 0), 2);
+
+    if ($gstPercent > 0 && ($taxable <= 0 || abs(($taxable + $gstAmount) - $final) > 0.05)) {
+        $taxable = round($final / (1 + ($gstPercent / 100)), 2);
+        $gstAmount = round(max(0, $final - $taxable), 2);
+    } elseif ($taxable <= 0) {
+        $taxable = $final;
+        $gstAmount = 0.00;
+    } elseif ($gstAmount <= 0 && $final >= $taxable) {
+        $gstAmount = round($final - $taxable, 2);
+    }
+
+    return [
+        'sub_total' => $subTotal,
+        'discount' => $discount,
+        'extra' => $extra,
+        'packing' => $packing,
+        'printing' => $printing,
+        'gross_before_discount' => $grossBeforeDiscount,
+        'final' => $final,
+        'gst_percent' => $gstPercent,
+        'taxable' => $taxable,
+        'gst_amount' => $gstAmount,
+        'advance' => round((float)($bill['advance_amount'] ?? 0), 2),
+        'balance' => round((float)($bill['balance_amount'] ?? 0), 2),
+    ];
+}
+
+
 function pbv_datetime($value): string
 {
     return !empty($value) ? date('d-m-Y h:i A', strtotime((string)$value)) : '-';
@@ -573,6 +617,8 @@ if ($bill) {
     }
 }
 
+$amountSummary = $bill ? pbv_amount_summary($bill) : pbv_amount_summary([]);
+$gstInclusiveLabel = ($amountSummary['gst_percent'] > 0 ? number_format($amountSummary['gst_percent'], 2) . '% GST Inclusive' : 'GST Inclusive');
 $progressPercent = pbv_progress_percent($tracking);
 $progressCounts = pbv_progress_counts($tracking);
 $currentJob = $jobs[0] ?? null;
@@ -652,10 +698,8 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
                         <p class="text-muted-custom mb-0">Full details entered from Create Proforma page.</p>
                     </div>
                     <div class="d-flex gap-2 no-print">
-                        <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold" onclick="window.print()">Print</button>
                         <?php if ($bill): ?>
-                        <a href="proforma_bill_pdf.php?id=<?= (int)$id ?>" target="_blank" class="btn btn-outline-dark rounded-pill px-4 fw-bold">FPDF Proforma</a>
-                        <a href="proforma_bill_pdf.php?id=<?= (int)$id ?>&fallback=html" target="_blank" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Fallback Print</a>
+                        <a href="proforma_bill_pdf.php?id=<?= (int)$id ?>" target="_blank" class="btn btn-outline-dark rounded-pill px-4 fw-bold">PDF Proforma</a>
                         <?php endif; ?>
                         <a href="proforma_bills.php" class="btn btn-primary rounded-pill px-4 fw-bold">Back to List</a>
                     </div>
@@ -712,11 +756,16 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
                 <div class="view-section-title">Amount / Payment Summary</div>
                 <div class="row g-3">
                     <div class="col-md-2"><div class="info-box"><small>Total Qty</small><strong><?= e(number_format((float)($bill['total_qty'] ?? 0), 2)) ?></strong></div></div>
-                    <div class="col-md-2"><div class="info-box"><small>Sub Total</small><strong><?= e(pbv_money($bill['sub_total'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-2"><div class="info-box"><small>Discount</small><strong><?= e(pbv_money($bill['discount_amount'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-2"><div class="info-box"><small>Final Amount</small><strong><?= e(pbv_money($bill['final_amount'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-2"><div class="info-box"><small>Advance</small><strong><?= e(pbv_money($bill['advance_amount'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-2"><div class="info-box"><small>Balance</small><strong><?= e(pbv_money($bill['balance_amount'] ?? 0)) ?></strong></div></div>
+                    <div class="col-md-2"><div class="info-box"><small>Sub Total</small><strong><?= e(pbv_money($amountSummary['sub_total'])) ?></strong></div></div>
+                    <div class="col-md-2"><div class="info-box"><small>Printing Charge</small><strong><?= e(pbv_money($amountSummary['printing'])) ?></strong></div></div>
+                    <div class="col-md-2"><div class="info-box"><small>Plate / Additional</small><strong><?= e(pbv_money($amountSummary['extra'])) ?></strong></div></div>
+                    <div class="col-md-2"><div class="info-box"><small>Package Charge</small><strong><?= e(pbv_money($amountSummary['packing'])) ?></strong></div></div>
+                    <div class="col-md-2"><div class="info-box"><small>Discount</small><strong><?= e(pbv_money($amountSummary['discount'])) ?></strong></div></div>
+                    <div class="col-md-3"><div class="info-box"><small>Taxable Value</small><strong><?= e(pbv_money($amountSummary['taxable'])) ?></strong></div></div>
+                    <div class="col-md-3"><div class="info-box"><small>GST Amount</small><strong><?= e(pbv_money($amountSummary['gst_amount'])) ?></strong><span class="d-block text-muted-custom fw-bold small"><?= e($gstInclusiveLabel) ?></span></div></div>
+                    <div class="col-md-2"><div class="info-box"><small>Final Amount</small><strong><?= e(pbv_money($amountSummary['final'])) ?></strong></div></div>
+                    <div class="col-md-2"><div class="info-box"><small>Advance</small><strong><?= e(pbv_money($amountSummary['advance'])) ?></strong></div></div>
+                    <div class="col-md-2"><div class="info-box"><small>Balance</small><strong><?= e(pbv_money($amountSummary['balance'])) ?></strong></div></div>
                     <div class="col-12"><div class="info-box"><small>Remarks</small><strong><?= e($bill['remarks'] ?? '-') ?></strong></div></div>
                 </div>
             </div>
@@ -733,13 +782,14 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
                                 <th>Qty</th>
                                 <th>Rate</th>
                                 <th>Amount</th>
+                                <th>GST</th>
                                 <th>Printing</th>
                                 <th>Extra Details</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php if (!$items): ?>
-                            <tr><td colspan="8" class="text-center text-muted-custom">No items found.</td></tr>
+                            <tr><td colspan="9" class="text-center text-muted-custom">No items found.</td></tr>
                             <?php endif; ?>
                             <?php foreach ($items as $index => $item): ?>
                             <tr>
@@ -749,6 +799,7 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
                                 <td><?= e(number_format((float)($item['qty'] ?? 0), 2)) ?></td>
                                 <td><?= e(pbv_money($item['rate'] ?? 0)) ?></td>
                                 <td><?= e(pbv_money($item['amount'] ?? 0)) ?></td>
+                                <td><strong><?= e(number_format((float)$amountSummary['gst_percent'], 2)) ?>%</strong><small class="d-block text-muted-custom">Inclusive</small></td>
                                 <td>
                                     <strong><?= e($item['printing_name'] ?? '-') ?></strong>
                                     <small class="d-block text-muted-custom"><?= e($item['sub_type_name'] ?? '') ?></small>
