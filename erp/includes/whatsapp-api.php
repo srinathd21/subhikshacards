@@ -542,7 +542,7 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
             'enquiry_completed' => ['module' => 'Enquiries', 'variables' => ['customer_name', 'enquiry_no', 'function_type', 'order_type']],
             'followup_updated' => ['module' => 'Follow-ups', 'variables' => ['customer_name', 'enquiry_no', 'next_followup_date']],
             'quotation_created' => ['module' => 'Quotations', 'variables' => ['customer_name', 'quotation_no', 'function_type', 'number_of_items', 'item_details', 'price', 'final_price']],
-            'proforma_created' => ['module' => 'Proforma Bills', 'variables' => ['customer_name', 'proforma_no', 'product_name', 'order_type', 'final_amount', 'advance_amount', 'balance_amount', 'delivery_date']],
+            'proforma_created' => ['module' => 'Proforma Bills', 'variables' => ['customer_name', 'proforma_no', 'product_name', 'order_type', 'final_amount', 'advance_amount', 'balance_amount', 'delivery_date', 'proforma_pdf_link', 'invoice_link', 'proforma_download_link', 'customer_proforma_link', 'proforma_view_link']],
             'advance_payment_received' => ['module' => 'Payments', 'variables' => ['customer_name', 'proforma_no', 'paid_amount', 'payment_mode', 'balance_amount']],
             'job_card_created' => ['module' => 'Job Cards', 'variables' => ['customer_name', 'job_card_no', 'product_name', 'order_type', 'current_stage', 'delivery_date']],
             'designing_started' => ['module' => 'Job Tracking', 'variables' => ['customer_name', 'job_card_no']],

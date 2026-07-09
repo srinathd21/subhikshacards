@@ -1509,7 +1509,7 @@ function pb_whatsapp_pdf_url(mysqli $conn, array $row): string
 {
     $id = (int)($row['id'] ?? 0);
     if ($id <= 0) return '';
-    return pb_whatsapp_base_url($conn) . '/proforma_bill_pdf.php?id=' . $id;
+    return pb_whatsapp_base_url($conn) . '/proforma_bill_pdf.php?id=' . $id . '&public=1&download=1';
 }
 
 function pb_whatsapp_variables(mysqli $conn, array $row): array

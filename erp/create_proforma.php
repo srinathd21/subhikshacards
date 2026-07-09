@@ -681,7 +681,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
     .custom-only-field.hide-field,
     .screen-subtype-field.hide-field,
-    .colour-type-field.hide-field {
+    .colour-type-field.hide-field,
+    .lamination-type-wrap.hide-field {
         display: none !important;
     }
 
@@ -1428,6 +1429,15 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                             <option value="">Not Applicable</option>
                                         </select>
                                     </div>
+                                    <div class="col-md-4 readymade-field d-flex align-items-end">
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" name="finishing_required"
+                                                id="finishing_required" value="1">
+                                            <label class="form-check-label fw-bold" for="finishing_required">With
+                                                Finishing</label>
+                                        </div>
+                                    </div>
+
                                     <div class="col-md-4">
                                         <label class="form-label fw-bold">Delivery Date *</label>
                                         <input type="date" name="delivery_date" id="delivery_date" class="form-control">
@@ -1452,6 +1462,24 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                         <input type="text" name="gsm_thickness" id="gsm_thickness" class="form-control"
                                             placeholder="Eg: 300 GSM">
                                     </div>
+                                    <div
+                                        class="col-md-3 custom-only-field lamination-required-wrap d-flex align-items-end">
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" name="lamination_required"
+                                                id="lamination_required" value="1">
+                                            <label class="form-check-label fw-bold" for="lamination_required">Lamination
+                                                Required</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3 custom-only-field lamination-type-wrap hide-field">
+                                        <label class="form-label fw-bold">Lamination Type</label>
+                                        <select name="lamination_type" id="lamination_type" class="form-select">
+                                            <option value="none">None</option>
+                                            <option value="glossy">Glossy</option>
+                                            <option value="matte">Matte</option>
+                                            <option value="special">Special</option>
+                                        </select>
+                                    </div>
                                     <div class="col-md-3 custom-only-field">
                                         <label class="form-label fw-bold">Printing Side</label>
                                         <select name="printing_side" id="printing_side" class="form-select">
@@ -1469,23 +1497,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                         </select>
                                     </div>
 
-                                    <div class="col-md-3 custom-only-field d-flex align-items-end">
-                                        <div class="form-check form-switch mb-2">
-                                            <input class="form-check-input" type="checkbox" name="lamination_required"
-                                                id="lamination_required" value="1">
-                                            <label class="form-check-label fw-bold" for="lamination_required">Lamination
-                                                Required</label>
-                                        </div>
-                                    </div>
-                                    <div class="col-md-3 custom-only-field lamination-type-wrap">
-                                        <label class="form-label fw-bold">Lamination Type</label>
-                                        <select name="lamination_type" id="lamination_type" class="form-select">
-                                            <option value="none">None</option>
-                                            <option value="glossy">Glossy</option>
-                                            <option value="matte">Matte</option>
-                                            <option value="special">Special</option>
-                                        </select>
-                                    </div>
+
                                     <div class="col-md-3">
                                         <label class="form-label fw-bold">Quantity *</label>
                                         <input type="number" step="1" min="1" name="qty" id="qty" class="form-control"
@@ -1525,14 +1537,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                         </select>
                                     </div>
                                     <?php endif; ?>
-                                    <div class="col-md-4 readymade-field d-flex align-items-end">
-                                        <div class="form-check form-switch mb-2">
-                                            <input class="form-check-input" type="checkbox" name="finishing_required"
-                                                id="finishing_required" value="1">
-                                            <label class="form-check-label fw-bold" for="finishing_required">With
-                                                Finishing</label>
-                                        </div>
-                                    </div>
+
 
                                     <div class="col-12">
                                         <div id="pricingSummaryCard" class="pricing-summary-card no-price">
@@ -2192,6 +2197,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         updatePrintingTypeOptions();
         applyCustomizedDefaults(forceDefaults);
         updateScreenSubTypeVisibility();
+        toggleLamination();
         renderWorkflowSteps();
         calculate();
     }
@@ -2251,7 +2257,21 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     }
 
     function toggleLamination() {
-        const required = document.getElementById('lamination_required')?.checked === true;
+        const isCustomized = (getValue('order_type') || 'readymade') === 'customized';
+        const laminationCheckbox = document.getElementById('lamination_required');
+
+        document.querySelectorAll('.lamination-required-wrap').forEach(el => {
+            el.classList.toggle('hide-field', !isCustomized);
+        });
+
+        if (laminationCheckbox) {
+            laminationCheckbox.disabled = !isCustomized;
+            if (!isCustomized) {
+                laminationCheckbox.checked = false;
+            }
+        }
+
+        const required = isCustomized && laminationCheckbox?.checked === true;
         document.querySelectorAll('.lamination-type-wrap').forEach(el => el.classList.toggle('hide-field', !required));
         if (!required) {
             setValue('lamination_type', 'none');
@@ -2618,7 +2638,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     let pricingLookupController = null;
 
     function currentPricingPayload() {
-        const laminationRequired = document.getElementById('lamination_required')?.checked === true;
+        const isCustomized = (getValue('order_type') || 'readymade') === 'customized';
+        const laminationRequired = isCustomized && document.getElementById('lamination_required')?.checked === true;
         return {
             product_id: getValue('product_id'),
             product_name: getValue('product_name'),
@@ -2955,7 +2976,10 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     }
 
     document.querySelectorAll('.cash-denom-count').forEach(input => {
-        input.addEventListener('input', updateCashDenominationTotal);
+        input.addEventListener('input', () => {
+            advancePaymentConfirmed = false;
+            updateCashDenominationTotal();
+        });
     });
 
     function syncPaymentModeUI(openCashModal = false) {
@@ -3027,8 +3051,11 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         });
     });
 
+    /* Do not open Cash Denomination modal automatically when cash amount changes.
+       Modal must open only from the Cash Denomination button. */
     document.getElementById('cash_amount')?.addEventListener('change', () => {
-        maybeOpenAdvanceModalFromPaymentInput(false);
+        advancePaymentConfirmed = false;
+        calculate();
     });
 
     document.getElementById('openCashDenominationBtn')?.addEventListener('click', function() {
@@ -3060,7 +3087,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         }
     }
 
-    document.getElementById('advancePaymentContinueBtn')?.addEventListener('click', function() {
+    document.getElementById('advancePaymentContinueBtn')?.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
         const cash = currentCashAmount();
 
         if (cash > 0) {
@@ -3075,7 +3104,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         closeAdvancePaymentModal();
 
         advancePaymentConfirmed = true;
-        document.getElementById('proformaForm')?.requestSubmit();
+        showActionToast('Cash denomination saved. Now click Create Proforma Bill to save the proforma.',
+            'success', 'Cash Denomination');
     });
 
     window.addEventListener('beforeunload', function() {
@@ -3112,8 +3142,12 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
         if (!isEditSubmit && document.getElementById('pay_cash')?.checked && cashAmount > 0 && !
             advancePaymentConfirmed) {
-            openAdvancePaymentModal();
-            return;
+            const denomTotal = updateCashDenominationTotal();
+            if (Math.abs(denomTotal - cashAmount) > 0.009) {
+                showActionToast('Cash denomination is not saved. Click Cash Denomination, enter counts and save it before creating the proforma.', 'danger', 'Cash Denomination');
+                return;
+            }
+            advancePaymentConfirmed = true;
         }
 
         advancePaymentConfirmed = false;

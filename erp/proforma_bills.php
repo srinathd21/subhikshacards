@@ -122,12 +122,8 @@ function pb_fast_proforma_pdf_url(mysqli $conn, array $row): string
         }
     }
 
-    if ($path !== '') {
-        if (preg_match('#^https?://#i', $path)) return $path;
-        return pb_fast_base_url($conn) . '/' . ltrim($path, '/');
-    }
-
-    return $id > 0 ? pb_fast_base_url($conn) . '/proforma_bill_pdf.php?id=' . $id : '';
+    /* WhatsApp/customer link must always open the same Proforma Bill PDF endpoint without authentication. */
+    return $id > 0 ? pb_fast_base_url($conn) . '/proforma_bill_pdf.php?id=' . $id . '&public=1&download=1' : '';
 }
 
 function pb_fast_append_invoice_link(mysqli $conn, array $row, string $message): string
@@ -803,8 +799,7 @@ foreach ($rows as $statRow) {
 
                                             <?php if ($canSendWhatsapp): ?>
                                             <a title="Send WhatsApp" aria-label="Send WhatsApp"
-                                                href="<?= e(pb_fast_whatsapp_url($conn, $row)) ?>" target="_blank"
-                                                rel="noopener" data-id="<?= (int)$row['id'] ?>"
+                                                href="#" data-api-url="api/proforma_whatsapp_send.php" data-id="<?= (int)$row['id'] ?>"
                                                 class="btn btn-sm btn-whatsapp-icon rounded-circle fw-bold btn-action-icon js-proforma-whatsapp-link">
                                                 <?= pb_fast_whatsapp_svg() ?>
                                             </a>
@@ -901,7 +896,7 @@ foreach ($rows as $statRow) {
 
                                 <?php if ($canSendWhatsapp): ?>
                                 <a title="Send WhatsApp" aria-label="Send WhatsApp"
-                                    href="<?= e(pb_fast_whatsapp_url($conn, $row)) ?>" target="_blank" rel="noopener"
+                                    href="#" data-api-url="api/proforma_whatsapp_send.php"
                                     data-id="<?= (int)$row['id'] ?>"
                                     class="btn btn-sm btn-whatsapp-icon rounded-circle fw-bold btn-action-icon js-proforma-whatsapp-link"><?= pb_fast_whatsapp_svg() ?></a>
                                 <?php endif; ?>
@@ -1006,43 +1001,52 @@ foreach ($rows as $statRow) {
                 event.preventDefault();
 
                 const id = link.getAttribute('data-id') || '';
+                const apiUrl = link.getAttribute('data-api-url') || 'api/proforma_whatsapp_send.php';
+
                 if (!id) {
-                    if (link.href && link.href !== '#') window.open(link.href, '_blank',
-                    'noopener');
+                    showToast('Invalid proforma bill id.', 'danger', 'Failed');
                     return;
                 }
 
+                if (link.dataset.sending === '1') {
+                    return;
+                }
+
+                link.dataset.sending = '1';
+                link.classList.add('disabled');
+                link.setAttribute('aria-disabled', 'true');
+
                 const formData = new FormData();
                 formData.append('csrf_token', <?= json_encode($csrfToken) ?>);
-                formData.append('action', 'send_whatsapp_api');
+                formData.append('action', 'send_proforma_whatsapp');
                 formData.append('id', id);
 
-                fetch('api/proforma_bills.php', {
+                fetch(apiUrl, {
                         method: 'POST',
                         body: formData,
                         credentials: 'same-origin'
                     })
                     .then(response => response.json())
                     .then(data => {
-                        if (data.open_whatsapp_url) {
-                            window.open(data.open_whatsapp_url, '_blank', 'noopener');
-                        }
-
                         showToast(
                             data.message || (data.status ?
-                                'WhatsApp processed successfully.' :
-                                'WhatsApp sending failed.'),
+                                'Proforma bill sent through WhatsApp API.' :
+                                'WhatsApp API sending failed.'),
                             data.status ? 'success' : 'danger',
                             data.status ? 'Success' : 'Failed'
                         );
                     })
                     .catch(() => {
-                        if (link.href && link.href !== '#') {
-                            window.open(link.href, '_blank', 'noopener');
-                        }
                         showToast(
-                            'WhatsApp API request failed. Manual WhatsApp opened if available.',
-                            'warning', 'Warning');
+                            'WhatsApp API request failed. Please check API settings and internet connection.',
+                            'danger',
+                            'Failed'
+                        );
+                    })
+                    .finally(() => {
+                        link.dataset.sending = '0';
+                        link.classList.remove('disabled');
+                        link.removeAttribute('aria-disabled');
                     });
             });
         });
