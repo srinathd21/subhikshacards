@@ -700,6 +700,8 @@ $pageTitle = $bill ? 'View Proforma - ' . ($bill['proforma_no'] ?? '') : 'View P
                     <div class="d-flex gap-2 no-print">
                         <?php if ($bill): ?>
                         <a href="proforma_bill_pdf.php?id=<?= (int)$id ?>" target="_blank" class="btn btn-outline-dark rounded-pill px-4 fw-bold">PDF Proforma</a>
+                        <a href="proforma_bill_pdf.php?id=<?= (int)$id ?>&download=1" class="btn btn-outline-success rounded-pill px-4 fw-bold">Download PDF</a>
+                        <a href="customer_proforma_bill.php?id=<?= (int)$id ?>" target="_blank" class="btn btn-outline-primary rounded-pill px-4 fw-bold">Customer View</a>
                         <?php endif; ?>
                         <a href="proforma_bills.php" class="btn btn-primary rounded-pill px-4 fw-bold">Back to List</a>
                     </div>
