@@ -2276,7 +2276,11 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                     }
 
                     $reviewWhatsappResult = null;
-                    if ($newStatus === 'completed' && !jcvIsInternalMasterCopyStage($stepRow)) {
+
+                    // Google Review WhatsApp should be sent ONLY after the complete Job Card is completed.
+                    // Do not send it for individual workflow stage completion updates.
+                    // Example: Printing Completed / Packing Completed should send only stage template.
+                    if ($jobStatusKey === 'completed' && !jcvIsInternalMasterCopyStage($stepRow)) {
                         $reviewWhatsappResult = jcvSendJobCompletedReviewWhatsapp($conn, $job, $userId);
                     }
 
