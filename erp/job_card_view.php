@@ -512,8 +512,22 @@ function jcvPreviousStepAllowsUpdate(?array $previousStep): bool
     return !$previousStep;
 }
 
+function jcvIsInternalMasterCopyStage(array $step): bool
+{
+    $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
+    $stepName = strtolower(trim((string)($step['step_name'] ?? '')));
+
+    return in_array($stepKey, ['master_copy', 'master_copy_received'], true)
+        || strpos($stepKey, 'master_copy') !== false
+        || strpos($stepName, 'master copy') !== false;
+}
+
 function jcvIsApprovalStage(array $step): bool
 {
+    if (jcvIsInternalMasterCopyStage($step)) {
+        return false;
+    }
+
     $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
     return (int)($step['is_approval_step'] ?? 0) === 1
         || in_array($stepKey, ['proofing_approval', 'design_approval'], true);
@@ -685,6 +699,12 @@ function jcvIsDesignProofingStage(array $step, string $stepRoleKey = ''): bool
 
 function jcvRequiresDesignPhotoUpload(array $step, string $stepRoleKey = ''): bool
 {
+    // Master Copy / Master Copy Received are internal production stages.
+    // No customer approval photo upload is required.
+    if (jcvIsInternalMasterCopyStage($step)) {
+        return false;
+    }
+
     if (jcvIsApprovalStage($step)) {
         return false;
     }
@@ -1063,6 +1083,56 @@ function jcvSendPhotoApprovalByApi(mysqli $conn, array $job, array $step, array 
     return $result;
 }
 
+
+
+function jcvSendJobCompletedReviewWhatsapp(mysqli $conn, array $job, int $sentBy = 0): array
+{
+    $apiFile = __DIR__ . '/includes/whatsapp-api.php';
+    if (!is_file($apiFile)) {
+        return ['success' => false, 'message' => 'includes/whatsapp-api.php not found.'];
+    }
+
+    require_once $apiFile;
+
+    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
+        return ['success' => false, 'message' => 'WhatsApp API functions are missing.'];
+    }
+
+    $mobile = (string)($job['mobile'] ?? '');
+    if (trim($mobile) === '') {
+        return ['success' => false, 'message' => 'Customer mobile number missing.'];
+    }
+
+    $variables = [
+        'customer_name' => (string)($job['customer_name'] ?? 'Customer'),
+        'job_card_no' => (string)($job['job_card_no'] ?? '-'),
+        'google_review_link' => 'https://g.page/r/Cbl_oKAsDotpEBE/review',
+    ];
+
+    $meta = [
+        'related_module' => 'Job Card Completed Review',
+        'related_id' => (int)($job['id'] ?? 0),
+        'job_card_id' => (int)($job['id'] ?? 0),
+        'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
+        'sent_by' => $sentBy ?: (int)($_SESSION['user_id'] ?? 0),
+    ];
+
+    if (function_exists('subhiksha_send_template_whatsapp')) {
+        return subhiksha_send_template_whatsapp(
+            $conn,
+            'job_completed_review_request',
+            $mobile,
+            $variables,
+            $meta
+        );
+    }
+
+    $meta['mobile'] = $mobile;
+    $meta['template_key'] = 'job_completed_review_request';
+    $meta['variables'] = $variables;
+
+    return subhiksha_send_whatsapp($conn, $meta);
+}
 
 function jcvStageStatusLabel(string $status): string
 {
@@ -1776,6 +1846,10 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
         $stepRow = $stmt->get_result()->fetch_assoc();
         $stmt->close();
 
+        if ($stepRow && jcvIsInternalMasterCopyStage($stepRow)) {
+            throw new RuntimeException('Master Copy is an internal stage. Customer WhatsApp approval is not allowed.');
+        }
+
         if (!$stepRow) {
             throw new RuntimeException('Tracking stage not found.');
         }
@@ -2201,16 +2275,21 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                         $stmt->close();
                     }
 
+                    $reviewWhatsappResult = null;
+                    if ($newStatus === 'completed' && !jcvIsInternalMasterCopyStage($stepRow)) {
+                        $reviewWhatsappResult = jcvSendJobCompletedReviewWhatsapp($conn, $job, $userId);
+                    }
+
                     $trackingSendResult = null;
                     $skipCustomerWhatsapp = jcvIsInternalDispatchStageKey(
                         $stepRow['step_key'] ?? '',
                         $stepRow['step_name'] ?? ''
-                    );
+                    ) || jcvIsInternalMasterCopyStage($stepRow);
 
                     // For every normal customer-facing status update, send customer_tracking.php link to customer.
                     // Internal stages like Send to Dispatch / Ready for Dispatch must update status only; no WhatsApp.
                     // For proof/design completed with photo, the approval WhatsApp already contains both approval_link and tracking_link.
-                    if (!is_array($photoApprovalSendResult) && !$skipCustomerWhatsapp) {
+                    if (!is_array($photoApprovalSendResult) && !$skipCustomerWhatsapp && !is_array($reviewWhatsappResult)) {
                         $trackingSendResult = jcvSendTrackingUpdateByApi(
                             $conn,
                             $job,
