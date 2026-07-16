@@ -1,9 +1,17 @@
 <?php
 /**
  * proforma_bill_pdf.php
- * Preferred black-and-white Proforma Bill / Sales Order PDF.
- * Same endpoint is used for ERP print, public WhatsApp link, and customer download.
+ * Subhiksha Cards – dynamic wedding-style Proforma Bill PDF.
+ *
+ * Required background image:
+ *   assets/images/subhiksha_wedding_invoice_bg.png
+ *
+ * URL examples:
+ *   proforma_bill_pdf.php?id=1
+ *   proforma_bill_pdf.php?id=1&public=1
+ *   proforma_bill_pdf.php?id=1&public=1&download=1
  */
+
 require_once __DIR__ . '/includes/db.php';
 
 $publicAccess = isset($_GET['public']) && (string)$_GET['public'] === '1';
@@ -30,8 +38,10 @@ if (!$publicAccess) {
                         $allowed = true;
                         break;
                     }
-                } catch (Throwable $inner) {}
-            } catch (Throwable $e) {}
+                } catch (Throwable $inner) {
+                }
+            } catch (Throwable $e) {
+            }
         }
     }
 
@@ -65,14 +75,17 @@ function pbf_table_exists(mysqli $conn, string $table): bool
     }
 }
 
-function pbf_money($value): string
+function pbf_money_value($value): string
 {
-    return 'Rs. ' . number_format((float)$value, 2);
+    return number_format((float)$value, 2, '.', ',');
 }
 
-function pbf_num($value): string
+function pbf_qty($value): string
 {
-    return number_format((float)$value, 2);
+    $n = (float)$value;
+    return abs($n - round($n)) < 0.00001
+        ? number_format($n, 0, '.', ',')
+        : number_format($n, 2, '.', ',');
 }
 
 function pbf_date($value): string
@@ -80,11 +93,11 @@ function pbf_date($value): string
     return !empty($value) ? date('d-m-Y', strtotime((string)$value)) : '-';
 }
 
-function pbf_clean($value): string
+function pbf_clean($value, string $default = '-'): string
 {
     $value = trim((string)$value);
     $value = str_replace(["\r\n", "\r"], "\n", $value);
-    return $value === '' ? '-' : $value;
+    return $value === '' ? $default : $value;
 }
 
 function pbf_pdf_text($value): string
@@ -114,8 +127,6 @@ function pbf_load_fpdf(): void
         __DIR__ . '/libs/fpdf/fpdf.php',
         __DIR__ . '/includes/fpdf.php',
         __DIR__ . '/includes/fpdf/fpdf.php',
-        __DIR__ . '/admin/libs/fpdf.php',
-        __DIR__ . '/admin/libs/fpdf/fpdf.php',
         dirname(__DIR__) . '/libs/fpdf.php',
         dirname(__DIR__) . '/libs/fpdf/fpdf.php',
     ];
@@ -127,21 +138,25 @@ function pbf_load_fpdf(): void
         }
     }
 
-    throw new RuntimeException('FPDF library not found. Place fpdf.php in erp/assets/libs/fpdf.php. Checked: ' . implode(', ', $paths));
-}
-
-try {
-    pbf_load_fpdf();
-} catch (Throwable $e) {
-    http_response_code(500);
-    header('Content-Type: text/plain; charset=utf-8');
-    echo 'Unable to generate PDF. ' . $e->getMessage();
-    exit;
+    throw new RuntimeException('FPDF library not found. Place fpdf.php in assets/libs/fpdf/fpdf.php.');
 }
 
 function pbf_load_data(mysqli $conn, int $id): ?array
 {
-    $stmt = $conn->prepare("\n        SELECT\n            pb.*,\n            ft.function_name,\n            ps.status_name,\n            c.address AS customer_master_address,\n            c.gst_number AS customer_master_gst\n        FROM proforma_bills pb\n        LEFT JOIN function_types ft ON ft.id = pb.function_type_id\n        LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id\n        LEFT JOIN customers c ON c.id = pb.customer_id\n        WHERE pb.id = ?\n        LIMIT 1\n    ");
+    $stmt = $conn->prepare("
+        SELECT
+            pb.*,
+            ft.function_name,
+            ps.status_name,
+            c.address AS customer_master_address,
+            c.gst_number AS customer_master_gst
+        FROM proforma_bills pb
+        LEFT JOIN function_types ft ON ft.id = pb.function_type_id
+        LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
+        LEFT JOIN customers c ON c.id = pb.customer_id
+        WHERE pb.id = ?
+        LIMIT 1
+    ");
     $stmt->bind_param('i', $id);
     $stmt->execute();
     $bill = $stmt->get_result()->fetch_assoc();
@@ -150,7 +165,19 @@ function pbf_load_data(mysqli $conn, int $id): ?array
     if (!$bill) return null;
 
     $items = [];
-    $stmt = $conn->prepare("\n        SELECT\n            pbi.*,\n            p.product_name AS master_product_name,\n            pt.printing_name,\n            pst.sub_type_name\n        FROM proforma_bill_items pbi\n        LEFT JOIN products p ON p.id = pbi.product_id\n        LEFT JOIN printing_types pt ON pt.id = pbi.printing_type_id\n        LEFT JOIN printing_sub_types pst ON pst.id = pbi.printing_sub_type_id\n        WHERE pbi.proforma_bill_id = ?\n        ORDER BY pbi.sort_order ASC, pbi.id ASC\n    ");
+    $stmt = $conn->prepare("
+        SELECT
+            pbi.*,
+            p.product_name AS master_product_name,
+            pt.printing_name,
+            pst.sub_type_name
+        FROM proforma_bill_items pbi
+        LEFT JOIN products p ON p.id = pbi.product_id
+        LEFT JOIN printing_types pt ON pt.id = pbi.printing_type_id
+        LEFT JOIN printing_sub_types pst ON pst.id = pbi.printing_sub_type_id
+        WHERE pbi.proforma_bill_id = ?
+        ORDER BY pbi.sort_order ASC, pbi.id ASC
+    ");
     $stmt->bind_param('i', $id);
     $stmt->execute();
     $res = $stmt->get_result();
@@ -193,7 +220,6 @@ function pbf_amount_summary(array $bill): array
         'extra' => $extra,
         'packing' => $packing,
         'printing' => $printing,
-        'gross_before_discount' => $grossBeforeDiscount,
         'final' => $final,
         'gst_percent' => $gstPercent,
         'taxable' => $taxable,
@@ -203,290 +229,200 @@ function pbf_amount_summary(array $bill): array
     ];
 }
 
-class SubhikshaProformaPDF extends FPDF
+try {
+    pbf_load_fpdf();
+} catch (Throwable $e) {
+    http_response_code(500);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo 'Unable to generate PDF. ' . $e->getMessage();
+    exit;
+}
+
+class SubhikshaWeddingProformaPDF extends FPDF
 {
-    function Footer()
+    private string $background;
+
+    public function __construct(string $background)
     {
-        $this->SetY(-10);
-        $this->SetFont('Arial', 'I', 7);
-        $this->Cell(0, 5, pbf_pdf_text('Computer generated proforma invoice'), 0, 0, 'C');
+        parent::__construct('P', 'mm', [210, 280]); // exact 3:4 page ratio
+        $this->background = $background;
+        $this->SetMargins(0, 0, 0);
+        $this->SetAutoPageBreak(false);
     }
 
-    function NbLines($w, $txt): int
+    public function Header()
     {
-        $cw = $this->CurrentFont['cw'];
-        if ($w == 0) $w = $this->w - $this->rMargin - $this->x;
-        $wmax = ($w - 2 * $this->cMargin) * 1000 / $this->FontSize;
-        $s = str_replace("\r", '', pbf_pdf_text($txt));
-        $nb = strlen($s);
-        if ($nb > 0 && $s[$nb - 1] == "\n") $nb--;
-        $sep = -1;
-        $i = 0;
-        $j = 0;
-        $l = 0;
-        $nl = 1;
-        while ($i < $nb) {
-            $c = $s[$i];
-            if ($c == "\n") {
-                $i++;
-                $sep = -1;
-                $j = $i;
-                $l = 0;
-                $nl++;
-                continue;
-            }
-            if ($c == ' ') $sep = $i;
-            $l += $cw[$c] ?? 0;
-            if ($l > $wmax) {
-                if ($sep == -1) {
-                    if ($i == $j) $i++;
-                } else {
-                    $i = $sep + 1;
-                }
-                $sep = -1;
-                $j = $i;
-                $l = 0;
-                $nl++;
-            } else {
-                $i++;
-            }
+        if (is_file($this->background)) {
+            $this->Image($this->background, 0, 0, 210, 280);
         }
-        return $nl;
     }
 
-    function CheckPageBreak($h): void
+    public function fitText(float $x, float $y, float $w, float $h, string $text, float $maxSize = 8.5, string $style = ''): void
     {
-        if ($this->GetY() + $h > $this->PageBreakTrigger) $this->AddPage($this->CurOrientation);
+        $text = pbf_pdf_text($text);
+        $size = $maxSize;
+        do {
+            $this->SetFont('Arial', $style, $size);
+            if ($this->GetStringWidth($text) <= $w - 2 || $size <= 5.5) break;
+            $size -= 0.3;
+        } while ($size > 5.5);
+
+        $this->SetXY($x, $y);
+        $this->Cell($w, $h, $text, 0, 0, 'L');
     }
 
-    function Row(array $data, array $widths, array $aligns, float $lineHeight = 4.5, float $minHeight = 0): void
+    private function compactText(string $text, int $maxChars = 145): string
     {
-        $nb = 0;
-        foreach ($data as $i => $txt) $nb = max($nb, $this->NbLines($widths[$i], (string)$txt));
-        $h = max($minHeight, $lineHeight * $nb + 3);
-        $this->CheckPageBreak($h);
-        for ($i = 0; $i < count($data); $i++) {
-            $w = $widths[$i];
-            $a = $aligns[$i] ?? 'L';
-            $x = $this->GetX();
-            $y = $this->GetY();
-            $this->Rect($x, $y, $w, $h);
-            $this->SetXY($x, $y + 1.5);
-            $this->MultiCell($w, $lineHeight, pbf_pdf_text((string)$data[$i]), 0, $a);
-            $this->SetXY($x + $w, $y);
-        }
-        $this->Ln($h);
+        $text = preg_replace('/\s+/', ' ', trim(pbf_pdf_text($text)));
+        if (strlen($text) <= $maxChars) return $text;
+        return rtrim(substr($text, 0, $maxChars - 3)) . '...';
     }
 
-    function LabelValue($label, $value, $labelW, $valueW, $lineH = 5): void
+    public function itemRow(float $y, array $item, int $serial): void
     {
-        $x = $this->GetX();
-        $y = $this->GetY();
-        $this->SetFont('Arial', 'B', 8);
-        $this->Cell($labelW, $lineH, pbf_pdf_text((string)$label), 0, 0, 'L');
-        $this->SetFont('Arial', '', 8);
-        $this->MultiCell($valueW, $lineH, pbf_pdf_text((string)$value), 0, 'L');
-        $this->SetXY($x, max($this->GetY(), $y + $lineH));
+        $qty = (float)($item['qty'] ?? 0);
+        $rate = (float)($item['rate'] ?? 0);
+        $amount = round((float)($item['amount'] ?? ($qty * $rate)), 2);
+
+        $description = pbf_clean($item['item_name'] ?? $item['master_product_name'] ?? '', 'Item');
+        $details = [];
+        if (!empty($item['description']) && trim((string)$item['description']) !== trim($description)) $details[] = trim((string)$item['description']);
+        if (!empty($item['printing_name'])) $details[] = trim((string)$item['printing_name']);
+        if (!empty($item['sub_type_name'])) $details[] = trim((string)$item['sub_type_name']);
+        if (!empty($item['size_text'])) $details[] = 'Size ' . trim((string)$item['size_text']);
+        if (!empty($item['gsm_thickness'])) $details[] = 'GSM ' . trim((string)$item['gsm_thickness']);
+        if ((int)($item['lamination_required'] ?? 0) === 1 && !empty($item['lamination_type'])) $details[] = ucfirst((string)$item['lamination_type']) . ' lamination';
+        if (!empty($details)) $description .= ' - ' . implode(', ', array_unique($details));
+        $description = $this->compactText($description);
+
+        // Stronger, more readable item styling.
+        $this->SetTextColor(92, 18, 14);
+        $this->SetFont('Helvetica', 'B', 8.8);
+        $this->SetXY(11, $y + 1.2);
+        $this->Cell(20, 7, (string)$serial, 0, 0, 'C');
+
+        // Description is bold and wrapped inside its own column.
+        $this->SetFont('Helvetica', 'B', 8.2);
+        $this->SetXY(35.0, $y + 0.8);
+        $this->MultiCell(77.5, 4.3, $description, 0, 'L');
+
+        $this->SetFont('Helvetica', 'B', 8.8);
+        $this->SetXY(114, $y + 1.2);
+        $this->Cell(28, 7, pbf_qty($qty), 0, 0, 'C');
+        $this->SetXY(143, $y + 1.2);
+        $this->Cell(25, 7, pbf_money_value($rate), 0, 0, 'R');
+        $this->SetXY(169, $y + 1.2);
+        $this->Cell(29, 7, pbf_money_value($amount), 0, 0, 'R');
     }
 }
 
 try {
+    pbf_load_fpdf();
+
     $data = pbf_load_data($conn, $id);
     if (!$data) {
         http_response_code(404);
-        die('Proforma bill not found.');
+        die('Proforma Bill not found.');
     }
 
     $bill = $data['bill'];
     $items = $data['items'];
     $summary = pbf_amount_summary($bill);
-    $gstLabel = $summary['gst_percent'] > 0 ? number_format($summary['gst_percent'], 2) . '%' : '-';
-    $brideGroom = trim((string)($bill['bride_name'] ?? '') . ' / ' . (string)($bill['groom_name'] ?? ''), ' /');
 
-    $pdf = new SubhikshaProformaPDF('P', 'mm', 'A4');
+    $background = __DIR__ . '/assets/img/subhiksha_wedding_invoice_bg.png';
+    if (!is_file($background)) {
+        throw new RuntimeException('Invoice background image missing: assets/img/subhiksha_wedding_invoice_bg.png');
+    }
+
+    $pdf = new SubhikshaWeddingProformaPDF($background);
     $pdf->SetTitle('Proforma Bill - ' . (string)($bill['proforma_no'] ?? ''));
     $pdf->SetAuthor('Subhiksha Cards');
-    $pdf->SetMargins(12, 10, 12);
-    $pdf->SetAutoPageBreak(true, 14);
     $pdf->AddPage();
-    $pdf->SetDrawColor(0, 0, 0);
-    $pdf->SetTextColor(0, 0, 0);
-    $pdf->SetLineWidth(0.2);
 
-    // Outer border and top header exactly in the preferred classic style.
-    $pdf->Rect(12, 8, 186, 272);
-    $pdf->SetXY(16, 12);
-    $pdf->SetFont('Arial', '', 7);
-    $pdf->Cell(80, 4, pbf_pdf_text('Contact: 72006 02020, 72007 02020'), 0, 0, 'L');
-    $pdf->SetFont('Arial', 'B', 7);
-    $pdf->Cell(98, 4, pbf_pdf_text('GSTIN: 33AMRPA4225G1ZD'), 0, 1, 'R');
+    // Dynamic values over the reference template.
+    $pdf->SetTextColor(43, 46, 113);
+    $pdf->SetFont('Helvetica', 'B', 8.8);
+    $pdf->SetXY(20, 79.8);
+    $pdf->Cell(38, 6, pbf_pdf_text((string)($bill['proforma_no'] ?? '-')), 0, 0, 'L');
+    $pdf->SetXY(158, 79.8);
+    $pdf->Cell(36, 6, pbf_pdf_text(pbf_date($bill['created_at'] ?? date('Y-m-d'))), 0, 0, 'R');
 
-    $pdf->Ln(2);
-    $pdf->SetFont('Arial', 'B', 18);
-    $pdf->Cell(0, 9, pbf_pdf_text('SUBHIKSHA CARDS'), 0, 1, 'C');
-    $pdf->SetFont('Arial', 'B', 8);
-    $pdf->Cell(0, 5, pbf_pdf_text('A unit of Mani Paper Card Company'), 0, 1, 'C');
-    $pdf->SetFont('Arial', '', 7);
-    $pdf->Cell(0, 5, pbf_pdf_text('Dharmapuri'), 0, 1, 'C');
+    $bride = trim((string)($bill['bride_name'] ?? ''));
+    $groom = trim((string)($bill['groom_name'] ?? ''));
+    $couple = trim($bride . ($bride !== '' && $groom !== '' ? ' & ' : '') . $groom);
+    if ($couple === '') $couple = pbf_clean($bill['customer_name'] ?? '-', '-');
 
-    $pdf->SetY(38);
-    $pdf->Cell(186, 0, '', 'T', 1);
-    $pdf->SetFont('Arial', 'B', 11);
-    $pdf->Cell(186, 10, pbf_pdf_text('PROFORMA BILL / SALES ORDER'), 'B', 1, 'C');
+    $address = trim((string)(($bill['billing_address'] ?? '') ?: ($bill['customer_master_address'] ?? '')));
+    $mobile = trim((string)(($bill['billing_mobile'] ?? '') ?: ($bill['mobile'] ?? '')));
+    $addressMobile = trim($address . ($address !== '' && $mobile !== '' ? ' / ' : '') . $mobile);
 
-    $pdf->SetFont('Arial', 'B', 7);
-    $pdf->Cell(22, 8, pbf_pdf_text('No:'), 0, 0, 'L');
-    $pdf->SetFont('Arial', '', 8);
-    $pdf->Cell(78, 8, pbf_pdf_text(pbf_clean($bill['proforma_no'] ?? '-')), 0, 0, 'L');
-    $pdf->SetFont('Arial', 'B', 7);
-    $pdf->Cell(20, 8, pbf_pdf_text('Date:'), 0, 0, 'L');
-    $pdf->SetFont('Arial', '', 8);
-    $pdf->Cell(66, 8, pbf_pdf_text(pbf_date($bill['created_at'] ?? date('Y-m-d'))), 0, 1, 'L');
+    $pdf->SetTextColor(116, 23, 17);
+    $pdf->fitText(60, 90.0, 112, 6, $couple, 9.2, 'B');
+    $pdf->fitText(48, 99.7, 124, 6, pbf_date($bill['function_date'] ?? ''), 9.0, 'B');
+    $pdf->fitText(46, 109.5, 126, 6, pbf_clean($bill['venue'] ?? '-', '-'), 9.0, 'B');
+    $pdf->fitText(48, 119.3, 124, 6, pbf_clean($addressMobile, '-'), 8.4, 'B');
 
-    // Customer and order boxes.
-    $leftX = 16;
-    $rightX = 108;
-    $boxY = $pdf->GetY() + 2;
-    $boxW = 82;
-    $boxH = 39;
-    $pdf->SetFillColor(248, 248, 248);
-    $pdf->SetFont('Arial', 'B', 7);
-    $pdf->Rect($leftX, $boxY, $boxW, $boxH);
-    $pdf->Rect($rightX, $boxY, $boxW, $boxH);
-    $pdf->SetXY($leftX, $boxY);
-    $pdf->Cell($boxW, 8, pbf_pdf_text('CUSTOMER DETAILS'), 1, 0, 'C', true);
-    $pdf->SetXY($rightX, $boxY);
-    $pdf->Cell($boxW, 8, pbf_pdf_text('ORDER DETAILS'), 1, 1, 'C', true);
+    // Item rows. The designed table comfortably supports 10 lines.
+    $rowsPerPage = 8;
+    $chunks = array_chunk($items ?: [[]], $rowsPerPage);
+    $serial = 1;
 
-    $customerAddress = pbf_clean(($bill['billing_address'] ?? '') ?: ($bill['customer_master_address'] ?? '-'));
-    $customerGst = pbf_clean(($bill['gst_number'] ?? '') ?: ($bill['customer_master_gst'] ?? '-'));
-
-    $pdf->SetXY($leftX + 4, $boxY + 12);
-    $pdf->LabelValue('Name', pbf_clean($bill['billing_name'] ?? $bill['customer_name'] ?? '-'), 22, 52);
-    $pdf->LabelValue('Mobile', pbf_clean($bill['billing_mobile'] ?? $bill['mobile'] ?? '-'), 22, 52);
-    $pdf->LabelValue('GST', $customerGst, 22, 52);
-    $pdf->LabelValue('Address', $customerAddress, 22, 52, 4.3);
-
-    $pdf->SetXY($rightX + 4, $boxY + 12);
-    $pdf->LabelValue('Function', pbf_clean($bill['function_name'] ?? '-'), 27, 47);
-    $pdf->LabelValue('Bride/Groom', pbf_clean($brideGroom ?: '-'), 27, 47);
-    $pdf->LabelValue('Function Date', pbf_date($bill['function_date'] ?? ''), 27, 47);
-    $pdf->LabelValue('Delivery Date', pbf_date($bill['delivery_date'] ?? ''), 27, 47);
-
-    $pdf->SetY($boxY + $boxH + 6);
-
-    // Items table.
-    $widths = [8, 68, 15, 18, 23, 20, 34]; // total 186
-    $headers = ['#', 'Description', 'Qty', 'Rate', 'Amount', 'GST', 'Printing'];
-    $pdf->SetX(12);
-    $pdf->SetFont('Arial', 'B', 7);
-    $pdf->SetFillColor(245, 245, 245);
-    foreach ($headers as $i => $head) {
-        $pdf->Cell($widths[$i], 7, pbf_pdf_text($head), 1, 0, 'C', true);
-    }
-    $pdf->Ln();
-
-    $pdf->SetFont('Arial', '', 7);
-    if (!$items) {
-        $pdf->Cell(186, 10, pbf_pdf_text('No items found.'), 1, 1, 'C');
-    }
-
-    $itemMinHeight = count($items) <= 1 ? 58 : 22;
-    foreach ($items as $i => $item) {
-        $printing = trim((string)($item['printing_name'] ?? ''));
-        if (!empty($item['sub_type_name'])) $printing .= ' / ' . (string)$item['sub_type_name'];
-
-        $extraDetails = [];
-        if (!empty($item['size_text'])) $extraDetails[] = 'Size: ' . $item['size_text'];
-        if (!empty($item['gsm_thickness'])) $extraDetails[] = 'GSM: ' . $item['gsm_thickness'];
-        if (!empty($item['printing_side'])) $extraDetails[] = 'Side: ' . $item['printing_side'];
-        if (!empty($item['screening_type'])) $extraDetails[] = 'Scoring: ' . $item['screening_type'];
-        if ((int)($item['lamination_required'] ?? 0) === 1 && !empty($item['lamination_type']) && strtolower((string)$item['lamination_type']) !== 'none') {
-            $extraDetails[] = 'Lamination: ' . $item['lamination_type'];
+    foreach ($chunks as $pageIndex => $pageItems) {
+        if ($pageIndex > 0) {
+            $pdf->AddPage();
+            // Reprint the identifying values on continuation pages.
+            $pdf->SetTextColor(43, 46, 113);
+            $pdf->SetFont('Helvetica', 'B', 8.8);
+            $pdf->SetXY(20, 79.8);
+            $pdf->Cell(38, 6, pbf_pdf_text((string)($bill['proforma_no'] ?? '-')), 0, 0, 'L');
+            $pdf->SetXY(158, 79.8);
+            $pdf->Cell(36, 6, pbf_pdf_text(pbf_date($bill['created_at'] ?? date('Y-m-d'))), 0, 0, 'R');
+            $pdf->SetTextColor(116, 23, 17);
+            $pdf->fitText(60, 90.0, 112, 6, $couple, 9.2, 'B');
+            $pdf->fitText(48, 99.7, 124, 6, pbf_date($bill['function_date'] ?? ''), 9.0, 'B');
+            $pdf->fitText(46, 109.5, 126, 6, pbf_clean($bill['venue'] ?? '-', '-'), 9.0, 'B');
+            $pdf->fitText(48, 119.3, 124, 6, pbf_clean($addressMobile, '-'), 8.4, 'B');
         }
-        if (!empty($item['price_slab_text'])) $extraDetails[] = 'Slab: ' . $item['price_slab_text'];
 
-        $description = pbf_clean($item['item_name'] ?? $item['master_product_name'] ?? '-');
-        if (!empty($item['description'])) $description .= "\n" . pbf_clean($item['description']);
-        if ($extraDetails) $description .= "\n" . implode(' | ', $extraDetails);
+        $rowY = 145.5;
+        foreach ($pageItems as $item) {
+            if (!empty($item)) $pdf->itemRow($rowY, $item, $serial++);
+            $rowY += 10.0;
+        }
 
-        $qty = (float)($item['qty'] ?? 0);
-        $rate = (float)($item['rate'] ?? 0);
-        $amount = round((float)($item['amount'] ?? ($qty * $rate)), 2);
+        // Totals are shown only on the last page.
+        if ($pageIndex === count($chunks) - 1) {
+            $pdf->SetTextColor(116, 23, 17);
+            $pdf->SetFont('Helvetica', 'B', 8.4);
 
-        $pdf->SetX(12);
-        $pdf->Row([
-            (string)($i + 1),
-            $description,
-            number_format($qty, 0),
-            pbf_num($rate),
-            pbf_num($amount),
-            $gstLabel,
-            pbf_clean($printing ?: '-'),
-        ], $widths, ['C', 'L', 'C', 'R', 'R', 'C', 'L'], 4.2, $itemMinHeight);
-    }
+            // The label cell already displays "GST 18%", so show only the GST amount here.
+            $gstText = pbf_money_value($summary['gst_amount']);
 
-    // Keep the amount block in the same visual location for short invoices.
-    if ($pdf->GetY() < 166) $pdf->SetY(166);
-    $sectionY = $pdf->GetY() + 4;
+            // Use equal horizontal padding and lift each value slightly above the next row line.
+            // A shorter cell height prevents the baseline from sitting too close to the bottom border.
+            $summaryValueX = 169.5;
+            $summaryValueW = 28.5;
+            $summaryRowH   = 6.6;
 
-    // Remarks / terms on left.
-    $pdf->SetXY(16, $sectionY);
-    $pdf->SetFont('Arial', 'B', 8);
-    $pdf->Cell(88, 5, pbf_pdf_text('Remarks:'), 0, 1, 'L');
-    $pdf->SetX(16);
-    $pdf->SetFont('Arial', '', 7);
-    $pdf->MultiCell(88, 5, pbf_pdf_text(pbf_clean($bill['remarks'] ?? '-')), 0, 'L');
+            $pdf->SetXY($summaryValueX, 216.15);
+            $pdf->Cell($summaryValueW, $summaryRowH, pbf_pdf_text($gstText), 0, 0, 'C');
 
-    // Amount summary on right.
-    $summaryX = 112;
-    $summaryLabelW = 48;
-    $summaryAmountW = 30;
-    $pdf->SetXY($summaryX, $sectionY);
-    $summaryRows = [
-        ['Sub Total', $summary['sub_total'], false],
-        ['Plate / Additional', $summary['extra'], false],
-        ['Package Charge', $summary['packing'], false],
-        ['Printing Charge', $summary['printing'], false],
-        ['Gross Total', $summary['gross_before_discount'], false],
-        ['Discount', -1 * $summary['discount'], false],
-        ['Taxable Value', $summary['taxable'], true],
-        ['GST Amount @ ' . number_format($summary['gst_percent'], 2) . '%', $summary['gst_amount'], false],
-        ['GST Inclusive Amount', $summary['final'], true],
-        ['Advance Paid', $summary['advance'], false],
-        ['Balance Amount', $summary['balance'], true],
-    ];
+            $pdf->SetXY($summaryValueX, 224.25);
+            $pdf->Cell($summaryValueW, $summaryRowH, pbf_pdf_text(pbf_money_value($summary['final'])), 0, 0, 'C');
 
-    foreach ($summaryRows as $row) {
-        [$label, $value, $bold] = $row;
-        $pdf->SetX($summaryX);
-        $pdf->SetFont('Arial', $bold ? 'B' : '', 7.5);
-        $pdf->Cell($summaryLabelW, 6, pbf_pdf_text($label), 1, 0, 'R');
-        $amountText = ((float)$value < 0 ? '-Rs. ' : 'Rs. ') . number_format(abs((float)$value), 2);
-        $pdf->Cell($summaryAmountW, 6, pbf_pdf_text($amountText), 1, 1, 'R');
-    }
+            $pdf->SetXY($summaryValueX, 232.35);
+            $pdf->Cell($summaryValueW, $summaryRowH, pbf_pdf_text(pbf_money_value($summary['advance'])), 0, 0, 'C');
 
-    // Terms and signature.
-    $termsY = max($pdf->GetY() + 8, 242);
-    if ($termsY > 250) {
-        $pdf->AddPage();
-        $pdf->Rect(12, 8, 186, 272);
-        $termsY = 20;
-    }
-    $pdf->SetXY(16, $termsY);
-    $pdf->SetFont('Arial', 'B', 7);
-    $pdf->Cell(90, 5, pbf_pdf_text('Terms & Conditions:'), 0, 1, 'L');
-    $pdf->SetX(16);
-    $pdf->SetFont('Arial', '', 6.5);
-    $pdf->MultiCell(90, 4, pbf_pdf_text('Order once booked cannot be cancelled by the buyer at any circumstance. GST inclusive: taxable value and GST amount are shown separately inside the final amount.'), 0, 'L');
+            $pdf->SetXY($summaryValueX, 240.45);
+            $pdf->Cell($summaryValueW, $summaryRowH, pbf_pdf_text(pbf_money_value($summary['balance'])), 0, 0, 'C');
 
-    $signY = max($pdf->GetY() + 8, 260);
-    if ($signY < 268) {
-        $pdf->SetXY(136, $signY);
-        $pdf->Cell(48, 0, '', 'T', 1, 'C');
-        $pdf->SetXY(136, $signY + 4);
-        $pdf->SetFont('Arial', 'B', 8);
-        $pdf->Cell(48, 5, pbf_pdf_text('For Subhiksha Cards'), 0, 1, 'C');
+            if (!empty($bill['remarks'])) {
+                $pdf->SetTextColor(255, 255, 255);
+                $pdf->SetFont('Arial', '', 5.8);
+                $pdf->SetXY(7, 251.8);
+                $pdf->MultiCell(72, 3.4, pbf_pdf_text('Remarks: ' . trim((string)$bill['remarks'])), 0, 'L');
+            }
+        }
     }
 
     $filename = 'Proforma_' . preg_replace('/[^A-Za-z0-9_-]+/', '_', (string)($bill['proforma_no'] ?? $id)) . '.pdf';
