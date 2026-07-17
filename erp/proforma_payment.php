@@ -263,6 +263,52 @@ function pp_update_bill_and_job_amounts(mysqli $conn, int $proformaId, float $ne
 }
 
 
+
+function pp_payment_base_url(mysqli $conn): string
+{
+    try {
+        if (pp_table_exists($conn, 'system_settings')) {
+            $stmt = $conn->prepare("
+                SELECT setting_value
+                FROM system_settings
+                WHERE setting_key IN ('site_url','base_url','app_url')
+                  AND TRIM(setting_value) <> ''
+                ORDER BY FIELD(setting_key,'site_url','base_url','app_url')
+                LIMIT 1
+            ");
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            $configured = trim((string)($row['setting_value'] ?? ''));
+            if ($configured !== '') {
+                return rtrim($configured, '/');
+            }
+        }
+    } catch (Throwable $e) {
+        // Fall back to the current request URL below.
+    }
+
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (($_SERVER['SERVER_PORT'] ?? '') == 443);
+    $scheme = $https ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $scriptDir = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+
+    return rtrim($scheme . '://' . $host . ($scriptDir === '' || $scriptDir === '/' ? '' : $scriptDir), '/');
+}
+
+function pp_payment_proforma_pdf_url(mysqli $conn, int $proformaId): string
+{
+    if ($proformaId <= 0) {
+        return '';
+    }
+
+    return pp_payment_base_url($conn)
+        . '/proforma_bill_pdf.php?id=' . $proformaId
+        . '&public=1&download=1';
+}
+
 function pp_payment_whatsapp_money($value): string
 {
     return number_format((float)$value, 2, '.', '');
@@ -365,7 +411,13 @@ function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId)
         'total_paid' => pp_payment_whatsapp_money($row['advance_amount'] ?? 0),
         'payment_date' => !empty($row['payment_date']) ? date('d-m-Y', strtotime((string)$row['payment_date'])) : date('d-m-Y'),
         'reference_no' => trim((string)($row['reference_no'] ?? '-')) ?: '-',
-        'function_type' => trim((string)($row['function_name'] ?? '-')) ?: '-'
+        'function_type' => trim((string)($row['function_name'] ?? '-')) ?: '-',
+        'proforma_pdf_link' => $templateKey === 'payment_completed'
+            ? pp_payment_proforma_pdf_url($conn, $proformaId)
+            : '',
+        'invoice_link' => $templateKey === 'payment_completed'
+            ? pp_payment_proforma_pdf_url($conn, $proformaId)
+            : ''
     ];
 
     $meta = [
