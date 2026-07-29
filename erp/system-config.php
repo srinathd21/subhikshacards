@@ -15,6 +15,12 @@ $message = '';
 $messageType = 'success';
 $whatsappApiFile = __DIR__ . '/includes/whatsapp-api.php';
 
+if (!empty($_SESSION['settings_flash']) && is_array($_SESSION['settings_flash'])) {
+    $message = (string)($_SESSION['settings_flash']['message'] ?? '');
+    $messageType = (string)($_SESSION['settings_flash']['type'] ?? 'success');
+    unset($_SESSION['settings_flash']);
+}
+
 function st_post(string $key, string $default = ''): string
 {
     return trim((string)($_POST[$key] ?? $default));
@@ -24,6 +30,15 @@ function st_redirect(string $query = ''): void
 {
     header('Location: system-config.php' . ($query !== '' ? '?' . $query : ''));
     exit;
+}
+
+function st_flash_redirect(string $message, string $type = 'success'): void
+{
+    $_SESSION['settings_flash'] = [
+        'message' => $message,
+        'type' => $type
+    ];
+    st_redirect();
 }
 
 function st_digits(string $value): string
@@ -50,8 +65,21 @@ function st_get_setting(
          WHERE setting_key = ?
          LIMIT 1'
     );
-    $stmt->bind_param('s', $key);
-    $stmt->execute();
+
+    if (!$stmt) {
+        throw new RuntimeException(
+            'Unable to prepare the settings read query: ' . $conn->error
+        );
+    }
+
+    if (!$stmt->bind_param('s', $key) || !$stmt->execute()) {
+        $error = $stmt->error;
+        $stmt->close();
+        throw new RuntimeException(
+            'Unable to read the setting "' . $key . '": ' . $error
+        );
+    }
+
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
 
@@ -88,17 +116,110 @@ function st_upsert_setting(
             updated_by = VALUES(updated_by),
             updated_at = NOW()'
     );
-    $stmt->bind_param(
+
+    if (!$stmt) {
+        throw new RuntimeException(
+            'Unable to prepare the settings save query: ' . $conn->error
+        );
+    }
+
+    /*
+     * updated_by has a foreign key. Store NULL instead of an invalid user ID
+     * when a legacy session does not expose user_id.
+     */
+    $updatedBy = $userId > 0 ? $userId : null;
+
+    if (!$stmt->bind_param(
         'ssssii',
         $key,
         $value,
         $type,
         $description,
         $isPublic,
-        $userId
-    );
-    $stmt->execute();
+        $updatedBy
+    )) {
+        $error = $stmt->error;
+        $stmt->close();
+        throw new RuntimeException(
+            'Unable to bind the setting "' . $key . '": ' . $error
+        );
+    }
+
+    if (!$stmt->execute()) {
+        $error = $stmt->error;
+        $stmt->close();
+        throw new RuntimeException(
+            'Unable to save the setting "' . $key . '": ' . $error
+        );
+    }
+
     $stmt->close();
+}
+
+function st_verify_settings(mysqli $conn, array $expected): void
+{
+    foreach ($expected as $key => $expectedValue) {
+        $storedValue = st_get_setting($conn, (string)$key, "\0MISSING\0");
+        if ($storedValue !== (string)$expectedValue) {
+            throw new RuntimeException(
+                'Database verification failed for the setting "' . $key . '".'
+            );
+        }
+    }
+}
+
+function st_select_meta_phone(
+    array $phoneNumbers,
+    string $displayPhoneNumber
+): array {
+    if (empty($phoneNumbers)) {
+        throw new RuntimeException(
+            'No WhatsApp phone number is connected to this WABA.'
+        );
+    }
+
+    $targetDisplayNumber = st_digits($displayPhoneNumber);
+    $selectedPhone = null;
+
+    foreach ($phoneNumbers as $phone) {
+        if (
+            $targetDisplayNumber !== ''
+            && st_digits(
+                (string)($phone['display_phone_number'] ?? '')
+            ) === $targetDisplayNumber
+        ) {
+            $selectedPhone = $phone;
+            break;
+        }
+    }
+
+    if ($selectedPhone === null && count($phoneNumbers) === 1) {
+        $selectedPhone = $phoneNumbers[0];
+    }
+
+    if ($selectedPhone === null) {
+        $availableNumbers = [];
+        foreach ($phoneNumbers as $phone) {
+            $availableNumbers[] = (string)(
+                $phone['display_phone_number']
+                ?? $phone['id']
+                ?? 'Unknown'
+            );
+        }
+
+        throw new RuntimeException(
+            'Multiple phone numbers were found. Enter the correct display number or Phone Number ID. Available: '
+            . implode(', ', $availableNumbers)
+        );
+    }
+
+    if (st_digits((string)($selectedPhone['id'] ?? '')) === '') {
+        throw new RuntimeException(
+            'Meta returned a phone record without a Phone Number ID.'
+        );
+    }
+
+    return $selectedPhone;
 }
 
 function st_require_whatsapp_api(string $file): void
@@ -188,6 +309,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'meta_whatsapp_access_token',
                 ''
             );
+            $existingPhoneNumberId = st_digits(
+                st_get_setting(
+                    $conn,
+                    'meta_whatsapp_phone_number_id',
+                    ''
+                )
+            );
+
+            /*
+             * Leaving the Phone Number ID field blank must not erase a value
+             * that was already retrieved and saved.
+             */
+            if ($phoneNumberId === '') {
+                $phoneNumberId = $existingPhoneNumberId;
+            }
+
             $effectiveToken = (
                 $environmentToken !== false
                 && trim((string)$environmentToken) !== ''
@@ -279,7 +416,105 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $conn->commit();
             $transactionStarted = false;
-            st_redirect('msg=whatsapp-saved');
+
+            $expectedSettings = [
+                'whatsapp_provider' => 'meta_cloud',
+                'whatsapp_enabled' => $enabled,
+                'meta_whatsapp_business_account_id' => $businessAccountId,
+                'meta_whatsapp_display_phone_number' => $displayPhoneNumber,
+                'meta_whatsapp_phone_number_id' => $phoneNumberId,
+                'meta_whatsapp_graph_version' => $graphVersion,
+                'meta_whatsapp_language_code' => $languageCode
+            ];
+
+            if ($accessToken !== '') {
+                $expectedSettings['meta_whatsapp_access_token'] = $accessToken;
+            }
+
+            /*
+             * Read the values back from MySQL before showing success. This
+             * prevents a silent execute failure from producing a false
+             * whatsapp-saved message.
+             */
+            st_verify_settings($conn, $expectedSettings);
+
+            $phoneAutoRetrieved = false;
+
+            /*
+             * A Phone Number ID is required by the Messages API. When it is
+             * not entered, retrieve it from Meta immediately and save it to
+             * system_settings as part of this same setup action.
+             */
+            if ($enabled === '1' && $phoneNumberId === '') {
+                st_require_whatsapp_api($whatsappApiFile);
+
+                $phoneResult = subhiksha_meta_get_phone_numbers($conn);
+                if (empty($phoneResult['success'])) {
+                    throw new RuntimeException(
+                        'The credentials were saved in the database, but the Meta Phone Number ID could not be retrieved: '
+                        . (string)($phoneResult['message'] ?? 'Unknown error.')
+                    );
+                }
+
+                $selectedPhone = st_select_meta_phone(
+                    (array)($phoneResult['data'] ?? []),
+                    $displayPhoneNumber
+                );
+                $phoneNumberId = st_digits(
+                    (string)($selectedPhone['id'] ?? '')
+                );
+
+                $conn->begin_transaction();
+                $transactionStarted = true;
+
+                st_upsert_setting(
+                    $conn,
+                    'meta_whatsapp_phone_number_id',
+                    $phoneNumberId,
+                    'text',
+                    'Meta Phone Number ID used by the Messages API',
+                    0,
+                    $userId
+                );
+                st_upsert_setting(
+                    $conn,
+                    'meta_whatsapp_verified_name',
+                    (string)($selectedPhone['verified_name'] ?? ''),
+                    'text',
+                    'Meta verified WhatsApp business name',
+                    0,
+                    $userId
+                );
+                st_upsert_setting(
+                    $conn,
+                    'meta_whatsapp_quality_rating',
+                    (string)($selectedPhone['quality_rating'] ?? ''),
+                    'text',
+                    'Meta WhatsApp phone quality rating',
+                    0,
+                    $userId
+                );
+
+                $conn->commit();
+                $transactionStarted = false;
+
+                st_verify_settings($conn, [
+                    'meta_whatsapp_phone_number_id' => $phoneNumberId
+                ]);
+                $phoneAutoRetrieved = true;
+            }
+
+            if ($enabled === '1' && $phoneNumberId === '') {
+                throw new RuntimeException(
+                    'The settings were saved, but WhatsApp cannot be enabled without a Meta Phone Number ID.'
+                );
+            }
+
+            st_flash_redirect(
+                $phoneAutoRetrieved
+                    ? 'Meta WhatsApp settings and Phone Number ID were saved directly to the database.'
+                    : 'Meta WhatsApp settings were saved and verified in the database.'
+            );
         }
 
         if ($action === 'discover_phone_number') {
@@ -293,53 +528,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 );
             }
 
-            $phoneNumbers = (array)($phoneResult['data'] ?? []);
-            if (empty($phoneNumbers)) {
-                throw new RuntimeException(
-                    'No WhatsApp phone number is connected to this WABA.'
-                );
-            }
-
-            $targetDisplayNumber = st_digits(
+            $selectedPhone = st_select_meta_phone(
+                (array)($phoneResult['data'] ?? []),
                 st_get_setting(
                     $conn,
                     'meta_whatsapp_display_phone_number',
                     ''
                 )
             );
-            $selectedPhone = null;
-
-            foreach ($phoneNumbers as $phone) {
-                if (
-                    $targetDisplayNumber !== ''
-                    && st_digits(
-                        (string)($phone['display_phone_number'] ?? '')
-                    ) === $targetDisplayNumber
-                ) {
-                    $selectedPhone = $phone;
-                    break;
-                }
-            }
-
-            if ($selectedPhone === null && count($phoneNumbers) === 1) {
-                $selectedPhone = $phoneNumbers[0];
-            }
-
-            if ($selectedPhone === null) {
-                $availableNumbers = [];
-                foreach ($phoneNumbers as $phone) {
-                    $availableNumbers[] = (string)(
-                        $phone['display_phone_number']
-                        ?? $phone['id']
-                        ?? 'Unknown'
-                    );
-                }
-
-                throw new RuntimeException(
-                    'Multiple phone numbers were found. Enter the correct display number or Phone Number ID. Available: '
-                    . implode(', ', $availableNumbers)
-                );
-            }
 
             $resolvedPhoneId = st_digits(
                 (string)($selectedPhone['id'] ?? '')
@@ -383,7 +579,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $conn->commit();
             $transactionStarted = false;
-            st_redirect('msg=phone-discovered');
+            st_verify_settings($conn, [
+                'meta_whatsapp_phone_number_id' => $resolvedPhoneId
+            ]);
+            st_flash_redirect(
+                'Meta Phone Number ID was retrieved and saved directly to the database.'
+            );
         }
 
         if ($action === 'test_whatsapp') {
@@ -446,8 +647,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                      WHERE id = ?
                      LIMIT 1'
                 );
-                $existingStmt->bind_param('i', $id);
-                $existingStmt->execute();
+
+                if (!$existingStmt) {
+                    throw new RuntimeException(
+                        'Unable to prepare the setting lookup: ' . $conn->error
+                    );
+                }
+
+                if (
+                    !$existingStmt->bind_param('i', $id)
+                    || !$existingStmt->execute()
+                ) {
+                    $error = $existingStmt->error;
+                    $existingStmt->close();
+                    throw new RuntimeException(
+                        'Unable to load the setting: ' . $error
+                    );
+                }
+
                 $existingRow = $existingStmt
                     ->get_result()
                     ->fetch_assoc();
@@ -488,19 +705,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                          updated_at = NOW()
                      WHERE id = ?'
                 );
-                $stmt->bind_param(
+
+                if (!$stmt) {
+                    throw new RuntimeException(
+                        'Unable to prepare the setting update: ' . $conn->error
+                    );
+                }
+
+                $updatedBy = $userId > 0 ? $userId : null;
+
+                if (!$stmt->bind_param(
                     'ssssiii',
                     $key,
                     $value,
                     $type,
                     $description,
                     $isPublic,
-                    $userId,
+                    $updatedBy,
                     $id
-                );
-                $stmt->execute();
+                )) {
+                    $error = $stmt->error;
+                    $stmt->close();
+                    throw new RuntimeException(
+                        'Unable to bind the setting update: ' . $error
+                    );
+                }
+
+                if (!$stmt->execute()) {
+                    $error = $stmt->error;
+                    $stmt->close();
+                    throw new RuntimeException(
+                        'Unable to update the setting: ' . $error
+                    );
+                }
+
                 $stmt->close();
-                st_redirect('msg=updated');
+                st_verify_settings($conn, [$key => $value]);
+                st_flash_redirect(
+                    'Setting updated and verified in the database.'
+                );
             }
 
             $stmt = $conn->prepare(
@@ -517,18 +760,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     )
                  VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())'
             );
-            $stmt->bind_param(
+
+            if (!$stmt) {
+                throw new RuntimeException(
+                    'Unable to prepare the setting insert: ' . $conn->error
+                );
+            }
+
+            $updatedBy = $userId > 0 ? $userId : null;
+
+            if (!$stmt->bind_param(
                 'ssssii',
                 $key,
                 $value,
                 $type,
                 $description,
                 $isPublic,
-                $userId
-            );
-            $stmt->execute();
+                $updatedBy
+            )) {
+                $error = $stmt->error;
+                $stmt->close();
+                throw new RuntimeException(
+                    'Unable to bind the new setting: ' . $error
+                );
+            }
+
+            if (!$stmt->execute()) {
+                $error = $stmt->error;
+                $stmt->close();
+                throw new RuntimeException(
+                    'Unable to create the setting: ' . $error
+                );
+            }
+
             $stmt->close();
-            st_redirect('msg=created');
+            st_verify_settings($conn, [$key => $value]);
+            st_flash_redirect(
+                'Setting created and verified in the database.'
+            );
         }
     } catch (Throwable $e) {
         if ($transactionStarted) {
@@ -899,10 +1168,10 @@ if (is_file($whatsappApiFile)) {
                                 <label class="form-label fw-bold">Meta Phone Number ID</label>
                                 <input type="text" inputmode="numeric" name="meta_whatsapp_phone_number_id"
                                     class="form-control" value="<?= e($metaPhoneNumberId) ?>"
-                                    placeholder="Save settings, then use Retrieve Phone Number ID">
+                                    placeholder="Automatically retrieved when settings are saved">
                                 <span class="small-muted">
-                                    Do not enter the WABA ID here. This is the ID returned by the WABA phone_numbers
-                                    API.
+                                    Do not enter the WABA ID here. You may leave this blank; Save will retrieve and
+                                    store the Phone Number ID automatically.
                                 </span>
                             </div>
 
@@ -954,7 +1223,8 @@ if (is_file($whatsappApiFile)) {
                                 <div class="api-note">
                                     <strong>Important:</strong>
                                     WABA ID and Phone Number ID are different.
-                                    Save the WABA ID and token first. Then retrieve the correct Phone Number ID.
+                                    Saving the WABA ID and token automatically retrieves and stores the correct
+                                    Phone Number ID.
                                 </div>
                             </div>
 
