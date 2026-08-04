@@ -798,8 +798,9 @@ foreach ($rows as $statRow) {
                                             <?php endif; ?>
 
                                             <?php if ($canSendWhatsapp): ?>
-                                            <a title="Send WhatsApp" aria-label="Send WhatsApp"
-                                                href="#" data-api-url="api/proforma_whatsapp_send.php" data-id="<?= (int)$row['id'] ?>"
+                                            <a title="Send WhatsApp" aria-label="Send WhatsApp" href="#"
+                                                data-api-url="api/proforma_whatsapp_send.php"
+                                                data-id="<?= (int)$row['id'] ?>"
                                                 class="btn btn-sm btn-whatsapp-icon rounded-circle fw-bold btn-action-icon js-proforma-whatsapp-link">
                                                 <?= pb_fast_whatsapp_svg() ?>
                                             </a>
@@ -895,9 +896,8 @@ foreach ($rows as $statRow) {
                                 <?php endif; ?>
 
                                 <?php if ($canSendWhatsapp): ?>
-                                <a title="Send WhatsApp" aria-label="Send WhatsApp"
-                                    href="#" data-api-url="api/proforma_whatsapp_send.php"
-                                    data-id="<?= (int)$row['id'] ?>"
+                                <a title="Send WhatsApp" aria-label="Send WhatsApp" href="#"
+                                    data-api-url="api/proforma_whatsapp_send.php" data-id="<?= (int)$row['id'] ?>"
                                     class="btn btn-sm btn-whatsapp-icon rounded-circle fw-bold btn-action-icon js-proforma-whatsapp-link"><?= pb_fast_whatsapp_svg() ?></a>
                                 <?php endif; ?>
 
@@ -1001,7 +1001,8 @@ foreach ($rows as $statRow) {
                 event.preventDefault();
 
                 const id = link.getAttribute('data-id') || '';
-                const apiUrl = link.getAttribute('data-api-url') || 'api/proforma_whatsapp_send.php';
+                const apiUrl = link.getAttribute('data-api-url') ||
+                    'api/proforma_whatsapp_send.php';
 
                 if (!id) {
                     showToast('Invalid proforma bill id.', 'danger', 'Failed');

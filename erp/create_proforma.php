@@ -3144,7 +3144,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             advancePaymentConfirmed) {
             const denomTotal = updateCashDenominationTotal();
             if (Math.abs(denomTotal - cashAmount) > 0.009) {
-                showActionToast('Cash denomination is not saved. Click Cash Denomination, enter counts and save it before creating the proforma.', 'danger', 'Cash Denomination');
+                showActionToast(
+                    'Cash denomination is not saved. Click Cash Denomination, enter counts and save it before creating the proforma.',
+                    'danger', 'Cash Denomination');
                 return;
             }
             advancePaymentConfirmed = true;
