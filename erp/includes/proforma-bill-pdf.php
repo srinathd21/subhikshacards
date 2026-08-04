@@ -1,8 +1,9 @@
 <?php
 /**
  * includes/proforma-bill-pdf.php
- * Formal A4 black & white FPDF proforma invoice for Subhiksha Cards.
+ * Event-aware A4 FPDF proforma invoice for Subhiksha Cards.
  * FPDF expected path: /assets/libs/fpdf/fpdf.php
+ * Background: /assets/img/subhiksha_proforma_invoice_bg.png
  */
 
 if (!function_exists('sbp_table_exists')) {
@@ -122,6 +123,77 @@ if (!function_exists('sbp_date')) {
     }
 }
 
+if (!function_exists('sbp_time')) {
+    function sbp_time($value): string
+    {
+        if (empty($value)) return '-';
+        $timestamp = strtotime((string)$value);
+        return $timestamp !== false ? date('h:i A', $timestamp) : '-';
+    }
+}
+
+if (!function_exists('sbp_number')) {
+    function sbp_number($value): string
+    {
+        return number_format((float)$value, 2, '.', ',');
+    }
+}
+
+if (!function_exists('sbp_qty')) {
+    function sbp_qty($value): string
+    {
+        $number = (float)$value;
+        return abs($number - round($number)) < 0.00001
+            ? number_format($number, 0, '.', ',')
+            : number_format($number, 2, '.', ',');
+    }
+}
+
+if (!function_exists('sbp_clean')) {
+    function sbp_clean($value, string $default = '-'): string
+    {
+        $value = trim((string)$value);
+        $value = str_replace(["\r\n", "\r"], "\n", $value);
+        return $value === '' ? $default : $value;
+    }
+}
+
+if (!function_exists('sbp_amount_summary')) {
+    function sbp_amount_summary(array $bill): array
+    {
+        $subTotal = round((float)($bill['sub_total'] ?? 0), 2);
+        $discount = round((float)($bill['discount_amount'] ?? 0), 2);
+        $extra = round((float)($bill['card_extra_charge'] ?? 0), 2);
+        $packing = round((float)($bill['packing_charge'] ?? 0), 2);
+        $printing = round((float)($bill['printing_charge'] ?? 0), 2);
+        $gstPercent = round((float)($bill['gst_percent'] ?? 18), 2);
+        $storedFinal = round((float)($bill['final_amount'] ?? 0), 2);
+
+        $calculatedFinal = round(max(0, $subTotal + $extra + $packing + $printing - $discount), 2);
+        $final = $storedFinal > 0 ? $storedFinal : $calculatedFinal;
+        $taxable = round((float)($bill['taxable_value'] ?? 0), 2);
+        $gstAmount = round((float)($bill['gst_amount'] ?? 0), 2);
+
+        if ($gstPercent > 0 && ($taxable <= 0 || abs(($taxable + $gstAmount) - $final) > 0.05)) {
+            $taxable = round($final / (1 + ($gstPercent / 100)), 2);
+            $gstAmount = round(max(0, $final - $taxable), 2);
+        } elseif ($taxable <= 0) {
+            $taxable = $final;
+            $gstAmount = 0.00;
+        } elseif ($gstAmount <= 0 && $final >= $taxable) {
+            $gstAmount = round($final - $taxable, 2);
+        }
+
+        return [
+            'gst_percent' => $gstPercent,
+            'gst_amount' => $gstAmount,
+            'final' => $final,
+            'advance' => round((float)($bill['advance_amount'] ?? 0), 2),
+            'balance' => round((float)($bill['balance_amount'] ?? 0), 2),
+        ];
+    }
+}
+
 if (!function_exists('sbp_safe_filename')) {
     function sbp_safe_filename(string $name): string
     {
@@ -149,12 +221,27 @@ if (!function_exists('sbp_get_proforma_data')) {
     {
         if ($id <= 0 || !sbp_table_exists($conn, 'proforma_bills')) return null;
         try {
-            $stmt = $conn->prepare("\n                SELECT\n                    pb.*,\n                    ps.status_name,\n                    ft.function_name,\n                    q.quotation_no,\n                    e.enquiry_no,\n                    c.address AS customer_master_address,\n                    c.gst_number AS customer_master_gst\n                FROM proforma_bills pb\n                LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id\n                LEFT JOIN function_types ft ON ft.id = pb.function_type_id\n                LEFT JOIN quotations q ON q.id = pb.quotation_id\n                LEFT JOIN enquiries e ON e.id = pb.enquiry_id\n                LEFT JOIN customers c ON c.id = pb.customer_id\n                WHERE pb.id = ?\n                LIMIT 1\n            ");
+            $stmt = $conn->prepare("\n                SELECT\n                    pb.*,\n                    ps.status_name,\n                    ft.function_name,\n                    q.quotation_no,\n                    e.enquiry_no,\n                    c.address AS customer_master_address\n                FROM proforma_bills pb\n                LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id\n                LEFT JOIN function_types ft ON ft.id = pb.function_type_id\n                LEFT JOIN quotations q ON q.id = pb.quotation_id\n                LEFT JOIN enquiries e ON e.id = pb.enquiry_id\n                LEFT JOIN customers c ON c.id = pb.customer_id\n                WHERE pb.id = ?\n                LIMIT 1\n            ");
             $stmt->bind_param('i', $id);
             $stmt->execute();
             $bill = $stmt->get_result()->fetch_assoc();
             $stmt->close();
             if (!$bill) return null;
+
+            // Older installations did not select field_group in the main query.
+            // Load it separately so the invoice fields follow the selected event type.
+            $bill['field_group'] = 'other';
+            if (!empty($bill['function_type_id']) && sbp_col_exists($conn, 'function_types', 'field_group')) {
+                $functionTypeId = (int)$bill['function_type_id'];
+                $groupStmt = $conn->prepare("SELECT field_group FROM function_types WHERE id = ? LIMIT 1");
+                $groupStmt->bind_param('i', $functionTypeId);
+                $groupStmt->execute();
+                $groupRow = $groupStmt->get_result()->fetch_assoc();
+                $groupStmt->close();
+                if ($groupRow && trim((string)($groupRow['field_group'] ?? '')) !== '') {
+                    $bill['field_group'] = trim((string)$groupRow['field_group']);
+                }
+            }
 
             $items = [];
             $stmt = $conn->prepare("\n                SELECT\n                    pbi.*,\n                    p.product_name AS master_product_name,\n                    pt.printing_name,\n                    pst.sub_type_name\n                FROM proforma_bill_items pbi\n                LEFT JOIN products p ON p.id = pbi.product_id\n                LEFT JOIN printing_types pt ON pt.id = pbi.printing_type_id\n                LEFT JOIN printing_sub_types pst ON pst.id = pbi.printing_sub_type_id\n                WHERE pbi.proforma_bill_id = ?\n                ORDER BY pbi.sort_order ASC, pbi.id ASC\n            ");
@@ -179,7 +266,7 @@ if (!function_exists('sbp_get_proforma_data')) {
  */
 sbp_load_fpdf();
 
-class SubhikshaProformaInvoicePDF extends FPDF
+class SubhikshaLegacyProformaInvoicePDF extends FPDF
 {
     /* Do not use $w / $h property names here because FPDF already declares them. */
     private $contentMargin = 12.0;
@@ -253,10 +340,9 @@ class SubhikshaProformaInvoicePDF extends FPDF
         $this->Line($x + 6, $boxY + 10, $x + 90, $boxY + 10);
         $this->labelValue($x + 9, $boxY + 14, 25, 54, 'Name', $bill['customer_name'] ?? '-', 8);
         $this->labelValue($x + 9, $boxY + 23, 25, 54, 'Mobile', $bill['mobile'] ?? '-', 8);
-        $this->labelValue($x + 9, $boxY + 32, 25, 54, 'GST', ($bill['gst_number'] ?? '') ?: ($bill['customer_master_gst'] ?? '-'), 8);
         $address = ($bill['billing_address'] ?? '') ?: ($bill['customer_master_address'] ?? '-');
-        $this->fitCell($x + 9, $boxY + 40, 25, 5, 'Address', 8, 'B');
-        $this->multi($x + 34, $boxY + 40, 52, 3.8, $address ?: '-', 7);
+        $this->fitCell($x + 9, $boxY + 32, 25, 5, 'Address', 8, 'B');
+        $this->multi($x + 34, $boxY + 32, 52, 3.8, $address ?: '-', 7);
 
         $this->fitCell($x + 98, $boxY + 3, 80, 5, 'ORDER DETAILS', 8, 'B', 'C');
         $this->Line($x + 96, $boxY + 10, $x + 180, $boxY + 10);
@@ -339,6 +425,340 @@ class SubhikshaProformaInvoicePDF extends FPDF
     }
 }
 
+/**
+ * Current decorated invoice renderer.
+ * This is the only class used by both inline output and saved WhatsApp PDFs.
+ */
+class SubhikshaProformaInvoicePDF extends FPDF
+{
+    private $background;
+
+    public function __construct(string $background)
+    {
+        parent::__construct('P', 'mm', 'A4');
+        if (!is_file($background)) {
+            throw new RuntimeException('Invoice background image missing: assets/img/subhiksha_proforma_invoice_bg.png');
+        }
+        $this->background = $background;
+        $this->SetMargins(0, 0, 0);
+        $this->SetAutoPageBreak(false);
+    }
+
+    public function Header()
+    {
+        $this->Image($this->background, 0, 0, 210, 297);
+    }
+
+    public function Footer() {}
+
+    private function fitText(
+        float $x,
+        float $y,
+        float $w,
+        float $h,
+        string $text,
+        float $maxSize = 8.5,
+        string $style = '',
+        string $align = 'L'
+    ): void {
+        $text = sbp_pdf_text($text);
+        $size = $maxSize;
+        do {
+            $this->SetFont('Arial', $style, $size);
+            if ($this->GetStringWidth($text) <= $w - 2 || $size <= 5.5) break;
+            $size -= 0.3;
+        } while ($size > 5.5);
+
+        $this->SetXY($x, $y);
+        $this->Cell($w, $h, $text, 0, 0, $align);
+    }
+
+    private function invoiceIdentity(array $bill): void
+    {
+        // "No." is part of the original artwork. Only its value is dynamic.
+        $this->SetTextColor(40, 40, 40);
+        $this->fitText(29, 91.1, 72, 6, (string)($bill['proforma_no'] ?? '-'), 8.2, 'B');
+
+        // Cover the Tamil date caption while preserving the exact original UI.
+        $this->SetFillColor(255, 199, 26);
+        $this->Rect(151, 90.4, 45, 7.0, 'F');
+        $this->SetTextColor(204, 26, 24);
+        $this->SetFont('Arial', 'B', 8.2);
+        $this->SetXY(153, 91.0);
+        $this->Cell(13, 5.8, 'Date:', 0, 0, 'L');
+        $this->SetTextColor(40, 40, 40);
+        $this->fitText(165.5, 91.0, 29.5, 5.8, sbp_date($bill['created_at'] ?? date('Y-m-d')), 8.0, 'B', 'L');
+    }
+
+    private function detailPair(
+        float $y,
+        string $leftLabel,
+        string $leftValue,
+        string $rightLabel,
+        string $rightValue
+    ): void {
+        $this->SetTextColor(111, 31, 25);
+        $this->SetFont('Arial', 'B', 6.2);
+        $this->SetXY(14, $y + 0.7);
+        $this->Cell(40, 3.2, sbp_pdf_text($leftLabel), 0, 0, 'L');
+        $this->SetXY(107, $y + 0.7);
+        $this->Cell(40, 3.2, sbp_pdf_text($rightLabel), 0, 0, 'L');
+
+        $this->SetTextColor(35, 35, 35);
+        $this->fitText(14, $y + 3.6, 88, 5.2, sbp_clean($leftValue), 8.2, 'B');
+        $this->fitText(107, $y + 3.6, 88, 5.2, sbp_clean($rightValue), 8.2, 'B');
+    }
+
+    private function detailFull(float $y, string $label, string $value): void
+    {
+        $this->SetTextColor(111, 31, 25);
+        $this->SetFont('Arial', 'B', 6.2);
+        $this->SetXY(14, $y + 0.7);
+        $this->Cell(55, 3.2, sbp_pdf_text($label), 0, 0, 'L');
+
+        $this->SetTextColor(35, 35, 35);
+        $this->fitText(14, $y + 3.6, 181, 5.2, sbp_clean($value), 8.2, 'B');
+    }
+
+    private function dottedLine(float $x1, float $y, float $x2): void
+    {
+        $this->SetFillColor(211, 31, 28);
+        for ($x = $x1; $x <= $x2; $x += 1.35) {
+            $this->Rect($x, $y, 0.42, 0.42, 'F');
+        }
+    }
+
+    private function exactUiDetailLine(float $y, string $label, string $value, bool $compact = false): void
+    {
+        // Remove only the baked Tamil row, then rebuild the same dotted-line UI.
+        $rowHeight = $compact ? 4.1 : 5.6;
+        $cellHeight = $compact ? 3.8 : 5.2;
+        $lineOffset = $compact ? 3.6 : 4.7;
+        $labelSize = $compact ? 6.5 : 7.2;
+        $valueSize = $compact ? 7.0 : 7.4;
+
+        $this->SetFillColor(255, 199, 26);
+        $this->Rect(23.5, $y, 175.0, $rowHeight, 'F');
+
+        $this->SetTextColor(211, 31, 28);
+        $this->fitText(24.5, $y - 0.1, 36.0, $cellHeight, $label, $labelSize, 'B');
+        $this->dottedLine(61.0, $y + $lineOffset, 195.0);
+
+        $this->SetTextColor(35, 35, 35);
+        $this->fitText(62.0, $y - 0.2, 132.0, $cellHeight, sbp_clean($value), $valueSize, 'B');
+    }
+
+    private function drawOrderCheckboxes(string $orderType): void
+    {
+        $orderType = strtolower(trim($orderType));
+        $this->SetTextColor(85, 35, 24);
+        $this->SetFont('Arial', 'B', 5.5);
+        $this->SetXY(181.5, 104.2);
+        $this->Cell(17.5, 5, 'READYMADE', 0, 0, 'L');
+        $this->SetXY(181.5, 115.6);
+        $this->Cell(17.5, 5, 'CUSTOMIZED', 0, 0, 'L');
+
+        $this->SetTextColor(211, 31, 28);
+        $this->SetFont('Arial', 'B', 15);
+        if ($orderType === 'customized') {
+            $this->SetXY(173.5, 113.9);
+        } else {
+            $this->SetXY(173.5, 102.5);
+        }
+        $this->Cell(7, 7, 'X', 0, 0, 'C');
+    }
+
+    private function customerEventDetails(array $bill, array $items): void
+    {
+        $fieldGroup = strtolower(trim((string)($bill['field_group'] ?? 'other')));
+        $customerName = sbp_clean(($bill['billing_name'] ?? '') ?: ($bill['customer_name'] ?? '-'));
+        $mobile = trim((string)(($bill['billing_mobile'] ?? '') ?: ($bill['mobile'] ?? '')));
+        $address = trim((string)(($bill['billing_address'] ?? '') ?: ($bill['customer_master_address'] ?? '')));
+        $address = preg_replace('/\s+/', ' ', $address);
+        $functionName = trim((string)($bill['function_name'] ?? ''));
+        if ($functionName === '' && !empty($items[0])) {
+            $functionName = trim((string)(($items[0]['item_name'] ?? '') ?: ($items[0]['master_product_name'] ?? '')));
+        }
+        $functionName = sbp_clean($functionName);
+        $functionDate = sbp_date($bill['function_date'] ?? '');
+        $functionTime = sbp_time($bill['function_time'] ?? '');
+        $dateTime = $functionDate . ($functionTime !== '-' ? '  ' . $functionTime : '');
+        $venue = sbp_clean($bill['venue'] ?? '-');
+
+        // Clear all baked customer rows and checkbox artwork first so every
+        // field-group layout begins from the same aligned area.
+        $this->SetFillColor(255, 199, 26);
+        $this->Rect(23.5, 97.2, 175.0, 29.0, 'F');
+
+        if ($fieldGroup === 'wedding_reception') {
+            $bride = trim((string)($bill['bride_name'] ?? ''));
+            $groom = trim((string)($bill['groom_name'] ?? ''));
+            $this->exactUiDetailLine(97.4, 'BRIDE NAME:', $bride !== '' ? $bride : '-', true);
+            $this->exactUiDetailLine(101.5, 'GROOM NAME:', $groom !== '' ? $groom : '-', true);
+            $this->exactUiDetailLine(105.6, 'FUNCTION TYPE:', $functionName, true);
+            $this->exactUiDetailLine(109.7, 'FUNCTION DATE / TIME:', $dateTime, true);
+            $this->exactUiDetailLine(113.8, 'VENUE:', $venue, true);
+            $this->exactUiDetailLine(117.9, 'MOBILE:', $mobile !== '' ? $mobile : '-', true);
+            $this->exactUiDetailLine(122.0, 'ADDRESS:', $address !== '' ? $address : '-', true);
+            return;
+        }
+
+        if ($fieldGroup === 'event') {
+            $this->exactUiDetailLine(97.4, 'CUSTOMER NAME:', $customerName, true);
+            $this->exactUiDetailLine(102.1, 'FUNCTION TYPE:', $functionName, true);
+            $this->exactUiDetailLine(106.8, 'FUNCTION DATE / TIME:', $dateTime, true);
+            $this->exactUiDetailLine(111.5, 'VENUE:', $venue, true);
+            $this->exactUiDetailLine(116.2, 'MOBILE:', $mobile !== '' ? $mobile : '-', true);
+            $this->exactUiDetailLine(120.9, 'ADDRESS:', $address !== '' ? $address : '-', true);
+            return;
+        }
+
+        $this->exactUiDetailLine(98.0, 'CUSTOMER NAME:', $customerName);
+        $this->exactUiDetailLine(105.2, 'FUNCTION TYPE:', $functionName);
+        $this->exactUiDetailLine(112.4, 'MOBILE:', $mobile !== '' ? $mobile : '-');
+        $this->exactUiDetailLine(119.6, 'ADDRESS:', $address !== '' ? $address : '-');
+    }
+
+    private function tableFrame(): void
+    {
+        // Keep the exact white header and red table borders from the artwork.
+        // Only cover the baked Tamil captions and print English captions.
+        $this->SetFillColor(255, 255, 255);
+        $headers = [
+            [22.9, 19.5, 'S.NO'],
+            [43.2, 69.1, 'DESCRIPTION'],
+            [113.1, 24.1, 'QTY'],
+            [138.2, 21.9, 'RATE'],
+            [160.9, 25.0, 'AMOUNT'],
+        ];
+        foreach ($headers as $header) {
+            $this->Rect($header[0], 127.7, $header[1], 7.9, 'F');
+        }
+
+        $this->SetTextColor(199, 27, 24);
+        $this->SetFont('Arial', 'B', 7.6);
+        foreach ($headers as $header) {
+            $this->SetXY($header[0], 128.4);
+            $this->Cell($header[1], 6.5, $header[2], 0, 0, 'C');
+        }
+
+        // Remove the baked Tamil totals captions on every page. The last page
+        // receives the live English totals in totals().
+        $this->SetFillColor(255, 198, 26);
+        $totalRows = [
+            [235.5, 4.7],
+            [240.9, 5.0],
+            [246.6, 4.8],
+            [252.0, 5.2],
+        ];
+        foreach ($totalRows as $row) {
+            $this->Rect(138.2, $row[0], 21.9, $row[1], 'F');
+        }
+    }
+
+    private function compactText(string $text, int $maxChars = 95): string
+    {
+        $text = preg_replace('/\s+/', ' ', trim(sbp_pdf_text($text)));
+        if (strlen($text) <= $maxChars) return $text;
+        return rtrim(substr($text, 0, $maxChars - 3)) . '...';
+    }
+
+    private function itemRow(float $y, array $item, int $serial): void
+    {
+        $qty = (float)($item['qty'] ?? 0);
+        $rate = (float)($item['rate'] ?? 0);
+        $amount = round((float)($item['amount'] ?? ($qty * $rate)), 2);
+
+        $description = sbp_clean(($item['item_name'] ?? '') ?: ($item['master_product_name'] ?? ''), 'Item');
+        $details = [];
+        if (!empty($item['description']) && trim((string)$item['description']) !== trim($description)) $details[] = trim((string)$item['description']);
+        if (!empty($item['printing_name'])) $details[] = trim((string)$item['printing_name']);
+        if (!empty($item['sub_type_name'])) $details[] = trim((string)$item['sub_type_name']);
+        if (!empty($item['size_text'])) $details[] = 'Size ' . trim((string)$item['size_text']);
+        if (!empty($item['gsm_thickness'])) $details[] = 'GSM ' . trim((string)$item['gsm_thickness']);
+        if ((int)($item['lamination_required'] ?? 0) === 1 && !empty($item['lamination_type'])) $details[] = ucfirst((string)$item['lamination_type']) . ' lamination';
+        if ($details) $description .= ' - ' . implode(', ', array_unique($details));
+        $description = $this->compactText($description);
+
+        $this->SetTextColor(45, 37, 32);
+        $this->SetFont('Arial', '', 7.4);
+        $this->SetXY(22.7, $y + 0.6);
+        $this->Cell(20.1, 7.2, (string)$serial, 0, 0, 'C');
+
+        $this->SetFont('Arial', '', 6.9);
+        $this->SetXY(44.0, $y + 0.5);
+        $this->MultiCell(67.8, 3.2, sbp_pdf_text($description), 0, 'L');
+
+        $this->SetFont('Arial', '', 7.4);
+        $this->SetXY(113.0, $y + 0.6);
+        $this->Cell(24.2, 7.2, sbp_qty($qty), 0, 0, 'C');
+        $this->SetXY(138.0, $y + 0.6);
+        $this->Cell(22.0, 7.2, sbp_number($rate), 0, 0, 'R');
+        $this->SetXY(161.0, $y + 0.6);
+        $this->Cell(24.6, 7.2, sbp_number($amount), 0, 0, 'R');
+    }
+
+    private function totals(array $summary, string $remarks): void
+    {
+        $rows = [
+            ['GST ' . sbp_number($summary['gst_percent']) . '%', $summary['gst_amount']],
+            ['TOTAL', $summary['final']],
+            ['ADVANCE', $summary['advance']],
+            ['BALANCE', $summary['balance']],
+        ];
+
+        $rowTops = [235.5, 240.9, 246.6, 252.0];
+        $rowHeights = [4.7, 5.0, 4.8, 5.2];
+        $this->SetFillColor(255, 198, 26);
+        foreach ($rowTops as $index => $top) {
+            $this->Rect(138.2, $top, 21.9, $rowHeights[$index], 'F');
+        }
+
+        $this->SetTextColor(204, 26, 24);
+        $this->SetFont('Arial', 'B', 6.6);
+        foreach ($rows as $index => $row) {
+            $this->SetXY(138.4, $rowTops[$index] + 0.1);
+            $this->Cell(21.5, $rowHeights[$index], sbp_pdf_text($row[0]), 0, 0, 'R');
+
+            $this->SetTextColor(45, 37, 32);
+            $this->SetXY(160.9, $rowTops[$index] + 0.1);
+            $this->Cell(24.8, $rowHeights[$index], sbp_number($row[1]), 0, 0, 'R');
+            $this->SetTextColor(204, 26, 24);
+        }
+
+        if (trim($remarks) !== '') {
+            $this->SetTextColor(45, 37, 32);
+            $this->SetFont('Arial', '', 6.0);
+            $this->SetXY(24, 229.0);
+            $this->MultiCell(105, 3.2, sbp_pdf_text('Remarks: ' . trim($remarks)), 0, 'L');
+        }
+    }
+
+    public function draw(array $bill, array $items): void
+    {
+        $summary = sbp_amount_summary($bill);
+        $chunks = array_chunk($items ?: [[]], 9);
+        $serial = 1;
+
+        foreach ($chunks as $pageIndex => $pageItems) {
+            $this->AddPage('P', 'A4');
+            $this->invoiceIdentity($bill);
+            $this->customerEventDetails($bill, $items);
+            $this->tableFrame();
+
+            $rowY = 138.2;
+            foreach ($pageItems as $item) {
+                if (!empty($item)) $this->itemRow($rowY, $item, $serial++);
+                $rowY += 10.0;
+            }
+
+            if ($pageIndex === count($chunks) - 1) {
+                $this->totals($summary, (string)($bill['remarks'] ?? ''));
+            }
+        }
+    }
+}
+
 if (!function_exists('sbp_generate_proforma_pdf_file')) {
     function sbp_generate_proforma_pdf_file(mysqli $conn, int $id, bool $force = false): array
     {
@@ -349,16 +769,21 @@ if (!function_exists('sbp_generate_proforma_pdf_file')) {
         $bill = $data['bill'];
         $existingPath = (string)($bill['proforma_pdf_path'] ?? '');
         $root = dirname(__DIR__);
-        if (!$force && $existingPath !== '' && is_file($root . '/' . ltrim($existingPath, '/'))) {
+        $background = $root . '/assets/img/subhiksha_proforma_invoice_bg.png';
+        $isCurrentLayout = strpos(basename($existingPath), '_closer_title_value_v10_') !== false;
+        if (!$force && $isCurrentLayout && $existingPath !== '' && is_file($root . '/' . ltrim($existingPath, '/'))) {
             return ['path' => $existingPath, 'url' => sbp_base_url($conn) . '/' . ltrim($existingPath, '/'), 'filename' => basename($existingPath)];
         }
         $dir = $root . '/uploads/proforma_bills';
         if (!is_dir($dir) && !mkdir($dir, 0755, true)) throw new RuntimeException('Unable to create uploads/proforma_bills folder.');
         $proformaNo = (string)($bill['proforma_no'] ?? ('PROFORMA_' . $id));
-        $fileName = sbp_safe_filename($proformaNo) . '_' . date('YmdHis') . '.pdf';
+        $fileName = sbp_safe_filename($proformaNo) . '_closer_title_value_v10_' . date('YmdHis') . '.pdf';
         $abs = $dir . '/' . $fileName;
         $rel = 'uploads/proforma_bills/' . $fileName;
-        $pdf = new SubhikshaProformaInvoicePDF();
+        $pdf = new SubhikshaProformaInvoicePDF($background);
+        $pdf->SetTitle('Proforma Bill - ' . $proformaNo);
+        $pdf->SetAuthor('Subhiksha Cards');
+        $pdf->SetCreator('Subhiksha Cards Closer Title Value v10');
         $pdf->draw($bill, $data['items']);
         $pdf->Output('F', $abs);
         if (!is_file($abs)) throw new RuntimeException('PDF file was not generated.');
@@ -379,14 +804,23 @@ if (!function_exists('sbp_generate_proforma_pdf_file')) {
 }
 
 if (!function_exists('sbp_output_proforma_pdf_inline')) {
-    function sbp_output_proforma_pdf_inline(mysqli $conn, int $id): void
+    function sbp_output_proforma_pdf_inline(mysqli $conn, int $id, bool $download = false): void
     {
         sbp_load_fpdf();
         $data = sbp_get_proforma_data($conn, $id);
         if (!$data) throw new RuntimeException('Proforma bill not found.');
-        $pdf = new SubhikshaProformaInvoicePDF();
-        $pdf->draw($data['bill'], $data['items']);
         $proformaNo = (string)($data['bill']['proforma_no'] ?? ('PROFORMA_' . $id));
-        $pdf->Output('I', sbp_safe_filename($proformaNo) . '.pdf');
+        $background = dirname(__DIR__) . '/assets/img/subhiksha_proforma_invoice_bg.png';
+        $pdf = new SubhikshaProformaInvoicePDF($background);
+        $pdf->SetTitle('Proforma Bill - ' . $proformaNo);
+        $pdf->SetAuthor('Subhiksha Cards');
+        $pdf->SetCreator('Subhiksha Cards Closer Title Value v10');
+        $pdf->draw($data['bill'], $data['items']);
+
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+        header('X-Subhiksha-Proforma-Layout: closer-title-value-v10');
+        $pdf->Output($download ? 'D' : 'I', sbp_safe_filename($proformaNo) . '.pdf');
     }
 }

@@ -3460,7 +3460,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                                         <?php if (!empty($step['approval_id'])): ?>
                                         <div class="approval-grid">
                                             <div class="approval-mini">
-                                                <small>ID</small><strong><?= e($step['approval_id']) ?></strong></div>
+                                                <small>ID</small><strong><?= e($step['approval_id']) ?></strong>
+                                            </div>
                                             <div class="approval-mini"><small>Job Card
                                                     ID</small><strong><?= e($step['approval_job_card_id'] ?? '-') ?></strong>
                                             </div>

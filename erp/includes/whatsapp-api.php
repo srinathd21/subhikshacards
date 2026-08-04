@@ -13,7 +13,7 @@
  *         'customer_name' => $customerName,
  *         'enquiry_no' => $enquiryNo,
  *         'function_type' => $functionType,
- *         'order_type' => $orderType
+ *         'function_date' => $functionDate
  *     ],
  *     [
  *         'related_module' => 'Enquiries',
@@ -277,7 +277,7 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'customer_name',
                     'enquiry_no',
                     'function_type',
-                    'order_type'
+                    'function_date'
                 ]
             ],
             'followup_updated' => [
@@ -424,7 +424,6 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'customer_name',
                     'job_card_no',
                     'stage_name',
-                    'product_name',
                     'delivery_date',
                     'approval_link',
                     'tracking_link'
@@ -512,6 +511,7 @@ if (!function_exists('subhiksha_meta_variable_value')) {
 
         $aliases = [
             'function_type' => ['product_type', 'requirement'],
+            'function_date' => ['event_date', 'enquiry_function_date'],
             'next_followup_date' => ['next_callback_at', 'next_callback_date'],
             'number_of_items' => ['item_count', 'total_items', 'total_qty'],
             'price' => ['sub_total', 'subtotal'],

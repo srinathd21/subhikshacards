@@ -605,7 +605,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'customer_name' => 'Test Customer',
                     'enquiry_no' => 'TEST-0001',
                     'function_type' => 'Invitation Cards',
-                    'order_type' => 'Customized'
+                    'function_date' => date('d-m-Y')
                 ],
                 [
                     'related_module' => 'System Configuration',
@@ -909,7 +909,7 @@ if (is_file($whatsappApiFile)) {
 
     .master-page .page-head h1 {
         font-size: 30px;
-        font-weight: 900;
+        font-weight: 700;
         color: var(--text-main)
     }
 
@@ -935,13 +935,13 @@ if (is_file($whatsappApiFile)) {
         display: block;
         font-size: 12px;
         color: var(--text-muted);
-        font-weight: 900;
+        font-weight: 600;
         text-transform: uppercase
     }
 
     .master-stat-card strong {
         font-size: 22px;
-        font-weight: 900;
+        font-weight: 700;
         color: var(--text-main)
     }
 
@@ -951,7 +951,7 @@ if (is_file($whatsappApiFile)) {
 
     .master-title {
         font-size: 18px;
-        font-weight: 900;
+        font-weight: 700;
         color: var(--text-main);
         margin-bottom: 4px
     }
@@ -959,7 +959,7 @@ if (is_file($whatsappApiFile)) {
     .status-pill {
         display: inline-block;
         font-size: 11px;
-        font-weight: 900;
+        font-weight: 600;
         border-radius: 999px;
         padding: 5px 9px
     }
@@ -997,12 +997,12 @@ if (is_file($whatsappApiFile)) {
         margin-top: 3px;
         color: var(--text-muted);
         font-size: 11px;
-        font-weight: 700
+        font-weight: 500
     }
 
     .secret-value {
         letter-spacing: 2px;
-        font-weight: 900
+        font-weight: 600
     }
 
     .api-note {
@@ -1018,7 +1018,7 @@ if (is_file($whatsappApiFile)) {
 
     .template-code {
         font-size: 12px;
-        font-weight: 800;
+        font-weight: 600;
         color: var(--primary-color)
     }
 
@@ -1057,10 +1057,10 @@ if (is_file($whatsappApiFile)) {
                             </p>
                         </div>
                         <div class="d-flex flex-wrap gap-2">
-                            <a href="#whatsappSetup" class="btn btn-success rounded-pill px-4 fw-bold">
+                            <a href="#whatsappSetup" class="btn btn-success rounded-pill px-4 fw-semibold">
                                 Meta WhatsApp Setup
                             </a>
-                            <button id="newSettingBtn" class="btn btn-primary rounded-pill px-4 fw-bold"
+                            <button id="newSettingBtn" class="btn btn-primary rounded-pill px-4 fw-semibold"
                                 data-bs-toggle="modal" data-bs-target="#settingModal">
                                 New Setting
                             </button>
@@ -1069,7 +1069,7 @@ if (is_file($whatsappApiFile)) {
                 </div>
 
                 <?php if ($message): ?>
-                <div class="alert alert-<?= e($messageType) ?> rounded-4 fw-bold">
+                <div class="alert alert-<?= e($messageType) ?> rounded-4 fw-semibold">
                     <?= e($message) ?>
                 </div>
                 <?php endif; ?>
@@ -1143,14 +1143,14 @@ if (is_file($whatsappApiFile)) {
                                 <div class="form-check form-switch">
                                     <input class="form-check-input" type="checkbox" role="switch" id="whatsapp_enabled"
                                         name="whatsapp_enabled" value="1" <?= $waEnabled ? 'checked' : '' ?>>
-                                    <label class="form-check-label fw-bold" for="whatsapp_enabled">
+                                    <label class="form-check-label fw-semibold" for="whatsapp_enabled">
                                         Enable WhatsApp template messages
                                     </label>
                                 </div>
                             </div>
 
                             <div class="col-lg-6">
-                                <label class="form-label fw-bold">WhatsApp Business Account ID *</label>
+                                <label class="form-label fw-semibold">WhatsApp Business Account ID *</label>
                                 <input type="text" inputmode="numeric" name="meta_whatsapp_business_account_id"
                                     class="form-control" required value="<?= e($metaBusinessAccountId) ?>">
                                 <span class="small-muted">
@@ -1159,13 +1159,13 @@ if (is_file($whatsappApiFile)) {
                             </div>
 
                             <div class="col-lg-6">
-                                <label class="form-label fw-bold">Business Display Number</label>
+                                <label class="form-label fw-semibold">Business Display Number</label>
                                 <input type="text" name="meta_whatsapp_display_phone_number" class="form-control"
                                     value="<?= e($metaDisplayPhoneNumber) ?>" placeholder="+1 555-403-3998">
                             </div>
 
                             <div class="col-lg-6">
-                                <label class="form-label fw-bold">Meta Phone Number ID</label>
+                                <label class="form-label fw-semibold">Meta Phone Number ID</label>
                                 <input type="text" inputmode="numeric" name="meta_whatsapp_phone_number_id"
                                     class="form-control" value="<?= e($metaPhoneNumberId) ?>"
                                     placeholder="Automatically retrieved when settings are saved">
@@ -1176,7 +1176,7 @@ if (is_file($whatsappApiFile)) {
                             </div>
 
                             <div class="col-lg-6">
-                                <label class="form-label fw-bold">Access Token *</label>
+                                <label class="form-label fw-semibold">Access Token *</label>
                                 <div class="input-group">
                                     <input type="password" name="meta_whatsapp_access_token"
                                         id="meta_whatsapp_access_token" class="form-control" value=""
@@ -1196,25 +1196,25 @@ if (is_file($whatsappApiFile)) {
                             </div>
 
                             <div class="col-lg-3">
-                                <label class="form-label fw-bold">Graph API Version</label>
+                                <label class="form-label fw-semibold">Graph API Version</label>
                                 <input type="text" name="meta_whatsapp_graph_version" class="form-control"
                                     value="<?= e($metaGraphVersion) ?>" placeholder="v23.0">
                             </div>
 
                             <div class="col-lg-3">
-                                <label class="form-label fw-bold">Template Language</label>
+                                <label class="form-label fw-semibold">Template Language</label>
                                 <input type="text" name="meta_whatsapp_language_code" class="form-control"
                                     value="<?= e($metaLanguageCode) ?>" placeholder="en">
                             </div>
 
                             <div class="col-lg-3">
-                                <label class="form-label fw-bold">Verified Name</label>
+                                <label class="form-label fw-semibold">Verified Name</label>
                                 <input type="text" class="form-control" readonly value="<?= e($metaVerifiedName) ?>"
                                     placeholder="Available after Phone ID retrieval">
                             </div>
 
                             <div class="col-lg-3">
-                                <label class="form-label fw-bold">Quality Rating</label>
+                                <label class="form-label fw-semibold">Quality Rating</label>
                                 <input type="text" class="form-control" readonly value="<?= e($metaQualityRating) ?>"
                                     placeholder="Available after Phone ID retrieval">
                             </div>
@@ -1229,7 +1229,7 @@ if (is_file($whatsappApiFile)) {
                             </div>
 
                             <div class="col-12 text-end">
-                                <button class="btn btn-success rounded-pill px-4 fw-bold">
+                                <button class="btn btn-success rounded-pill px-4 fw-semibold">
                                     Save Meta WhatsApp Settings
                                 </button>
                             </div>
@@ -1248,7 +1248,7 @@ if (is_file($whatsappApiFile)) {
                         <form method="post">
                             <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                             <input type="hidden" name="action" value="discover_phone_number">
-                            <button class="btn btn-outline-primary rounded-pill px-4 fw-bold"
+                            <button class="btn btn-outline-primary rounded-pill px-4 fw-semibold"
                                 <?= $metaBusinessAccountId === '' || !$waAccessTokenConfigured ? 'disabled' : '' ?>>
                                 Retrieve Phone Number ID
                             </button>
@@ -1272,7 +1272,7 @@ if (is_file($whatsappApiFile)) {
                         <input type="hidden" name="action" value="test_whatsapp">
                         <div class="row g-3 align-items-end">
                             <div class="col-lg-8">
-                                <label class="form-label fw-bold">Recipient WhatsApp Number</label>
+                                <label class="form-label fw-semibold">Recipient WhatsApp Number</label>
                                 <input type="tel" name="test_mobile" class="form-control"
                                     placeholder="Example: 919876543210" value="<?= e(st_post('test_mobile')) ?>">
                                 <span class="small-muted">
@@ -1281,7 +1281,7 @@ if (is_file($whatsappApiFile)) {
                                 </span>
                             </div>
                             <div class="col-lg-4 d-grid">
-                                <button class="btn btn-outline-success rounded-pill fw-bold"
+                                <button class="btn btn-outline-success rounded-pill fw-semibold"
                                     <?= !$waConfigured || !$waEnabled ? 'disabled' : '' ?>>
                                     Send enquiry_completed Test
                                 </button>
@@ -1376,7 +1376,7 @@ if (is_file($whatsappApiFile)) {
                                         </span>
                                     </td>
                                     <td class="text-end">
-                                        <button class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-edit"
+                                        <button class="btn btn-sm btn-outline-primary rounded-pill fw-semibold js-edit"
                                             data-bs-toggle="modal" data-bs-target="#settingModal"
                                             data-id="<?= e($setting['id']) ?>"
                                             data-key="<?= e($setting['setting_key']) ?>"
@@ -1409,18 +1409,18 @@ if (is_file($whatsappApiFile)) {
                 <input type="hidden" name="id" id="id">
 
                 <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="modalTitle">New Setting</h5>
+                    <h5 class="modal-title fw-semibold" id="modalTitle">New Setting</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
 
                 <div class="modal-body">
                     <div class="row g-3">
                         <div class="col-md-6">
-                            <label class="form-label fw-bold">Setting Key *</label>
+                            <label class="form-label fw-semibold">Setting Key *</label>
                             <input name="setting_key" id="setting_key" required class="form-control">
                         </div>
                         <div class="col-md-6">
-                            <label class="form-label fw-bold">Type</label>
+                            <label class="form-label fw-semibold">Type</label>
                             <select name="setting_type" id="setting_type" class="form-select">
                                 <option>text</option>
                                 <option>number</option>
@@ -1431,32 +1431,32 @@ if (is_file($whatsappApiFile)) {
                             </select>
                         </div>
                         <div class="col-12">
-                            <label class="form-label fw-bold">Value</label>
+                            <label class="form-label fw-semibold">Value</label>
                             <textarea name="setting_value" id="setting_value" rows="3" class="form-control"></textarea>
                             <span id="secretHelp" class="small-muted d-none">
                                 Sensitive setting: leave blank to keep the current value.
                             </span>
                         </div>
                         <div class="col-12">
-                            <label class="form-label fw-bold">Description</label>
+                            <label class="form-label fw-semibold">Description</label>
                             <textarea name="description" id="description" rows="2" class="form-control"></textarea>
                         </div>
                         <div class="col-12">
                             <label class="form-check">
                                 <input type="checkbox" name="is_public" id="is_public" value="1"
                                     class="form-check-input">
-                                <span class="form-check-label fw-bold">Public</span>
+                                <span class="form-check-label fw-semibold">Public</span>
                             </label>
                         </div>
                     </div>
                 </div>
 
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold"
+                    <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-semibold"
                         data-bs-dismiss="modal">
                         Cancel
                     </button>
-                    <button class="btn btn-primary rounded-pill px-4 fw-bold">
+                    <button class="btn btn-primary rounded-pill px-4 fw-semibold">
                         Save Setting
                     </button>
                 </div>
