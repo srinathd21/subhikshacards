@@ -318,7 +318,7 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'balance_amount'
                 ]
             ],
-            'payment_completed' => [
+            'payment_completed_' => [
                 'module' => 'Payments',
                 'variables' => [
                     'customer_name',
@@ -327,8 +327,7 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'paid_amount',
                     'total_paid',
                     'balance_amount',
-                    'payment_date',
-                    'proforma_pdf_link'
+                    'payment_date'
                 ]
             ],
             'job_card_created' => [
@@ -428,15 +427,18 @@ if (!function_exists('subhiksha_wa_canonical_template_key')) {
      * is job_card_status; older job-card pages called the same message
      * job_stage_started.
      *
-     * advance_payment_received is deliberately NOT aliased to
-     * payment_recieved: those are different templates in this project.
+     * The approved completed-payment Meta template has a trailing underscore,
+     * so older calls using payment_completed are routed to payment_completed_.
+     * advance_payment_received is deliberately NOT aliased to payment_recieved;
+     * the payment page now calls the approved payment_recieved template directly.
      */
     function subhiksha_wa_canonical_template_key(string $templateKey): string
     {
         $templateKey = strtolower(trim($templateKey));
 
         $aliases = [
-            'job_stage_started' => 'job_card_status'
+            'job_stage_started' => 'job_card_status',
+            'payment_completed' => 'payment_completed_'
         ];
 
         return $aliases[$templateKey] ?? $templateKey;
@@ -904,6 +906,41 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                 $components[] = [
                     'type' => 'body',
                     'parameters' => $parameterResult['parameters']
+                ];
+            }
+
+            /*
+             * payment_completed_ has seven BODY variables. The Proforma PDF
+             * link belongs to the approved "Download Invoice" URL button and
+             * must be sent as a button component, not as an eighth BODY value.
+             */
+            if ($templateKey === 'payment_completed_') {
+                $invoiceLinkFound = false;
+                $invoiceLink = subhiksha_meta_variable_value(
+                    'proforma_pdf_link',
+                    $variables,
+                    $invoiceLinkFound
+                );
+
+                if (!$invoiceLinkFound || trim($invoiceLink) === '') {
+                    return subhiksha_wa_failed_result(
+                        $conn,
+                        $context,
+                        'WhatsApp template variables are incomplete.',
+                        'Missing template variable: proforma_pdf_link'
+                    );
+                }
+
+                $components[] = [
+                    'type' => 'button',
+                    'sub_type' => 'url',
+                    'index' => '0',
+                    'parameters' => [
+                        [
+                            'type' => 'text',
+                            'text' => $invoiceLink
+                        ]
+                    ]
                 ];
             }
 

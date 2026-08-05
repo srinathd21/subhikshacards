@@ -364,8 +364,8 @@ function pp_payment_whatsapp_row(mysqli $conn, int $proformaId, int $paymentId):
 function pp_payment_whatsapp_template_key(array $row): string
 {
     return ((float)($row['balance_amount'] ?? 0) <= 0.00001)
-        ? 'payment_completed'
-        : 'advance_payment_received';
+        ? 'payment_completed_'
+        : 'payment_recieved';
 }
 
 function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId): array
@@ -412,10 +412,10 @@ function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId)
         'payment_date' => !empty($row['payment_date']) ? date('d-m-Y', strtotime((string)$row['payment_date'])) : date('d-m-Y'),
         'reference_no' => trim((string)($row['reference_no'] ?? '-')) ?: '-',
         'function_type' => trim((string)($row['function_name'] ?? '-')) ?: '-',
-        'proforma_pdf_link' => $templateKey === 'payment_completed'
+        'proforma_pdf_link' => $templateKey === 'payment_completed_'
             ? pp_payment_proforma_pdf_url($conn, $proformaId)
             : '',
-        'invoice_link' => $templateKey === 'payment_completed'
+        'invoice_link' => $templateKey === 'payment_completed_'
             ? pp_payment_proforma_pdf_url($conn, $proformaId)
             : ''
     ];
@@ -691,6 +691,7 @@ if ($bill && pp_table_exists($conn, 'payments')) {
 ?>
 <!doctype html>
 <html lang="en">
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -698,403 +699,839 @@ if ($bill && pp_table_exists($conn, 'payments')) {
     <?php include __DIR__ . '/includes/links.php'; ?>
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
     <style>
-    .payment-page .page-head{padding:24px 28px;margin-bottom:18px}.payment-page .page-head h1{font-size:30px;font-weight:900;color:var(--text-main)}.module-card{padding:24px;border-radius:20px;margin-bottom:18px}.section-title{font-size:18px;font-weight:900;color:var(--text-main);margin-bottom:12px}.info-box{border:1px solid var(--border-soft);border-radius:16px;padding:14px;background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg));height:100%}.info-box small{display:block;font-size:11px;text-transform:uppercase;color:var(--text-muted);font-weight:900;margin-bottom:5px}.info-box strong{display:block;font-size:18px;color:var(--text-main);font-weight:900;word-break:break-word}.balance-due strong{color:#991b1b}.paid-box strong{color:#166534}.payment-form{border:1px solid var(--border-soft);border-radius:18px;padding:18px;background:color-mix(in srgb,var(--success-color,#16a34a) 6%,var(--card-bg))}.table-view th{font-size:12px;text-transform:uppercase;color:var(--text-muted);white-space:nowrap}.table-view td{vertical-align:middle}.cancelled-row{background:#fef2f2!important;color:#991b1b}.status-badge{display:inline-flex;border-radius:999px;padding:5px 10px;font-size:11px;font-weight:900;background:#dcfce7;color:#166534}.status-badge.cancelled{background:#fee2e2;color:#991b1b}.toast-ui{border:0;border-radius:18px;box-shadow:0 18px 45px rgba(15,23,42,.18);overflow:hidden;min-width:320px;max-width:420px}.toast-ui.success{background:#dcfce7;color:#14532d}.toast-ui.danger{background:#fee2e2;color:#7f1d1d}.toast-ui.warning{background:#fef3c7;color:#92400e}.toast-title{font-size:14px;font-weight:900}.toast-message{font-size:13px;font-weight:800;line-height:1.45}@media(max-width:767.98px){.payment-page .page-head{padding:18px;border-radius:18px}.payment-page .page-head h1{font-size:24px}.module-card{padding:16px;border-radius:18px}.table-view{font-size:13px}}
-    
+    .payment-page .page-head {
+        padding: 24px 28px;
+        margin-bottom: 18px
+    }
+
+    .payment-page .page-head h1 {
+        font-size: 30px;
+        font-weight: 900;
+        color: var(--text-main)
+    }
+
+    .module-card {
+        padding: 24px;
+        border-radius: 20px;
+        margin-bottom: 18px
+    }
+
+    .section-title {
+        font-size: 18px;
+        font-weight: 900;
+        color: var(--text-main);
+        margin-bottom: 12px
+    }
+
+    .info-box {
+        border: 1px solid var(--border-soft);
+        border-radius: 16px;
+        padding: 14px;
+        background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg));
+        height: 100%
+    }
+
+    .info-box small {
+        display: block;
+        font-size: 11px;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        font-weight: 900;
+        margin-bottom: 5px
+    }
+
+    .info-box strong {
+        display: block;
+        font-size: 18px;
+        color: var(--text-main);
+        font-weight: 900;
+        word-break: break-word
+    }
+
+    .balance-due strong {
+        color: #991b1b
+    }
+
+    .paid-box strong {
+        color: #166534
+    }
+
+    .payment-form {
+        border: 1px solid var(--border-soft);
+        border-radius: 18px;
+        padding: 18px;
+        background: color-mix(in srgb, var(--success-color, #16a34a) 6%, var(--card-bg))
+    }
+
+    .table-view th {
+        font-size: 12px;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        white-space: nowrap
+    }
+
+    .table-view td {
+        vertical-align: middle
+    }
+
+    .cancelled-row {
+        background: #fef2f2 !important;
+        color: #991b1b
+    }
+
+    .status-badge {
+        display: inline-flex;
+        border-radius: 999px;
+        padding: 5px 10px;
+        font-size: 11px;
+        font-weight: 900;
+        background: #dcfce7;
+        color: #166534
+    }
+
+    .status-badge.cancelled {
+        background: #fee2e2;
+        color: #991b1b
+    }
+
+    .toast-ui {
+        border: 0;
+        border-radius: 18px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
+        overflow: hidden;
+        min-width: 320px;
+        max-width: 420px
+    }
+
+    .toast-ui.success {
+        background: #dcfce7;
+        color: #14532d
+    }
+
+    .toast-ui.danger {
+        background: #fee2e2;
+        color: #7f1d1d
+    }
+
+    .toast-ui.warning {
+        background: #fef3c7;
+        color: #92400e
+    }
+
+    .toast-title {
+        font-size: 14px;
+        font-weight: 900
+    }
+
+    .toast-message {
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.45
+    }
+
+    @media(max-width:767.98px) {
+        .payment-page .page-head {
+            padding: 18px;
+            border-radius: 18px
+        }
+
+        .payment-page .page-head h1 {
+            font-size: 24px
+        }
+
+        .module-card {
+            padding: 16px;
+            border-radius: 18px
+        }
+
+        .table-view {
+            font-size: 13px
+        }
+    }
+
 
     /* Cash / UPI checkbox payment UI */
-    .payment-mode-grid{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:14px}
-    .payment-mode-card{position:relative;display:flex;align-items:flex-start;gap:12px;border:1.5px solid var(--border-soft);border-radius:18px;padding:16px;min-height:92px;background:var(--card-bg);cursor:pointer;transition:.18s ease;user-select:none}
-    .payment-mode-card:hover{transform:translateY(-1px);box-shadow:0 10px 24px rgba(15,23,42,.08)}
-    .payment-mode-card.active{border-color:#2563eb;background:rgba(37,99,235,.08);box-shadow:0 14px 34px rgba(37,99,235,.12)}
-    .payment-mode-card input{width:24px;height:24px;accent-color:#2563eb;margin-top:2px;cursor:pointer}
-    .payment-mode-card strong{display:block;font-size:17px;font-weight:900;color:var(--text-main);line-height:1.2}
-    .payment-mode-card span{display:block;margin-top:3px;font-size:12px;font-weight:900;color:var(--text-muted);line-height:1.25}
-    .denom-modal-compact .modal-dialog{max-width:430px}
-    .denom-modal-compact .modal-content{border:0;border-radius:22px;overflow:hidden;box-shadow:0 24px 70px rgba(15,23,42,.26)}
-    .denom-modal-compact .modal-header,.denom-modal-compact .modal-footer{padding:12px 16px}
-    .denom-modal-compact .modal-body{padding:14px 16px;max-height:70vh;overflow:auto}
-    .denom-section-title{font-size:13px;font-weight:900;color:var(--text-main);margin:8px 0 6px}
-    .denom-line{display:grid;grid-template-columns:86px 72px 1fr;align-items:center;gap:8px;margin-bottom:7px;font-weight:800;font-size:13px}
-    .denom-line input{min-height:36px;border-radius:10px;text-align:center;font-weight:900}
-    .denom-line .denom-amount{min-height:36px;border:1px solid var(--border-soft);border-radius:10px;padding:7px 9px;background:color-mix(in srgb,var(--card-bg) 94%,var(--body-bg));font-weight:900;text-align:right}
-    .denom-total-box{border-radius:14px;background:rgba(22,163,74,.10);border:1px solid rgba(22,163,74,.24);padding:9px 11px;font-weight:900;font-size:13px}
-    body.modal-open-fallback{overflow:hidden}.modal-backdrop-fallback{position:fixed;inset:0;z-index:1040;background:rgba(15,23,42,.50)}.modal.show.modal-fallback{display:block;z-index:1055;background:transparent}
-    @media(max-width:575.98px){.payment-mode-grid{grid-template-columns:1fr}.denom-modal-compact .modal-dialog{max-width:calc(100% - 22px);margin:11px auto}.denom-line{grid-template-columns:76px 66px 1fr;font-size:12px}}
+    .payment-mode-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(180px, 1fr));
+        gap: 14px
+    }
 
+    .payment-mode-card {
+        position: relative;
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        border: 1.5px solid var(--border-soft);
+        border-radius: 18px;
+        padding: 16px;
+        min-height: 92px;
+        background: var(--card-bg);
+        cursor: pointer;
+        transition: .18s ease;
+        user-select: none
+    }
+
+    .payment-mode-card:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 10px 24px rgba(15, 23, 42, .08)
+    }
+
+    .payment-mode-card.active {
+        border-color: #2563eb;
+        background: rgba(37, 99, 235, .08);
+        box-shadow: 0 14px 34px rgba(37, 99, 235, .12)
+    }
+
+    .payment-mode-card input {
+        width: 24px;
+        height: 24px;
+        accent-color: #2563eb;
+        margin-top: 2px;
+        cursor: pointer
+    }
+
+    .payment-mode-card strong {
+        display: block;
+        font-size: 17px;
+        font-weight: 900;
+        color: var(--text-main);
+        line-height: 1.2
+    }
+
+    .payment-mode-card span {
+        display: block;
+        margin-top: 3px;
+        font-size: 12px;
+        font-weight: 900;
+        color: var(--text-muted);
+        line-height: 1.25
+    }
+
+    .denom-modal-compact .modal-dialog {
+        max-width: 430px
+    }
+
+    .denom-modal-compact .modal-content {
+        border: 0;
+        border-radius: 22px;
+        overflow: hidden;
+        box-shadow: 0 24px 70px rgba(15, 23, 42, .26)
+    }
+
+    .denom-modal-compact .modal-header,
+    .denom-modal-compact .modal-footer {
+        padding: 12px 16px
+    }
+
+    .denom-modal-compact .modal-body {
+        padding: 14px 16px;
+        max-height: 70vh;
+        overflow: auto
+    }
+
+    .denom-section-title {
+        font-size: 13px;
+        font-weight: 900;
+        color: var(--text-main);
+        margin: 8px 0 6px
+    }
+
+    .denom-line {
+        display: grid;
+        grid-template-columns: 86px 72px 1fr;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 7px;
+        font-weight: 800;
+        font-size: 13px
+    }
+
+    .denom-line input {
+        min-height: 36px;
+        border-radius: 10px;
+        text-align: center;
+        font-weight: 900
+    }
+
+    .denom-line .denom-amount {
+        min-height: 36px;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        padding: 7px 9px;
+        background: color-mix(in srgb, var(--card-bg) 94%, var(--body-bg));
+        font-weight: 900;
+        text-align: right
+    }
+
+    .denom-total-box {
+        border-radius: 14px;
+        background: rgba(22, 163, 74, .10);
+        border: 1px solid rgba(22, 163, 74, .24);
+        padding: 9px 11px;
+        font-weight: 900;
+        font-size: 13px
+    }
+
+    body.modal-open-fallback {
+        overflow: hidden
+    }
+
+    .modal-backdrop-fallback {
+        position: fixed;
+        inset: 0;
+        z-index: 1040;
+        background: rgba(15, 23, 42, .50)
+    }
+
+    .modal.show.modal-fallback {
+        display: block;
+        z-index: 1055;
+        background: transparent
+    }
+
+    @media(max-width:575.98px) {
+        .payment-mode-grid {
+            grid-template-columns: 1fr
+        }
+
+        .denom-modal-compact .modal-dialog {
+            max-width: calc(100% - 22px);
+            margin: 11px auto
+        }
+
+        .denom-line {
+            grid-template-columns: 76px 66px 1fr;
+            font-size: 12px
+        }
+    }
     </style>
 </head>
+
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
-<div id="mobileOverlay"></div>
-<div class="app-shell">
-    <?php include __DIR__ . '/includes/sidebar.php'; ?>
-    <main id="main">
-        <?php include __DIR__ . '/includes/nav.php'; ?>
-        <section class="page-section payment-page">
-            <div class="card-ui page-head">
-                <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
-                    <div><h1 class="mb-1">Collect Payment</h1><p class="text-muted-custom mb-0"><?= $bill ? e($bill['proforma_no'] ?? '-') : 'Payment details' ?></p></div>
-                    <div class="d-flex gap-2 flex-wrap"><a href="proforma_bills.php" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Back to List</a><?php if ($bill): ?><a href="proforma_bill_view.php?id=<?= (int)$id ?>" class="btn btn-primary rounded-pill px-4 fw-bold">View Bill</a><?php endif; ?></div>
-                </div>
-            </div>
-
-            <?php if ($message !== ''): ?>
-            <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:12000"><div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="4200"><div class="d-flex"><div class="toast-body"><div class="toast-title"><?= $messageType === 'danger' ? 'Failed' : ($messageType === 'warning' ? 'Warning' : 'Success') ?></div><div class="toast-message"><?= e($message) ?></div></div><button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button></div></div></div>
-            <?php endif; ?>
-
-            <?php if ($error !== ''): ?>
-            <div class="card-ui module-card"><div class="alert alert-danger rounded-4 fw-bold mb-0"><?= e($error) ?></div></div>
-            <?php elseif ($bill): ?>
-            <div class="card-ui module-card">
-                <div class="section-title">Bill Summary</div>
-                <div class="row g-3">
-                    <div class="col-md-3"><div class="info-box"><small>Proforma No</small><strong><?= e($bill['proforma_no'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Customer</small><strong><?= e($bill['customer_name'] ?? '-') ?></strong><small><?= e($bill['mobile'] ?? '') ?></small></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Function</small><strong><?= e($bill['function_name'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-3"><div class="info-box"><small>Status</small><strong><?= e($bill['status_name'] ?? '-') ?></strong></div></div>
-                    <div class="col-md-4"><div class="info-box"><small>Final Amount</small><strong><?= e(pp_money($bill['final_amount'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-4"><div class="info-box paid-box"><small>Paid Amount</small><strong><?= e(pp_money($bill['advance_amount'] ?? 0)) ?></strong></div></div>
-                    <div class="col-md-4"><div class="info-box balance-due"><small>Balance Amount</small><strong><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong></div></div>
-                </div>
-            </div>
-
-            <div class="card-ui module-card">
-                <div class="section-title">Make Payment</div>
-                <?php if ((float)($bill['balance_amount'] ?? 0) <= 0): ?>
-                <div class="alert alert-success rounded-4 fw-bold mb-0">This proforma bill is fully paid.</div>
-                <?php else: ?>
-                <form method="post" class="payment-form" id="paymentForm">
-                    <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
-                    <input type="hidden" name="action" value="collect_payment">
-                    <input type="hidden" name="payment_mode" id="payment_mode" value="cash">
-
-                    <div class="row g-3 align-items-end">
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Amount</label>
-                            <input type="number" step="0.01" min="0.01" max="<?= e($bill['balance_amount']) ?>" name="amount" id="paymentAmount" class="form-control" value="<?= e(number_format((float)$bill['balance_amount'], 2, '.', '')) ?>" required>
+    <div id="mobileOverlay"></div>
+    <div class="app-shell">
+        <?php include __DIR__ . '/includes/sidebar.php'; ?>
+        <main id="main">
+            <?php include __DIR__ . '/includes/nav.php'; ?>
+            <section class="page-section payment-page">
+                <div class="card-ui page-head">
+                    <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
+                        <div>
+                            <h1 class="mb-1">Collect Payment</h1>
+                            <p class="text-muted-custom mb-0">
+                                <?= $bill ? e($bill['proforma_no'] ?? '-') : 'Payment details' ?></p>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold">Payment Date</label>
-                            <input type="date" name="payment_date" class="form-control" value="<?= e(date('Y-m-d')) ?>" required>
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold" id="referenceLabel">UPI Reference / Remarks</label>
-                            <input type="text" name="reference_no" id="referenceNo" class="form-control" placeholder="Optional reference">
-                        </div>
-
-                        <div class="col-12">
-                            <label class="form-label fw-bold">Payment Mode</label>
-                            <div class="payment-mode-grid">
-                                <label class="payment-mode-card active" data-mode="cash" for="mode_cash">
-                                    <input type="checkbox" id="mode_cash" checked>
-                                    <span>
-                                        <strong>Cash</strong>
-                                        <span>Denomination required</span>
-                                    </span>
-                                </label>
-                                <label class="payment-mode-card" data-mode="upi" for="mode_upi">
-                                    <input type="checkbox" id="mode_upi">
-                                    <span>
-                                        <strong>UPI</strong>
-                                        <span>Reference optional</span>
-                                    </span>
-                                </label>
-                            </div>
-                            <small class="text-muted-custom fw-bold mt-2 d-block">Only Cash and UPI payments are allowed on this page.</small>
-                        </div>
-
-                        <div class="col-12">
-                            <label class="form-label fw-bold">Remarks</label>
-                            <textarea name="remarks" class="form-control" rows="2" placeholder="Payment remarks"></textarea>
-                        </div>
-                        <div class="col-12 d-flex flex-wrap justify-content-end gap-2">
-                            <button type="button" id="openCashDenomBtn" class="btn btn-outline-primary rounded-pill px-4 fw-bold">Enter Cash Denomination</button>
-                            <button type="submit" class="btn btn-success rounded-pill px-4 fw-bold">Save Payment</button>
-                        </div>
+                        <div class="d-flex gap-2 flex-wrap"><a href="proforma_bills.php"
+                                class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Back to
+                                List</a><?php if ($bill): ?><a href="proforma_bill_view.php?id=<?= (int)$id ?>"
+                                class="btn btn-primary rounded-pill px-4 fw-bold">View Bill</a><?php endif; ?></div>
                     </div>
-                </form>
+                </div>
 
-                <div class="modal fade denom-modal-compact" id="cashDenominationModal" tabindex="-1" aria-hidden="true">
-                    <div class="modal-dialog modal-dialog-centered">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <div>
-                                    <h5 class="modal-title fw-black mb-0">Cash Denomination</h5>
-                                    <small class="text-muted-custom fw-bold">Enter count for every note / coin</small>
+                <?php if ($message !== ''): ?>
+                <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:12000">
+                    <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive"
+                        aria-atomic="true" data-bs-delay="4200">
+                        <div class="d-flex">
+                            <div class="toast-body">
+                                <div class="toast-title">
+                                    <?= $messageType === 'danger' ? 'Failed' : ($messageType === 'warning' ? 'Warning' : 'Success') ?>
                                 </div>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                            </div>
-                            <div class="modal-body">
-                                <div class="denom-total-box d-flex justify-content-between gap-2 mb-2">
-                                    <span>Payment Amount: <span id="denomTarget">₹0.00</span></span>
-                                    <span>Total: <span id="denomTotal">₹0.00</span></span>
-                                </div>
-
-                                <div class="denom-section-title">Notes:</div>
-                                <?php foreach ([500, 200, 100, 50, 20, 10] as $noteValue): ?>
-                                <div class="denom-line">
-                                    <input type="number" min="0" step="1" value="0" class="form-control cash-denom-count" name="cash_note_<?= (int)$noteValue ?>" data-value="<?= (int)$noteValue ?>" form="paymentForm">
-                                    <span>x ₹<?= (int)$noteValue ?></span>
-                                    <span class="denom-amount">₹<span class="denom-row-total">0.00</span></span>
-                                </div>
-                                <?php endforeach; ?>
-
-                                <div class="denom-section-title">Coins:</div>
-                                <?php foreach ([20, 10, 5, 2, 1] as $coinValue): ?>
-                                <div class="denom-line">
-                                    <input type="number" min="0" step="1" value="0" class="form-control cash-denom-count" name="cash_coin_<?= (int)$coinValue ?>" data-value="<?= (int)$coinValue ?>" form="paymentForm">
-                                    <span>x ₹<?= (int)$coinValue ?></span>
-                                    <span class="denom-amount">₹<span class="denom-row-total">0.00</span></span>
-                                </div>
-                                <?php endforeach; ?>
-
-                                <div id="denomError" class="alert alert-danger rounded-4 fw-bold py-2 px-3 mt-2 mb-0 d-none"></div>
-                            </div>
-                            <div class="modal-footer">
-                                <button type="button" class="btn btn-outline-secondary rounded-pill px-3 fw-bold" data-bs-dismiss="modal">Close</button>
-                                <button type="button" class="btn btn-primary rounded-pill px-3 fw-bold" id="saveDenomBtn">Save Denomination</button>
-                            </div>
+                                <div class="toast-message"><?= e($message) ?></div>
+                            </div><button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
+                                aria-label="Close"></button>
                         </div>
                     </div>
                 </div>
                 <?php endif; ?>
-            </div>
 
-            <div class="card-ui module-card">
-                <div class="section-title">Recent Payment History</div>
-                <div class="table-responsive">
-                    <table class="table table-view">
-                        <thead><tr><th>No</th><th>Type</th><th>Mode</th><th>Amount</th><th>Date</th><th>Reference</th><th>Received By</th><th>Remarks</th><th>WhatsApp</th><th class="text-end">Action</th></tr></thead>
-                        <tbody>
-                            <?php if (!$activePayments): ?><tr><td colspan="10" class="text-center text-muted-custom py-3">No active payment found.</td></tr><?php endif; ?>
-                            <?php foreach ($activePayments as $pay): ?>
-                            <tr>
-                                <td><strong><?= e($pay['payment_no'] ?? '-') ?></strong></td>
-                                <td><?= e(ucfirst((string)($pay['payment_type'] ?? '-'))) ?></td>
-                                <td><?= e(strtoupper((string)($pay['payment_mode'] ?? '-'))) ?></td>
-                                <td><strong><?= e(pp_money($pay['amount'] ?? 0)) ?></strong></td>
-                                <td><?= e(pp_date($pay['payment_date'] ?? null)) ?></td>
-                                <td><?= e($pay['reference_no'] ?? '-') ?></td>
-                                <td><?= e($pay['received_by_name'] ?? '-') ?></td>
-                                <td><?= e($pay['remarks'] ?? '-') ?></td>
-                                <td>
-                                    <?php $waInfo = $pay['wa_status_info'] ?? ['status' => 'not_sent', 'label' => 'Not Sent']; ?>
-                                    <?php if (($waInfo['status'] ?? '') === 'sent'): ?>
+                <?php if ($error !== ''): ?>
+                <div class="card-ui module-card">
+                    <div class="alert alert-danger rounded-4 fw-bold mb-0"><?= e($error) ?></div>
+                </div>
+                <?php elseif ($bill): ?>
+                <div class="card-ui module-card">
+                    <div class="section-title">Bill Summary</div>
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <div class="info-box"><small>Proforma
+                                    No</small><strong><?= e($bill['proforma_no'] ?? '-') ?></strong></div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="info-box">
+                                <small>Customer</small><strong><?= e($bill['customer_name'] ?? '-') ?></strong><small><?= e($bill['mobile'] ?? '') ?></small>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="info-box">
+                                <small>Function</small><strong><?= e($bill['function_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="info-box">
+                                <small>Status</small><strong><?= e($bill['status_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="info-box"><small>Final
+                                    Amount</small><strong><?= e(pp_money($bill['final_amount'] ?? 0)) ?></strong></div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="info-box paid-box"><small>Paid
+                                    Amount</small><strong><?= e(pp_money($bill['advance_amount'] ?? 0)) ?></strong>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="info-box balance-due"><small>Balance
+                                    Amount</small><strong><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card-ui module-card">
+                    <div class="section-title">Make Payment</div>
+                    <?php if ((float)($bill['balance_amount'] ?? 0) <= 0): ?>
+                    <div class="alert alert-success rounded-4 fw-bold mb-0">This proforma bill is fully paid.</div>
+                    <?php else: ?>
+                    <form method="post" class="payment-form" id="paymentForm">
+                        <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                        <input type="hidden" name="action" value="collect_payment">
+                        <input type="hidden" name="payment_mode" id="payment_mode" value="cash">
+
+                        <div class="row g-3 align-items-end">
+                            <div class="col-md-4">
+                                <label class="form-label fw-bold">Amount</label>
+                                <input type="number" step="0.01" min="0.01" max="<?= e($bill['balance_amount']) ?>"
+                                    name="amount" id="paymentAmount" class="form-control"
+                                    value="<?= e(number_format((float)$bill['balance_amount'], 2, '.', '')) ?>"
+                                    required>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label fw-bold">Payment Date</label>
+                                <input type="date" name="payment_date" class="form-control"
+                                    value="<?= e(date('Y-m-d')) ?>" required>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label fw-bold" id="referenceLabel">UPI Reference / Remarks</label>
+                                <input type="text" name="reference_no" id="referenceNo" class="form-control"
+                                    placeholder="Optional reference">
+                            </div>
+
+                            <div class="col-12">
+                                <label class="form-label fw-bold">Payment Mode</label>
+                                <div class="payment-mode-grid">
+                                    <label class="payment-mode-card active" data-mode="cash" for="mode_cash">
+                                        <input type="checkbox" id="mode_cash" checked>
+                                        <span>
+                                            <strong>Cash</strong>
+                                            <span>Denomination required</span>
+                                        </span>
+                                    </label>
+                                    <label class="payment-mode-card" data-mode="upi" for="mode_upi">
+                                        <input type="checkbox" id="mode_upi">
+                                        <span>
+                                            <strong>UPI</strong>
+                                            <span>Reference optional</span>
+                                        </span>
+                                    </label>
+                                </div>
+                                <small class="text-muted-custom fw-bold mt-2 d-block">Only Cash and UPI payments are
+                                    allowed on this page.</small>
+                            </div>
+
+                            <div class="col-12">
+                                <label class="form-label fw-bold">Remarks</label>
+                                <textarea name="remarks" class="form-control" rows="2"
+                                    placeholder="Payment remarks"></textarea>
+                            </div>
+                            <div class="col-12 d-flex flex-wrap justify-content-end gap-2">
+                                <button type="button" id="openCashDenomBtn"
+                                    class="btn btn-outline-primary rounded-pill px-4 fw-bold">Enter Cash
+                                    Denomination</button>
+                                <button type="submit" class="btn btn-success rounded-pill px-4 fw-bold">Save
+                                    Payment</button>
+                            </div>
+                        </div>
+                    </form>
+
+                    <div class="modal fade denom-modal-compact" id="cashDenominationModal" tabindex="-1"
+                        aria-hidden="true">
+                        <div class="modal-dialog modal-dialog-centered">
+                            <div class="modal-content">
+                                <div class="modal-header">
+                                    <div>
+                                        <h5 class="modal-title fw-black mb-0">Cash Denomination</h5>
+                                        <small class="text-muted-custom fw-bold">Enter count for every note /
+                                            coin</small>
+                                    </div>
+                                    <button type="button" class="btn-close" data-bs-dismiss="modal"
+                                        aria-label="Close"></button>
+                                </div>
+                                <div class="modal-body">
+                                    <div class="denom-total-box d-flex justify-content-between gap-2 mb-2">
+                                        <span>Payment Amount: <span id="denomTarget">₹0.00</span></span>
+                                        <span>Total: <span id="denomTotal">₹0.00</span></span>
+                                    </div>
+
+                                    <div class="denom-section-title">Notes:</div>
+                                    <?php foreach ([500, 200, 100, 50, 20, 10] as $noteValue): ?>
+                                    <div class="denom-line">
+                                        <input type="number" min="0" step="1" value="0"
+                                            class="form-control cash-denom-count"
+                                            name="cash_note_<?= (int)$noteValue ?>" data-value="<?= (int)$noteValue ?>"
+                                            form="paymentForm">
+                                        <span>x ₹<?= (int)$noteValue ?></span>
+                                        <span class="denom-amount">₹<span class="denom-row-total">0.00</span></span>
+                                    </div>
+                                    <?php endforeach; ?>
+
+                                    <div class="denom-section-title">Coins:</div>
+                                    <?php foreach ([20, 10, 5, 2, 1] as $coinValue): ?>
+                                    <div class="denom-line">
+                                        <input type="number" min="0" step="1" value="0"
+                                            class="form-control cash-denom-count"
+                                            name="cash_coin_<?= (int)$coinValue ?>" data-value="<?= (int)$coinValue ?>"
+                                            form="paymentForm">
+                                        <span>x ₹<?= (int)$coinValue ?></span>
+                                        <span class="denom-amount">₹<span class="denom-row-total">0.00</span></span>
+                                    </div>
+                                    <?php endforeach; ?>
+
+                                    <div id="denomError"
+                                        class="alert alert-danger rounded-4 fw-bold py-2 px-3 mt-2 mb-0 d-none"></div>
+                                </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn btn-outline-secondary rounded-pill px-3 fw-bold"
+                                        data-bs-dismiss="modal">Close</button>
+                                    <button type="button" class="btn btn-primary rounded-pill px-3 fw-bold"
+                                        id="saveDenomBtn">Save Denomination</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <?php endif; ?>
+                </div>
+
+                <div class="card-ui module-card">
+                    <div class="section-title">Recent Payment History</div>
+                    <div class="table-responsive">
+                        <table class="table table-view">
+                            <thead>
+                                <tr>
+                                    <th>No</th>
+                                    <th>Type</th>
+                                    <th>Mode</th>
+                                    <th>Amount</th>
+                                    <th>Date</th>
+                                    <th>Reference</th>
+                                    <th>Received By</th>
+                                    <th>Remarks</th>
+                                    <th>WhatsApp</th>
+                                    <th class="text-end">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (!$activePayments): ?><tr>
+                                    <td colspan="10" class="text-center text-muted-custom py-3">No active payment found.
+                                    </td>
+                                </tr><?php endif; ?>
+                                <?php foreach ($activePayments as $pay): ?>
+                                <tr>
+                                    <td><strong><?= e($pay['payment_no'] ?? '-') ?></strong></td>
+                                    <td><?= e(ucfirst((string)($pay['payment_type'] ?? '-'))) ?></td>
+                                    <td><?= e(strtoupper((string)($pay['payment_mode'] ?? '-'))) ?></td>
+                                    <td><strong><?= e(pp_money($pay['amount'] ?? 0)) ?></strong></td>
+                                    <td><?= e(pp_date($pay['payment_date'] ?? null)) ?></td>
+                                    <td><?= e($pay['reference_no'] ?? '-') ?></td>
+                                    <td><?= e($pay['received_by_name'] ?? '-') ?></td>
+                                    <td><?= e($pay['remarks'] ?? '-') ?></td>
+                                    <td>
+                                        <?php $waInfo = $pay['wa_status_info'] ?? ['status' => 'not_sent', 'label' => 'Not Sent']; ?>
+                                        <?php if (($waInfo['status'] ?? '') === 'sent'): ?>
                                         <span class="status-badge">WhatsApp Sent</span>
-                                    <?php else: ?>
+                                        <?php else: ?>
                                         <div class="d-flex flex-column gap-1 align-items-start">
-                                            <span class="status-badge cancelled"><?= e($waInfo['label'] ?? 'Failed') ?></span>
-                                            <form method="post" onsubmit="return confirm('Retry WhatsApp payment message?')">
+                                            <span
+                                                class="status-badge cancelled"><?= e($waInfo['label'] ?? 'Failed') ?></span>
+                                            <form method="post"
+                                                onsubmit="return confirm('Retry WhatsApp payment message?')">
                                                 <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                                 <input type="hidden" name="action" value="retry_payment_whatsapp">
                                                 <input type="hidden" name="payment_id" value="<?= (int)$pay['id'] ?>">
-                                                <button type="submit" class="btn btn-sm btn-success rounded-pill fw-bold">Retry WhatsApp</button>
+                                                <button type="submit"
+                                                    class="btn btn-sm btn-success rounded-pill fw-bold">Retry
+                                                    WhatsApp</button>
                                             </form>
                                         </div>
-                                    <?php endif; ?>
-                                </td>
-                                <td class="text-end">
-                                    <form method="post" class="d-flex gap-2 justify-content-end" onsubmit="return confirm('Cancel this payment and revert balance?')">
-                                        <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
-                                        <input type="hidden" name="action" value="cancel_payment">
-                                        <input type="hidden" name="payment_id" value="<?= (int)$pay['id'] ?>">
-                                        <input type="text" name="cancel_reason" class="form-control form-control-sm" style="max-width:180px" placeholder="Cancel reason" required>
-                                        <button type="submit" class="btn btn-sm btn-outline-danger rounded-pill fw-bold">Cancel</button>
-                                    </form>
-                                </td>
-                            </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td class="text-end">
+                                        <form method="post" class="d-flex gap-2 justify-content-end"
+                                            onsubmit="return confirm('Cancel this payment and revert balance?')">
+                                            <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                                            <input type="hidden" name="action" value="cancel_payment">
+                                            <input type="hidden" name="payment_id" value="<?= (int)$pay['id'] ?>">
+                                            <input type="text" name="cancel_reason" class="form-control form-control-sm"
+                                                style="max-width:180px" placeholder="Cancel reason" required>
+                                            <button type="submit"
+                                                class="btn btn-sm btn-outline-danger rounded-pill fw-bold">Cancel</button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
-            </div>
 
-            <div class="card-ui module-card">
-                <div class="section-title">Cancelled Payment List</div>
-                <div class="table-responsive">
-                    <table class="table table-view">
-                        <thead><tr><th>No</th><th>Mode</th><th>Amount</th><th>Payment Date</th><th>Cancelled At</th><th>Cancelled By</th><th>Reason</th></tr></thead>
-                        <tbody>
-                            <?php if (!$cancelledPayments): ?><tr><td colspan="7" class="text-center text-muted-custom py-3">No cancelled payment found.</td></tr><?php endif; ?>
-                            <?php foreach ($cancelledPayments as $pay): ?>
-                            <tr class="cancelled-row">
-                                <td><strong><?= e($pay['payment_no'] ?? '-') ?></strong></td>
-                                <td><?= e(strtoupper((string)($pay['payment_mode'] ?? '-'))) ?></td>
-                                <td><strong><?= e(pp_money($pay['amount'] ?? 0)) ?></strong></td>
-                                <td><?= e(pp_date($pay['payment_date'] ?? null)) ?></td>
-                                <td><?= e(pp_datetime($pay['cancelled_at'] ?? null)) ?></td>
-                                <td><?= e($pay['cancelled_by_name'] ?? '-') ?></td>
-                                <td><?= e($pay['cancel_reason'] ?? '-') ?></td>
-                            </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
+                <div class="card-ui module-card">
+                    <div class="section-title">Cancelled Payment List</div>
+                    <div class="table-responsive">
+                        <table class="table table-view">
+                            <thead>
+                                <tr>
+                                    <th>No</th>
+                                    <th>Mode</th>
+                                    <th>Amount</th>
+                                    <th>Payment Date</th>
+                                    <th>Cancelled At</th>
+                                    <th>Cancelled By</th>
+                                    <th>Reason</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (!$cancelledPayments): ?><tr>
+                                    <td colspan="7" class="text-center text-muted-custom py-3">No cancelled payment
+                                        found.</td>
+                                </tr><?php endif; ?>
+                                <?php foreach ($cancelledPayments as $pay): ?>
+                                <tr class="cancelled-row">
+                                    <td><strong><?= e($pay['payment_no'] ?? '-') ?></strong></td>
+                                    <td><?= e(strtoupper((string)($pay['payment_mode'] ?? '-'))) ?></td>
+                                    <td><strong><?= e(pp_money($pay['amount'] ?? 0)) ?></strong></td>
+                                    <td><?= e(pp_date($pay['payment_date'] ?? null)) ?></td>
+                                    <td><?= e(pp_datetime($pay['cancelled_at'] ?? null)) ?></td>
+                                    <td><?= e($pay['cancelled_by_name'] ?? '-') ?></td>
+                                    <td><?= e($pay['cancel_reason'] ?? '-') ?></td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
-            </div>
-            <?php endif; ?>
-        </section>
-    </main>
-    <div id="settingsOverlay"></div>
-    <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
-</div>
-<?php include __DIR__ . '/includes/script.php'; ?>
-<script>
-(function(){
-    const pageToastEl=document.getElementById('pageToast');
-    if(pageToastEl&&window.bootstrap&&bootstrap.Toast){bootstrap.Toast.getOrCreateInstance(pageToastEl).show();}
-
-    const form=document.getElementById('paymentForm');
-    if(!form){return;}
-
-    const modeInput=document.getElementById('payment_mode');
-    const cashCheck=document.getElementById('mode_cash');
-    const upiCheck=document.getElementById('mode_upi');
-    const cashCard=document.querySelector('.payment-mode-card[data-mode="cash"]');
-    const upiCard=document.querySelector('.payment-mode-card[data-mode="upi"]');
-    const amountInput=document.getElementById('paymentAmount');
-    const referenceLabel=document.getElementById('referenceLabel');
-    const referenceNo=document.getElementById('referenceNo');
-    const openCashBtn=document.getElementById('openCashDenomBtn');
-    const modalEl=document.getElementById('cashDenominationModal');
-    const denomInputs=[...document.querySelectorAll('.cash-denom-count')];
-    const denomTarget=document.getElementById('denomTarget');
-    const denomTotal=document.getElementById('denomTotal');
-    const denomError=document.getElementById('denomError');
-    const saveDenomBtn=document.getElementById('saveDenomBtn');
-    let fallbackBackdrop=null;
-
-    function money(v){return '₹'+(Number(v||0).toFixed(2));}
-    function amountValue(){return Math.round((parseFloat(amountInput?.value || '0') || 0) * 100) / 100;}
-
-    function denominationTotal(){
-        let total=0;
-        denomInputs.forEach(function(input){
-            const count=Math.max(0, parseInt(input.value || '0', 10) || 0);
-            input.value=count;
-            const value=parseFloat(input.dataset.value || '0') || 0;
-            const rowTotal=count*value;
-            total += rowTotal;
-            const rowTotalEl=input.closest('.denom-line')?.querySelector('.denom-row-total');
-            if(rowTotalEl){rowTotalEl.textContent=rowTotal.toFixed(2);}
-        });
-        total=Math.round(total*100)/100;
-        if(denomTotal){denomTotal.textContent=money(total);}
-        if(denomTarget){denomTarget.textContent=money(amountValue());}
-        return total;
-    }
-
-    function showError(message){
-        if(!denomError){return;}
-        denomError.textContent=message || '';
-        denomError.classList.toggle('d-none', !message);
-    }
-
-    function fallbackShowModal(){
-        if(!modalEl){return;}
-        modalEl.classList.add('show','modal-fallback');
-        modalEl.style.display='block';
-        modalEl.removeAttribute('aria-hidden');
-        document.body.classList.add('modal-open-fallback');
-        if(!fallbackBackdrop){
-            fallbackBackdrop=document.createElement('div');
-            fallbackBackdrop.className='modal-backdrop-fallback';
-            fallbackBackdrop.addEventListener('click', fallbackHideModal);
-            document.body.appendChild(fallbackBackdrop);
+                <?php endif; ?>
+            </section>
+        </main>
+        <div id="settingsOverlay"></div>
+        <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
+    </div>
+    <?php include __DIR__ . '/includes/script.php'; ?>
+    <script>
+    (function() {
+        const pageToastEl = document.getElementById('pageToast');
+        if (pageToastEl && window.bootstrap && bootstrap.Toast) {
+            bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
         }
-    }
 
-    function fallbackHideModal(){
-        if(!modalEl){return;}
-        modalEl.classList.remove('show','modal-fallback');
-        modalEl.style.display='none';
-        modalEl.setAttribute('aria-hidden','true');
-        document.body.classList.remove('modal-open-fallback');
-        if(fallbackBackdrop){fallbackBackdrop.remove();fallbackBackdrop=null;}
-    }
-
-    function openDenominationModal(){
-        if(amountValue() <= 0){
-            alert('Please enter payment amount first.');
-            amountInput?.focus();
+        const form = document.getElementById('paymentForm');
+        if (!form) {
             return;
         }
-        showError('');
-        denominationTotal();
-        if(window.bootstrap && bootstrap.Modal && modalEl){
-            bootstrap.Modal.getOrCreateInstance(modalEl).show();
-        }else{
-            fallbackShowModal();
+
+        const modeInput = document.getElementById('payment_mode');
+        const cashCheck = document.getElementById('mode_cash');
+        const upiCheck = document.getElementById('mode_upi');
+        const cashCard = document.querySelector('.payment-mode-card[data-mode="cash"]');
+        const upiCard = document.querySelector('.payment-mode-card[data-mode="upi"]');
+        const amountInput = document.getElementById('paymentAmount');
+        const referenceLabel = document.getElementById('referenceLabel');
+        const referenceNo = document.getElementById('referenceNo');
+        const openCashBtn = document.getElementById('openCashDenomBtn');
+        const modalEl = document.getElementById('cashDenominationModal');
+        const denomInputs = [...document.querySelectorAll('.cash-denom-count')];
+        const denomTarget = document.getElementById('denomTarget');
+        const denomTotal = document.getElementById('denomTotal');
+        const denomError = document.getElementById('denomError');
+        const saveDenomBtn = document.getElementById('saveDenomBtn');
+        let fallbackBackdrop = null;
+
+        function money(v) {
+            return '₹' + (Number(v || 0).toFixed(2));
         }
-    }
 
-    function closeDenominationModal(){
-        if(window.bootstrap && bootstrap.Modal && modalEl){
-            bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+        function amountValue() {
+            return Math.round((parseFloat(amountInput?.value || '0') || 0) * 100) / 100;
         }
-        fallbackHideModal();
-    }
 
-    function selectMode(mode, openCash){
-        const isCash=mode==='cash';
-        modeInput.value=isCash?'cash':'upi';
-        cashCheck.checked=isCash;
-        upiCheck.checked=!isCash;
-        cashCard?.classList.toggle('active', isCash);
-        upiCard?.classList.toggle('active', !isCash);
-        if(referenceLabel){referenceLabel.textContent=isCash?'Cash Remarks / Reference':'UPI Reference';}
-        if(referenceNo){referenceNo.placeholder=isCash?'Optional cash reference / remarks':'UPI transaction ID optional';}
-        if(openCashBtn){openCashBtn.style.display=isCash?'inline-flex':'none';}
-        if(isCash && openCash){openDenominationModal();}
-    }
-
-    cashCard?.addEventListener('click', function(e){
-        e.preventDefault();
-        selectMode('cash', true);
-    });
-    upiCard?.addEventListener('click', function(e){
-        e.preventDefault();
-        selectMode('upi', false);
-    });
-    cashCheck?.addEventListener('change', function(){selectMode('cash', true);});
-    upiCheck?.addEventListener('change', function(){selectMode('upi', false);});
-    openCashBtn?.addEventListener('click', function(){selectMode('cash', true);});
-    amountInput?.addEventListener('input', denominationTotal);
-    denomInputs.forEach(function(input){input.addEventListener('input', denominationTotal);});
-
-    document.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function(btn){
-        btn.addEventListener('click', function(){setTimeout(fallbackHideModal, 10);});
-    });
-
-    saveDenomBtn?.addEventListener('click', function(){
-        const expected=amountValue();
-        const total=denominationTotal();
-        if(Math.abs(total-expected) > 0.009){
-            showError('Denomination total '+money(total)+' must match payment amount '+money(expected)+'.');
-            return;
+        function denominationTotal() {
+            let total = 0;
+            denomInputs.forEach(function(input) {
+                const count = Math.max(0, parseInt(input.value || '0', 10) || 0);
+                input.value = count;
+                const value = parseFloat(input.dataset.value || '0') || 0;
+                const rowTotal = count * value;
+                total += rowTotal;
+                const rowTotalEl = input.closest('.denom-line')?.querySelector('.denom-row-total');
+                if (rowTotalEl) {
+                    rowTotalEl.textContent = rowTotal.toFixed(2);
+                }
+            });
+            total = Math.round(total * 100) / 100;
+            if (denomTotal) {
+                denomTotal.textContent = money(total);
+            }
+            if (denomTarget) {
+                denomTarget.textContent = money(amountValue());
+            }
+            return total;
         }
-        showError('');
-        closeDenominationModal();
-    });
 
-    form.addEventListener('submit', function(e){
-        if(modeInput.value === 'cash'){
-            const expected=amountValue();
-            const total=denominationTotal();
-            if(Math.abs(total-expected) > 0.009){
-                e.preventDefault();
-                showError('Denomination total '+money(total)+' must match payment amount '+money(expected)+'.');
-                openDenominationModal();
-                return false;
+        function showError(message) {
+            if (!denomError) {
+                return;
+            }
+            denomError.textContent = message || '';
+            denomError.classList.toggle('d-none', !message);
+        }
+
+        function fallbackShowModal() {
+            if (!modalEl) {
+                return;
+            }
+            modalEl.classList.add('show', 'modal-fallback');
+            modalEl.style.display = 'block';
+            modalEl.removeAttribute('aria-hidden');
+            document.body.classList.add('modal-open-fallback');
+            if (!fallbackBackdrop) {
+                fallbackBackdrop = document.createElement('div');
+                fallbackBackdrop.className = 'modal-backdrop-fallback';
+                fallbackBackdrop.addEventListener('click', fallbackHideModal);
+                document.body.appendChild(fallbackBackdrop);
             }
         }
-        if(!confirm('Collect this payment?')){
-            e.preventDefault();
-            return false;
-        }
-    });
 
-    selectMode('cash', false);
-    denominationTotal();
-})();
-</script>
+        function fallbackHideModal() {
+            if (!modalEl) {
+                return;
+            }
+            modalEl.classList.remove('show', 'modal-fallback');
+            modalEl.style.display = 'none';
+            modalEl.setAttribute('aria-hidden', 'true');
+            document.body.classList.remove('modal-open-fallback');
+            if (fallbackBackdrop) {
+                fallbackBackdrop.remove();
+                fallbackBackdrop = null;
+            }
+        }
+
+        function openDenominationModal() {
+            if (amountValue() <= 0) {
+                alert('Please enter payment amount first.');
+                amountInput?.focus();
+                return;
+            }
+            showError('');
+            denominationTotal();
+            if (window.bootstrap && bootstrap.Modal && modalEl) {
+                bootstrap.Modal.getOrCreateInstance(modalEl).show();
+            } else {
+                fallbackShowModal();
+            }
+        }
+
+        function closeDenominationModal() {
+            if (window.bootstrap && bootstrap.Modal && modalEl) {
+                bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+            }
+            fallbackHideModal();
+        }
+
+        function selectMode(mode, openCash) {
+            const isCash = mode === 'cash';
+            modeInput.value = isCash ? 'cash' : 'upi';
+            cashCheck.checked = isCash;
+            upiCheck.checked = !isCash;
+            cashCard?.classList.toggle('active', isCash);
+            upiCard?.classList.toggle('active', !isCash);
+            if (referenceLabel) {
+                referenceLabel.textContent = isCash ? 'Cash Remarks / Reference' : 'UPI Reference';
+            }
+            if (referenceNo) {
+                referenceNo.placeholder = isCash ? 'Optional cash reference / remarks' :
+                    'UPI transaction ID optional';
+            }
+            if (openCashBtn) {
+                openCashBtn.style.display = isCash ? 'inline-flex' : 'none';
+            }
+            if (isCash && openCash) {
+                openDenominationModal();
+            }
+        }
+
+        cashCard?.addEventListener('click', function(e) {
+            e.preventDefault();
+            selectMode('cash', true);
+        });
+        upiCard?.addEventListener('click', function(e) {
+            e.preventDefault();
+            selectMode('upi', false);
+        });
+        cashCheck?.addEventListener('change', function() {
+            selectMode('cash', true);
+        });
+        upiCheck?.addEventListener('change', function() {
+            selectMode('upi', false);
+        });
+        openCashBtn?.addEventListener('click', function() {
+            selectMode('cash', true);
+        });
+        amountInput?.addEventListener('input', denominationTotal);
+        denomInputs.forEach(function(input) {
+            input.addEventListener('input', denominationTotal);
+        });
+
+        document.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                setTimeout(fallbackHideModal, 10);
+            });
+        });
+
+        saveDenomBtn?.addEventListener('click', function() {
+            const expected = amountValue();
+            const total = denominationTotal();
+            if (Math.abs(total - expected) > 0.009) {
+                showError('Denomination total ' + money(total) + ' must match payment amount ' + money(
+                    expected) + '.');
+                return;
+            }
+            showError('');
+            closeDenominationModal();
+        });
+
+        form.addEventListener('submit', function(e) {
+            if (modeInput.value === 'cash') {
+                const expected = amountValue();
+                const total = denominationTotal();
+                if (Math.abs(total - expected) > 0.009) {
+                    e.preventDefault();
+                    showError('Denomination total ' + money(total) + ' must match payment amount ' + money(
+                        expected) + '.');
+                    openDenominationModal();
+                    return false;
+                }
+            }
+            if (!confirm('Collect this payment?')) {
+                e.preventDefault();
+                return false;
+            }
+        });
+
+        selectMode('cash', false);
+        denominationTotal();
+    })();
+    </script>
 </body>
+
 </html>
