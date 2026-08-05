@@ -1020,7 +1020,7 @@ if (!function_exists('subhiksha_send_template_whatsapp')) {
 
 if (!function_exists('subhiksha_watzup_get_sent_messages')) {
     /**
-     * Compatibility stub for old pages that called the former Watzup report.
+     * Compatibility stub for old pages that called the former Watzup report edited.
      * Meta delivery updates should be handled through webhooks and local logs.
      */
     function subhiksha_watzup_get_sent_messages(
