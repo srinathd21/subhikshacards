@@ -931,6 +931,29 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                     );
                 }
 
+                /*
+                 * Meta dynamic URL buttons already contain the fixed invoice
+                 * URL in the approved template. Only the dynamic Proforma ID
+                 * must be supplied here. Passing the complete PDF URL makes
+                 * Meta append one URL to another and produces an invalid link.
+                 */
+                $invoiceButtonValue = '';
+                $invoiceUrlParts = parse_url($invoiceLink);
+                if (is_array($invoiceUrlParts) && !empty($invoiceUrlParts['query'])) {
+                    $invoiceQuery = [];
+                    parse_str((string)$invoiceUrlParts['query'], $invoiceQuery);
+                    $invoiceButtonValue = trim((string)($invoiceQuery['id'] ?? ''));
+                }
+
+                if ($invoiceButtonValue === '') {
+                    return subhiksha_wa_failed_result(
+                        $conn,
+                        $context,
+                        'WhatsApp invoice button could not be prepared.',
+                        'Proforma ID is missing from proforma_pdf_link.'
+                    );
+                }
+
                 $components[] = [
                     'type' => 'button',
                     'sub_type' => 'url',
@@ -938,7 +961,7 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                     'parameters' => [
                         [
                             'type' => 'text',
-                            'text' => $invoiceLink
+                            'text' => $invoiceButtonValue
                         ]
                     ]
                 ];
