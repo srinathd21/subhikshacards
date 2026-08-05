@@ -266,7 +266,9 @@ if (!function_exists('subhiksha_wa_log')) {
 
 if (!function_exists('subhiksha_wa_supported_template_keys')) {
     /**
-     * Meta template variable order must exactly match the approved template.
+     * The 13 Meta-approved templates and their exact BODY variable order.
+     * Do not reorder these values unless the corresponding approved Meta
+     * template is changed as well.
      */
     function subhiksha_wa_supported_template_keys(): array
     {
@@ -278,14 +280,6 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'enquiry_no',
                     'function_type',
                     'function_date'
-                ]
-            ],
-            'followup_updated' => [
-                'module' => 'Follow-ups',
-                'variables' => [
-                    'customer_name',
-                    'enquiry_no',
-                    'next_followup_date'
                 ]
             ],
             'quotation_created' => [
@@ -313,7 +307,7 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'proforma_pdf_link'
                 ]
             ],
-            'advance_payment_received' => [
+            'payment_recieved' => [
                 'module' => 'Payments',
                 'variables' => [
                     'customer_name',
@@ -323,75 +317,6 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'payment_mode',
                     'balance_amount'
                 ]
-            ],
-            'job_card_created' => [
-                'module' => 'Job Cards',
-                'variables' => [
-                    'customer_name',
-                    'job_card_no',
-                    'product_name',
-                    'order_type',
-                    'current_stage',
-                    'delivery_date'
-                ]
-            ],
-            'designing_started' => [
-                'module' => 'Job Tracking',
-                'variables' => ['customer_name', 'job_card_no']
-            ],
-            'proofing_ready' => [
-                'module' => 'Job Tracking',
-                'variables' => ['customer_name', 'job_card_no']
-            ],
-            'design_approval_required' => [
-                'module' => 'Customer Approvals',
-                'variables' => [
-                    'customer_name',
-                    'job_card_no',
-                    'tracking_link'
-                ]
-            ],
-            'design_approved' => [
-                'module' => 'Customer Approvals',
-                'variables' => ['customer_name', 'job_card_no']
-            ],
-            'printing_started' => [
-                'module' => 'Job Tracking',
-                'variables' => [
-                    'customer_name',
-                    'job_card_no',
-                    'printing_type',
-                    'current_stage'
-                ]
-            ],
-            'lamination_started' => [
-                'module' => 'Job Tracking',
-                'variables' => [
-                    'customer_name',
-                    'job_card_no',
-                    'lamination_type'
-                ]
-            ],
-            'ready_for_delivery' => [
-                'module' => 'Dispatch',
-                'variables' => [
-                    'customer_name',
-                    'job_card_no',
-                    'balance_amount'
-                ]
-            ],
-            'dispatch_completed' => [
-                'module' => 'Dispatch',
-                'variables' => [
-                    'customer_name',
-                    'job_card_no',
-                    'dispatch_mode',
-                    'dispatch_reference'
-                ]
-            ],
-            'job_completed' => [
-                'module' => 'Job Cards',
-                'variables' => ['customer_name', 'job_card_no']
             ],
             'payment_completed' => [
                 'module' => 'Payments',
@@ -406,30 +331,18 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'proforma_pdf_link'
                 ]
             ],
-            'proofing_ready_for_approval' => [
-                'module' => 'Customer Approvals',
+            'job_card_created' => [
+                'module' => 'Job Cards',
                 'variables' => [
                     'customer_name',
                     'job_card_no',
-                    'stage_name',
                     'product_name',
-                    'delivery_date',
-                    'approval_link',
-                    'tracking_link'
+                    'order_type',
+                    'current_stage',
+                    'delivery_date'
                 ]
             ],
-            'design_ready_for_approval' => [
-                'module' => 'Customer Approvals',
-                'variables' => [
-                    'customer_name',
-                    'job_card_no',
-                    'stage_name',
-                    'delivery_date',
-                    'approval_link',
-                    'tracking_link'
-                ]
-            ],
-            'job_stage_started' => [
+            'job_card_status' => [
                 'module' => 'Job Tracking',
                 'variables' => [
                     'customer_name',
@@ -493,8 +406,40 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'job_card_no',
                     'google_review_link'
                 ]
+            ],
+            'design_ready_for_approval' => [
+                'module' => 'Customer Approvals',
+                'variables' => [
+                    'customer_name',
+                    'job_card_no',
+                    'stage_name',
+                    'delivery_date',
+                    'approval_link',
+                    'tracking_link'
+                ]
             ]
         ];
+    }
+}
+
+if (!function_exists('subhiksha_wa_canonical_template_key')) {
+    /**
+     * Compatibility for an older ERP status call. The approved Meta template
+     * is job_card_status; older job-card pages called the same message
+     * job_stage_started.
+     *
+     * advance_payment_received is deliberately NOT aliased to
+     * payment_recieved: those are different templates in this project.
+     */
+    function subhiksha_wa_canonical_template_key(string $templateKey): string
+    {
+        $templateKey = strtolower(trim($templateKey));
+
+        $aliases = [
+            'job_stage_started' => 'job_card_status'
+        ];
+
+        return $aliases[$templateKey] ?? $templateKey;
     }
 }
 
@@ -545,6 +490,7 @@ if (!function_exists('subhiksha_meta_template_parameters')) {
         string $templateKey,
         array $variables
     ): array {
+        $templateKey = subhiksha_wa_canonical_template_key($templateKey);
         $definitions = subhiksha_wa_supported_template_keys();
 
         if (!isset($definitions[$templateKey])) {
@@ -851,7 +797,10 @@ if (!function_exists('subhiksha_send_whatsapp')) {
         $mobile = subhiksha_wa_normalize_mobile(
             (string)($params['mobile'] ?? '')
         );
-        $templateKey = trim((string)($params['template_key'] ?? ''));
+        $requestedTemplateKey = trim((string)($params['template_key'] ?? ''));
+        $templateKey = subhiksha_wa_canonical_template_key(
+            $requestedTemplateKey
+        );
         $variables = (array)($params['variables'] ?? []);
         $message = trim((string)($params['message'] ?? ''));
         $templateId = null;
@@ -1039,6 +988,7 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                     . (string)($apiResult['message'] ?? 'Unknown Meta error.'),
             'provider' => 'meta_cloud',
             'template_key' => $templateKey,
+            'requested_template_key' => $requestedTemplateKey,
             'message_id' => $messageId,
             'log_id' => $logId,
             'http_code' => (int)($apiResult['http_code'] ?? 0),
@@ -1070,7 +1020,7 @@ if (!function_exists('subhiksha_send_template_whatsapp')) {
 
 if (!function_exists('subhiksha_watzup_get_sent_messages')) {
     /**
-     * Compatibility stub for old pages that called the former Watzup report.
+     * Compatibility stub for old pages that called the former Watzup report edited.
      * Meta delivery updates should be handled through webhooks and local logs.
      */
     function subhiksha_watzup_get_sent_messages(
