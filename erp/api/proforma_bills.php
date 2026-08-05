@@ -1005,29 +1005,25 @@ function pb_setting_value(mysqli $conn, string $key, string $default = ''): stri
 function pb_whatsapp_api_ready(mysqli $conn): bool
 {
     $enabled = pb_setting_value($conn, 'whatsapp_enabled', '0');
-    $apiUrl = pb_setting_value($conn, 'watzup_api_url', '');
-    $apiToken = pb_setting_value($conn, 'watzup_api_token', '');
-    $senderId = pb_setting_value($conn, 'watzup_sender_id', '');
 
     if ($enabled !== '1') {
         return false;
     }
 
-    $dummyValues = [
-        '',
-        'https://your-whatsapp-provider-url/send-message',
-        'PASTE_YOUR_SECRET_KEY_HERE',
-        'PASTE_YOUR_UNIQUE_ID_HERE',
-        'YOUR_REAL_API_URL',
-        'YOUR_REAL_SECRET_KEY',
-        'YOUR_REAL_UNIQUE_ID_OR_ACCOUNT_ID'
-    ];
-
-    if (in_array($apiUrl, $dummyValues, true) || in_array($apiToken, $dummyValues, true) || in_array($senderId, $dummyValues, true)) {
-        return false;
+    $accessToken = trim((string)(getenv('SUBHIKSHA_WHATSAPP_ACCESS_TOKEN') ?: ''));
+    if ($accessToken === '') {
+        $accessToken = trim((string)(getenv('SUBHIKSHA_WHATSAPP_API_KEY') ?: ''));
+    }
+    if ($accessToken === '') {
+        $accessToken = pb_setting_value($conn, 'meta_whatsapp_access_token', '');
     }
 
-    return filter_var($apiUrl, FILTER_VALIDATE_URL) !== false;
+    $phoneNumberId = trim((string)(getenv('SUBHIKSHA_WHATSAPP_PHONE_NUMBER_ID') ?: ''));
+    if ($phoneNumberId === '') {
+        $phoneNumberId = pb_setting_value($conn, 'meta_whatsapp_phone_number_id', '');
+    }
+
+    return $accessToken !== '' && $phoneNumberId !== '';
 }
 
 function pb_whatsapp_mobile($mobile): string
@@ -1365,19 +1361,29 @@ function pb_send_whatsapp_by_api(mysqli $conn, int $id): array
         }
     }
 
-    $message = pb_whatsapp_template_message($conn, 'proforma_created', $row);
-    if (trim($message) === '') {
-        $vars = pb_whatsapp_variables($conn, $row);
-        $message = "Hi " . ($vars['customer_name'] ?: 'Customer') . ",\n\n"
-            . "Your proforma bill " . ($vars['proforma_no'] ?: '-') . " has been created.\n"
-            . "Final Amount: " . ($vars['final_amount'] ?: '-') . "\n"
-            . "Advance Paid: " . ($vars['advance_amount'] ?: '-') . "\n"
-            . "Balance: " . ($vars['balance_amount'] ?: '-') . "\n"
-            . "Delivery Date: " . ($vars['delivery_date'] ?: '-') . "\n\n"
-            . "Proforma Invoice PDF:\n" . ($vars['proforma_pdf_link'] ?: $vars['invoice_link']) . "\n\n"
-            . "Thank you,\nSubhiksha Cards";
+    $vars = pb_whatsapp_variables($conn, $row);
+
+    // Use the generated PDF URL when the helper has just produced one.
+    if (!empty($row['proforma_pdf_link'])) {
+        $vars['proforma_pdf_link'] = (string)$row['proforma_pdf_link'];
     }
-    $message = pb_append_invoice_link_to_message($conn, $row, $message);
+
+    if (trim((string)($vars['proforma_pdf_link'] ?? '')) === '') {
+        $vars['proforma_pdf_link'] = pb_proforma_pdf_link($conn, $row);
+    }
+
+    // These keys and this order match the approved Meta proforma_created
+    // template configured in includes/whatsapp-api.php.
+    $templateVariables = [
+        'customer_name' => (string)($vars['customer_name'] ?? 'Customer'),
+        'proforma_no' => (string)($vars['proforma_no'] ?? '-'),
+        'product_name' => (string)($vars['product_name'] ?? '-'),
+        'final_amount' => (string)($vars['final_amount'] ?? '-'),
+        'advance_amount' => (string)($vars['advance_amount'] ?? '-'),
+        'balance_amount' => (string)($vars['balance_amount'] ?? '-'),
+        'delivery_date' => (string)($vars['delivery_date'] ?? '-'),
+        'proforma_pdf_link' => (string)($vars['proforma_pdf_link'] ?? '')
+    ];
 
     $meta = [
         'related_module' => 'Proforma Bills',
@@ -1386,10 +1392,61 @@ function pb_send_whatsapp_by_api(mysqli $conn, int $id): array
         'sent_by' => (int)($_SESSION['user_id'] ?? 0)
     ];
 
-    return subhiksha_send_whatsapp($conn, array_merge($meta, [
-        'mobile' => (string)($row['mobile'] ?? ''),
-        'message' => $message
-    ]));
+    /*
+     * The current database uses "en" globally, while older Meta logs for
+     * proforma_created show error 132001 (template translation not found in
+     * that language). Try the configured language first and only retry common
+     * English variants when Meta specifically reports that translation error.
+     * No retry is made for token, phone, parameter or other API errors.
+     */
+    $preferredLanguage = pb_setting_value($conn, 'meta_whatsapp_proforma_language_code', '');
+    if ($preferredLanguage === '') {
+        $preferredLanguage = pb_setting_value($conn, 'meta_whatsapp_language_code', 'en');
+    }
+
+    $languageCandidates = [];
+    foreach ([$preferredLanguage, 'en_US', 'en_GB', 'en'] as $languageCode) {
+        $languageCode = trim((string)$languageCode);
+        if ($languageCode !== '' && !in_array($languageCode, $languageCandidates, true)) {
+            $languageCandidates[] = $languageCode;
+        }
+    }
+
+    $lastResult = ['success' => false, 'message' => 'WhatsApp template sending failed.'];
+
+    foreach ($languageCandidates as $languageCode) {
+        $sendMeta = $meta;
+        $sendMeta['language_code'] = $languageCode;
+
+        if (function_exists('subhiksha_send_template_whatsapp')) {
+            $result = subhiksha_send_template_whatsapp(
+                $conn,
+                'proforma_created',
+                (string)($row['mobile'] ?? ''),
+                $templateVariables,
+                $sendMeta
+            );
+        } else {
+            $result = subhiksha_send_whatsapp($conn, array_merge($sendMeta, [
+                'mobile' => (string)($row['mobile'] ?? ''),
+                'template_key' => 'proforma_created',
+                'variables' => $templateVariables
+            ]));
+        }
+
+        $lastResult = $result;
+
+        if (!empty($result['success'])) {
+            return $result;
+        }
+
+        $metaErrorCode = (int)($result['response']['error']['code'] ?? 0);
+        if ($metaErrorCode !== 132001) {
+            return $result;
+        }
+    }
+
+    return $lastResult;
 }
 
 function pb_send_whatsapp_preferred(mysqli $conn, int $id): array
