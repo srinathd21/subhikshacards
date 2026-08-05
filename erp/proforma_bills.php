@@ -799,8 +799,7 @@ foreach ($rows as $statRow) {
 
                                             <?php if ($canSendWhatsapp): ?>
                                             <a title="Send WhatsApp" aria-label="Send WhatsApp" href="#"
-                                                data-api-url="api/proforma_whatsapp_send.php"
-                                                data-id="<?= (int)$row['id'] ?>"
+                                                data-api-url="api/proforma_bills.php" data-id="<?= (int)$row['id'] ?>"
                                                 class="btn btn-sm btn-whatsapp-icon rounded-circle fw-bold btn-action-icon js-proforma-whatsapp-link">
                                                 <?= pb_fast_whatsapp_svg() ?>
                                             </a>
@@ -897,7 +896,7 @@ foreach ($rows as $statRow) {
 
                                 <?php if ($canSendWhatsapp): ?>
                                 <a title="Send WhatsApp" aria-label="Send WhatsApp" href="#"
-                                    data-api-url="api/proforma_whatsapp_send.php" data-id="<?= (int)$row['id'] ?>"
+                                    data-api-url="api/proforma_bills.php" data-id="<?= (int)$row['id'] ?>"
                                     class="btn btn-sm btn-whatsapp-icon rounded-circle fw-bold btn-action-icon js-proforma-whatsapp-link"><?= pb_fast_whatsapp_svg() ?></a>
                                 <?php endif; ?>
 
@@ -1002,7 +1001,7 @@ foreach ($rows as $statRow) {
 
                 const id = link.getAttribute('data-id') || '';
                 const apiUrl = link.getAttribute('data-api-url') ||
-                    'api/proforma_whatsapp_send.php';
+                    'api/proforma_bills.php';
 
                 if (!id) {
                     showToast('Invalid proforma bill id.', 'danger', 'Failed');
@@ -1019,7 +1018,7 @@ foreach ($rows as $statRow) {
 
                 const formData = new FormData();
                 formData.append('csrf_token', <?= json_encode($csrfToken) ?>);
-                formData.append('action', 'send_proforma_whatsapp');
+                formData.append('action', 'send_whatsapp_api');
                 formData.append('id', id);
 
                 fetch(apiUrl, {
@@ -1036,6 +1035,10 @@ foreach ($rows as $statRow) {
                             data.status ? 'success' : 'danger',
                             data.status ? 'Success' : 'Failed'
                         );
+
+                        if (data.open_whatsapp_url) {
+                            window.location.href = data.open_whatsapp_url;
+                        }
                     })
                     .catch(() => {
                         showToast(
