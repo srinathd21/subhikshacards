@@ -327,7 +327,8 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'paid_amount',
                     'total_paid',
                     'balance_amount',
-                    'payment_date'
+                    'payment_date',
+                    'proforma_pdf_link'
                 ]
             ],
             'job_card_created' => [
@@ -906,64 +907,6 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                 $components[] = [
                     'type' => 'body',
                     'parameters' => $parameterResult['parameters']
-                ];
-            }
-
-            /*
-             * payment_completed_ has seven BODY variables. The Proforma PDF
-             * link belongs to the approved "Download Invoice" URL button and
-             * must be sent as a button component, not as an eighth BODY value.
-             */
-            if ($templateKey === 'payment_completed_') {
-                $invoiceLinkFound = false;
-                $invoiceLink = subhiksha_meta_variable_value(
-                    'proforma_pdf_link',
-                    $variables,
-                    $invoiceLinkFound
-                );
-
-                if (!$invoiceLinkFound || trim($invoiceLink) === '') {
-                    return subhiksha_wa_failed_result(
-                        $conn,
-                        $context,
-                        'WhatsApp template variables are incomplete.',
-                        'Missing template variable: proforma_pdf_link'
-                    );
-                }
-
-                /*
-                 * Meta dynamic URL buttons already contain the fixed invoice
-                 * URL in the approved template. Only the dynamic Proforma ID
-                 * must be supplied here. Passing the complete PDF URL makes
-                 * Meta append one URL to another and produces an invalid link.
-                 */
-                $invoiceButtonValue = '';
-                $invoiceUrlParts = parse_url($invoiceLink);
-                if (is_array($invoiceUrlParts) && !empty($invoiceUrlParts['query'])) {
-                    $invoiceQuery = [];
-                    parse_str((string)$invoiceUrlParts['query'], $invoiceQuery);
-                    $invoiceButtonValue = trim((string)($invoiceQuery['id'] ?? ''));
-                }
-
-                if ($invoiceButtonValue === '') {
-                    return subhiksha_wa_failed_result(
-                        $conn,
-                        $context,
-                        'WhatsApp invoice button could not be prepared.',
-                        'Proforma ID is missing from proforma_pdf_link.'
-                    );
-                }
-
-                $components[] = [
-                    'type' => 'button',
-                    'sub_type' => 'url',
-                    'index' => '0',
-                    'parameters' => [
-                        [
-                            'type' => 'text',
-                            'text' => $invoiceButtonValue
-                        ]
-                    ]
                 ];
             }
 
