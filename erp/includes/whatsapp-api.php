@@ -349,8 +349,7 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'stage_name',
                     'status_name',
                     'product_name',
-                    'delivery_date',
-                    'tracking_link'
+                    'delivery_date'
                 ]
             ],
             'job_stage_completed' => [
@@ -359,8 +358,7 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'customer_name',
                     'job_card_no',
                     'stage_name',
-                    'delivery_date',
-                    'tracking_link'
+                    'delivery_date'
                 ]
             ],
             'job_stage_delayed' => [
@@ -372,19 +370,17 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'status_name',
                     'delay_reason',
                     'delay_days',
-                    'remarks',
-                    'tracking_link'
+                    'remarks'
                 ]
             ],
-            'job_stage_cancelled' => [
+            'job_stage_cancelled_' => [
                 'module' => 'Job Tracking',
                 'variables' => [
                     'customer_name',
                     'job_card_no',
                     'stage_name',
                     'status_name',
-                    'remarks',
-                    'tracking_link'
+                    'remarks'
                 ]
             ],
             'job_stage_updated' => [
@@ -394,16 +390,14 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'job_card_no',
                     'stage_name',
                     'status_name',
-                    'remarks',
-                    'tracking_link'
+                    'remarks'
                 ]
             ],
-            'job_completed_review_request' => [
+            'google_review_link' => [
                 'module' => 'Reviews',
                 'variables' => [
                     'customer_name',
-                    'job_card_no',
-                    'google_review_link'
+                    'job_card_no'
                 ]
             ],
             'design_ready_for_approval' => [
@@ -438,6 +432,9 @@ if (!function_exists('subhiksha_wa_canonical_template_key')) {
 
         $aliases = [
             'job_stage_started' => 'job_card_status',
+            'job_stage_cancelled' => 'job_stage_cancelled_',
+            'job_completed_review_request' => 'google_review_link',
+            'proofing_ready_for_approval' => 'design_ready_for_approval',
             'payment_completed' => 'payment_completed_'
         ];
 
