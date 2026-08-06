@@ -1011,15 +1011,9 @@ function jcvCustomerTrackingUrl(mysqli $conn, array $job): string
 
 function jcvApprovalTemplateKey(array $job, array $step): string
 {
-    $stepKey = strtolower(trim((string)($step['step_key'] ?? '')));
-    $stepName = strtolower(trim((string)($step['step_name'] ?? '')));
-    $orderType = strtolower(trim((string)($job['order_type'] ?? '')));
-
-    if (strpos($stepKey, 'design') !== false || strpos($stepName, 'design') !== false || $orderType === 'customized') {
-        return 'design_ready_for_approval';
-    }
-
-    return 'proofing_ready_for_approval';
+    // This is the active/approved Meta template used for both readymade
+    // proof approval and customized design approval.
+    return 'design_ready_for_approval';
 }
 
 function jcvSendPhotoApprovalByApi(mysqli $conn, array $job, array $step, array $approval, int $sentBy = 0): array
@@ -1120,7 +1114,7 @@ function jcvSendJobCompletedReviewWhatsapp(mysqli $conn, array $job, int $sentBy
     if (function_exists('subhiksha_send_template_whatsapp')) {
         return subhiksha_send_template_whatsapp(
             $conn,
-            'job_completed_review_request',
+            'google_review_link',
             $mobile,
             $variables,
             $meta
@@ -1128,7 +1122,7 @@ function jcvSendJobCompletedReviewWhatsapp(mysqli $conn, array $job, int $sentBy
     }
 
     $meta['mobile'] = $mobile;
-    $meta['template_key'] = 'job_completed_review_request';
+    $meta['template_key'] = 'google_review_link';
     $meta['variables'] = $variables;
 
     return subhiksha_send_whatsapp($conn, $meta);
@@ -1143,10 +1137,10 @@ function jcvStageStatusLabel(string $status): string
 function jcvTrackingTemplateKey(string $status): string
 {
     $status = strtolower(trim($status));
-    if ($status === 'in_progress') return 'job_stage_started';
+    if ($status === 'in_progress') return 'job_card_status';
     if ($status === 'completed') return 'job_stage_completed';
     if ($status === 'delayed') return 'job_stage_delayed';
-    if ($status === 'cancelled') return 'job_stage_cancelled';
+    if ($status === 'cancelled') return 'job_stage_cancelled_';
     return 'job_stage_updated';
 }
 
