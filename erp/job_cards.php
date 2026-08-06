@@ -494,7 +494,7 @@ function jcBuildCustomerTrackingLink(array $job): string
 
 function jcSendReadymadeScreenStartWhatsapp(mysqli $conn, array $job): array
 {
-    if (!function_exists('subhiksha_send_whatsapp')) {
+    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
         return [
             'success' => false,
             'message' => 'WhatsApp API helper is not available. Place whatsapp-api.php inside includes/ folder.',
@@ -517,26 +517,44 @@ function jcSendReadymadeScreenStartWhatsapp(mysqli $conn, array $job): array
     $jobNo = trim((string)($job['job_card_no'] ?? ($job['job_no'] ?? '')));
     $productName = trim((string)($job['product_name'] ?? 'Cards')) ?: 'Cards';
     $trackingLink = jcBuildCustomerTrackingLink($job);
+    $deliveryDate = !empty($job['delivery_date'])
+        ? date('d-m-Y', strtotime((string)$job['delivery_date']))
+        : '-';
 
-    $message = "Dear {$customerName},\n\n";
-    $message .= "Your Master Copy has been received for Job Card {$jobNo}.\n";
-    $message .= "Printing is now in progress.\n\n";
-    $message .= "Product: {$productName}\n";
-    if ($trackingLink !== '') {
-        $message .= "Track your order: {$trackingLink}\n\n";
-    }
-    $message .= "- Subhiksha Cards";
+    // Meta-approved job_card_status BODY: 6 parameters.
+    $variables = [
+        'customer_name' => $customerName,
+        'job_card_no' => $jobNo !== '' ? $jobNo : '-',
+        'stage_name' => 'Printing',
+        'status_name' => 'In Progress',
+        'product_name' => $productName,
+        'delivery_date' => $deliveryDate,
+        'tracking_link' => $trackingLink,
+    ];
+
+    $meta = [
+        'related_module' => 'Job Tracking',
+        'related_id' => (int)($job['id'] ?? 0),
+        'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
+        'job_card_id' => (int)($job['id'] ?? 0),
+        'sent_by' => (int)($_SESSION['user_id'] ?? 0),
+    ];
 
     try {
-        return subhiksha_send_whatsapp($conn, [
-            'mobile' => $mobile,
-            'message' => $message,
-            'related_module' => 'Job Tracking',
-            'related_id' => (int)($job['id'] ?? 0),
-            'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
-            'job_card_id' => (int)($job['id'] ?? 0),
-            'sent_by' => (int)($_SESSION['user_id'] ?? 0)
-        ]);
+        if (function_exists('subhiksha_send_template_whatsapp')) {
+            return subhiksha_send_template_whatsapp(
+                $conn,
+                'job_card_status',
+                $mobile,
+                $variables,
+                $meta
+            );
+        }
+
+        $meta['mobile'] = $mobile;
+        $meta['template_key'] = 'job_card_status';
+        $meta['variables'] = $variables;
+        return subhiksha_send_whatsapp($conn, $meta);
     } catch (Throwable $e) {
         return [
             'success' => false,
@@ -550,7 +568,7 @@ function jcSendReadymadeScreenStartWhatsapp(mysqli $conn, array $job): array
 
 function jcSendReadymadeScreenCompleteWhatsapp(mysqli $conn, array $job): array
 {
-    if (!function_exists('subhiksha_send_whatsapp')) {
+    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
         return [
             'success' => false,
             'message' => 'WhatsApp API helper is not available. Place whatsapp-api.php inside includes/ folder.',
@@ -571,36 +589,43 @@ function jcSendReadymadeScreenCompleteWhatsapp(mysqli $conn, array $job): array
 
     $customerName = trim((string)($job['customer_name'] ?? 'Customer')) ?: 'Customer';
     $jobNo = trim((string)($job['job_card_no'] ?? ($job['job_no'] ?? '')));
-    $productName = trim((string)($job['product_name'] ?? 'Cards')) ?: 'Cards';
     $trackingLink = jcBuildCustomerTrackingLink($job);
+    $deliveryDate = !empty($job['delivery_date'])
+        ? date('d-m-Y', strtotime((string)$job['delivery_date']))
+        : '-';
 
-    $message = "Dear {$customerName},
+    // Meta-approved job_stage_completed BODY: 4 parameters.
+    $variables = [
+        'customer_name' => $customerName,
+        'job_card_no' => $jobNo !== '' ? $jobNo : '-',
+        'stage_name' => 'Printing',
+        'delivery_date' => $deliveryDate,
+        'tracking_link' => $trackingLink,
+    ];
 
-";
-    $message .= "Your Screen Printing work has been completed for Job Card {$jobNo}.
-";
-    $message .= "Your order has been sent to Dispatch process.
-
-";
-    $message .= "Product: {$productName}
-";
-    if ($trackingLink !== '') {
-        $message .= "Track your order: {$trackingLink}
-
-";
-    }
-    $message .= "- Subhiksha Cards";
+    $meta = [
+        'related_module' => 'Job Tracking',
+        'related_id' => (int)($job['id'] ?? 0),
+        'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
+        'job_card_id' => (int)($job['id'] ?? 0),
+        'sent_by' => (int)($_SESSION['user_id'] ?? 0),
+    ];
 
     try {
-        return subhiksha_send_whatsapp($conn, [
-            'mobile' => $mobile,
-            'message' => $message,
-            'related_module' => 'Job Tracking',
-            'related_id' => (int)($job['id'] ?? 0),
-            'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
-            'job_card_id' => (int)($job['id'] ?? 0),
-            'sent_by' => (int)($_SESSION['user_id'] ?? 0)
-        ]);
+        if (function_exists('subhiksha_send_template_whatsapp')) {
+            return subhiksha_send_template_whatsapp(
+                $conn,
+                'job_stage_completed',
+                $mobile,
+                $variables,
+                $meta
+            );
+        }
+
+        $meta['mobile'] = $mobile;
+        $meta['template_key'] = 'job_stage_completed';
+        $meta['variables'] = $variables;
+        return subhiksha_send_whatsapp($conn, $meta);
     } catch (Throwable $e) {
         return [
             'success' => false,
@@ -611,7 +636,7 @@ function jcSendReadymadeScreenCompleteWhatsapp(mysqli $conn, array $job): array
     }
 }
 
-function jcRunReadymadeScreenShortcut(mysqli $conn, int $jobId, string $shortcutAction, string $roleKey): void
+function jcRunReadymadeScreenShortcut(mysqli $conn, int $jobId, string $shortcutAction, string $roleKey): array
 {
     if ($roleKey !== 'screen_printing') {
         throw new RuntimeException('Only Screen Printing team can use this shortcut.');
@@ -707,11 +732,10 @@ function jcRunReadymadeScreenShortcut(mysqli $conn, int $jobId, string $shortcut
         $conn->commit();
 
         if ($shortcutAction === 'readymade_screen_start') {
-            jcSendReadymadeScreenStartWhatsapp($conn, $job);
-        } elseif ($shortcutAction === 'readymade_screen_complete') {
-            // No customer WhatsApp for internal Send to Dispatch update.
-            // Status update is already saved above.
+            return jcSendReadymadeScreenStartWhatsapp($conn, $job);
         }
+
+        return jcSendReadymadeScreenCompleteWhatsapp($conn, $job);
     } catch (Throwable $e) {
         $conn->rollback();
         throw $e;
@@ -729,10 +753,19 @@ $shortcutCsrfToken = $_SESSION['job_cards_shortcut_csrf'];
 $message = '';
 $messageType = 'success';
 if (!empty($_GET['shortcut_msg'])) {
+    $shortcutWaStatus = strtolower(trim((string)($_GET['wa'] ?? '')));
     if ($_GET['shortcut_msg'] === 'started') {
-        $message = 'Readymade Screen Print job started. Master Copy Received message sent/recorded and Printing opened.';
+        $message = $shortcutWaStatus === 'failed'
+            ? 'Readymade Screen Print job started, but customer WhatsApp failed. Check WhatsApp logs.'
+            : 'Readymade Screen Print job started and customer WhatsApp sent. Printing opened.';
     } elseif ($_GET['shortcut_msg'] === 'completed') {
-        $message = 'Readymade Screen Print job completed up to Send to Dispatch. No WhatsApp sent for internal dispatch handover.';
+        $message = $shortcutWaStatus === 'failed'
+            ? 'Readymade Screen Print job completed, but customer WhatsApp failed. Check WhatsApp logs.'
+            : 'Readymade Screen Print job completed up to Send to Dispatch and customer WhatsApp sent.';
+    }
+
+    if ($shortcutWaStatus === 'failed') {
+        $messageType = 'danger';
     }
 }
 
@@ -761,10 +794,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array(($_POST['action'] ?? ''), 
 
         $jobId = (int)($_POST['job_card_id'] ?? 0);
         $action = (string)$_POST['action'];
-        jcRunReadymadeScreenShortcut($conn, $jobId, $action, $roleKey);
+        $waResult = jcRunReadymadeScreenShortcut($conn, $jobId, $action, $roleKey);
 
         jcRedirectBack([
-            'shortcut_msg' => $action === 'readymade_screen_start' ? 'started' : 'completed'
+            'shortcut_msg' => $action === 'readymade_screen_start' ? 'started' : 'completed',
+            'wa' => !empty($waResult['success']) ? 'sent' : 'failed'
         ]);
     } catch (Throwable $e) {
         $message = $e->getMessage();
