@@ -1217,7 +1217,7 @@ if (!function_exists('subhiksha_meta_url_button_value')) {
             'message' => 'URL button value prepared.'
         ];
     }
-}
+})();
   </script>
 </body>
 
