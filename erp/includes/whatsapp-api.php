@@ -406,9 +406,7 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'customer_name',
                     'job_card_no',
                     'stage_name',
-                    'delivery_date',
-                    'approval_link',
-                    'tracking_link'
+                    'delivery_date'
                 ]
             ]
         ];
@@ -435,6 +433,7 @@ if (!function_exists('subhiksha_wa_canonical_template_key')) {
             'job_stage_cancelled' => 'job_stage_cancelled_',
             'job_completed_review_request' => 'google_review_link',
             'proofing_ready_for_approval' => 'design_ready_for_approval',
+            'design_approval' => 'design_ready_for_approval',
             'payment_completed' => 'payment_completed_'
         ];
 
@@ -964,16 +963,86 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                 ];
             }
 
+            /*
+             * Job tracking/approval templates use dynamic URL buttons.
+             * tracking_link and approval_link are button values, NOT BODY
+             * variables.  The indexes below match the approved Meta templates:
+             *   design_approval: Approve/Reject = 0, Track Now = 1
+             *   job status templates: Track Now = 0
+             */
+            $jobUrlButtons = [
+                'job_card_status' => [
+                    ['index' => '0', 'variable' => 'tracking_link']
+                ],
+                'job_stage_completed' => [
+                    ['index' => '0', 'variable' => 'tracking_link']
+                ],
+                'job_stage_delayed' => [
+                    ['index' => '0', 'variable' => 'tracking_link']
+                ],
+                'job_stage_cancelled_' => [
+                    ['index' => '0', 'variable' => 'tracking_link']
+                ],
+                'job_stage_updated' => [
+                    ['index' => '0', 'variable' => 'tracking_link']
+                ],
+                'design_ready_for_approval' => [
+                    ['index' => '0', 'variable' => 'approval_link'],
+                    ['index' => '1', 'variable' => 'tracking_link']
+                ]
+            ];
+
+            foreach (($jobUrlButtons[$templateKey] ?? []) as $buttonSpec) {
+                $buttonResult = subhiksha_meta_url_button_value(
+                    (string)$buttonSpec['variable'],
+                    $variables,
+                    'token'
+                );
+
+                if (empty($buttonResult['success'])) {
+                    return subhiksha_wa_failed_result(
+                        $conn,
+                        $context,
+                        'WhatsApp URL button could not be prepared.',
+                        (string)$buttonResult['message']
+                    );
+                }
+
+                $components[] = [
+                    'type' => 'button',
+                    'sub_type' => 'url',
+                    'index' => (string)$buttonSpec['index'],
+                    'parameters' => [
+                        [
+                            'type' => 'text',
+                            'text' => (string)$buttonResult['value']
+                        ]
+                    ]
+                ];
+            }
+
+            /*
+             * The database keeps the historical ERP key
+             * design_ready_for_approval. Meta's actual approved template name
+             * is design_approval. Keep the DB key for lookup/logging and send
+             * the exact approved Meta name to Cloud API.
+             */
+            $metaTemplateName = trim((string)(
+                $params['meta_template_name'] ?? ''
+            ));
+            if ($metaTemplateName === '') {
+                $metaTemplateName = $templateKey === 'design_ready_for_approval'
+                    ? 'design_approval'
+                    : $templateKey;
+            }
+
             $payload = [
                 'messaging_product' => 'whatsapp',
                 'recipient_type' => 'individual',
                 'to' => $mobile,
                 'type' => 'template',
                 'template' => [
-                    'name' => (string)(
-                        $params['meta_template_name']
-                        ?? $templateKey
-                    ),
+                    'name' => $metaTemplateName,
                     'language' => [
                         'code' => (string)(
                             $params['language_code']
@@ -1091,6 +1160,61 @@ if (!function_exists('subhiksha_watzup_get_sent_messages')) {
             'http_code' => 0,
             'response' => '',
             'data' => null
+        ];
+    }
+}
+
+if (!function_exists('subhiksha_meta_url_button_value')) {
+    /**
+     * Return only the dynamic value used by an approved Meta URL button.
+     *
+     * The ERP stores the complete customer URL (for example
+     * customer_tracking.php?token=abc123), while the Meta template already
+     * stores the fixed URL prefix. Sending the complete URL would make Meta
+     * append one URL to another. For job-card buttons the dynamic value is the
+     * token query-string value only.
+     */
+    function subhiksha_meta_url_button_value(
+        string $variableKey,
+        array $variables,
+        string $queryKey = 'token'
+    ): array {
+        $found = false;
+        $link = subhiksha_meta_variable_value(
+            $variableKey,
+            $variables,
+            $found
+        );
+
+        if (!$found || trim($link) === '') {
+            return [
+                'success' => false,
+                'value' => '',
+                'message' => 'Missing template variable: ' . $variableKey
+            ];
+        }
+
+        $buttonValue = '';
+        $urlParts = parse_url($link);
+        if (is_array($urlParts) && !empty($urlParts['query'])) {
+            $query = [];
+            parse_str((string)$urlParts['query'], $query);
+            $buttonValue = trim((string)($query[$queryKey] ?? ''));
+        }
+
+        if ($buttonValue === '') {
+            return [
+                'success' => false,
+                'value' => '',
+                'message' => 'Dynamic URL value "' . $queryKey
+                    . '" is missing from ' . $variableKey . '.'
+            ];
+        }
+
+        return [
+            'success' => true,
+            'value' => $buttonValue,
+            'message' => 'URL button value prepared.'
         ];
     }
 }
