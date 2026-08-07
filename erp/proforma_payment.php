@@ -388,7 +388,7 @@ function pp_payment_whatsapp_template_key(array $row): string
 
     return ($balanceAfterPayment <= 0.00001)
         ? 'payment_completed_'
-        : 'payment_recieved';
+        : 'payment_received';
 }
 
 function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId): array
@@ -455,9 +455,8 @@ function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId)
         'related_id' => $paymentId,
         'customer_id' => !empty($row['bill_customer_id']) ? (int)$row['bill_customer_id'] : (!empty($row['customer_id']) ? (int)$row['customer_id'] : null),
         'sent_by' => (int)($_SESSION['user_id'] ?? 0),
-        // Keep the historical DB/API key payment_recieved internally, but send
-        // the exact approved Meta template name: payment_received.
-        'meta_template_name' => $templateKey === 'payment_recieved'
+        // Use the exact approved Meta received-payment template name.
+        'meta_template_name' => $templateKey === 'payment_received'
             ? 'payment_received'
             : 'payment_completed_',
         'language_code' => 'en',
