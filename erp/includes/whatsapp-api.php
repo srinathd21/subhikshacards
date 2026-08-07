@@ -1156,7 +1156,7 @@ if (!function_exists('subhiksha_watzup_get_sent_messages')) {
     ): array {
         return [
             'success' => false,
-            'message' => 'The Watzup sent report is unavailable because the project now uses Meta WhatsApp Cloud API. Use whatsapp_logs and Meta webhooks.',
+            'message' => 'The Watzup sent report is unavailable because the project now uses Meta WhatsApp Cloud API.',
             'http_code' => 0,
             'response' => '',
             'data' => null
