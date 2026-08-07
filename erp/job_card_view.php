@@ -1269,7 +1269,8 @@ function jcvSendTrackingUpdateByApi(
     string $remarks = '',
     int $delayReasonId = 0,
     int $delayDays = 0,
-    int $sentBy = 0
+    int $sentBy = 0,
+    string $updatedStageName = ''
 ): array {
     $apiFile = __DIR__ . '/includes/whatsapp-api.php';
     if (!is_file($apiFile)) {
@@ -1295,7 +1296,12 @@ function jcvSendTrackingUpdateByApi(
     $variables = [
         'customer_name' => (string)($job['customer_name'] ?? 'Customer'),
         'job_card_no' => (string)($job['job_card_no'] ?? '-'),
-        'stage_name' => (string)($step['step_name'] ?? 'Job Stage'),
+        // Always send the stage whose tracking row was updated. Do not use
+        // job_cards.current_workflow_step_id here because it may already point
+        // to the next open stage after a completion update.
+        'stage_name' => trim($updatedStageName) !== ''
+            ? trim($updatedStageName)
+            : (string)($step['step_name'] ?? 'Job Stage'),
         'status_name' => $statusLabel,
         'product_name' => jcvResolvedProductName($conn, $job),
         'delivery_date' => !empty($job['delivery_date']) ? date('d-m-Y', strtotime((string)$job['delivery_date'])) : '-',
@@ -2062,6 +2068,13 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                 $message = 'Tracking stage not found.';
                 $messageType = 'danger';
             } else {
+                // Snapshot the submitted tracking row's stage before any
+                // auto-advance/current-workflow recalculation takes place.
+                $updatedStageName = trim((string)($stepRow['step_name'] ?? ''));
+                if ($updatedStageName === '') {
+                    $updatedStageName = 'Job Stage';
+                }
+
                 $stepRoleKey = $stepRow['responsible_role_key'] ?: $stepRow['default_owner_role_key'];
                 $oldStepStatus = strtolower((string)($stepRow['status'] ?? 'pending'));
 
@@ -2400,7 +2413,8 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                             $remarks,
                             $delayReasonId,
                             $delayDays,
-                            $userId
+                            $userId,
+                            $updatedStageName
                         );
                     }
 
