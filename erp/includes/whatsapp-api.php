@@ -421,9 +421,9 @@ if (!function_exists('subhiksha_wa_canonical_template_key')) {
      *
      * The approved completed-payment Meta template has a trailing underscore,
      * so older calls using payment_completed are routed to payment_completed_.
-     * Meta's approved received-payment template is spelled payment_recieved.
-     * Keep older ERP callers compatible so every received-payment send reaches
-     * that same approved template instead of sending a non-existent name.
+     * The ERP/database historically uses payment_recieved as its internal key,
+     * while the actual approved Meta template name is payment_received.
+     * Keep older ERP callers compatible with that historical internal key.
      */
     function subhiksha_wa_canonical_template_key(string $templateKey): string
     {
@@ -1036,7 +1036,7 @@ if (!function_exists('subhiksha_send_whatsapp')) {
             if ($metaTemplateName === '') {
                 $approvedMetaTemplateNames = [
                     'design_ready_for_approval' => 'design_approval',
-                    'payment_recieved' => 'payment_recieved',
+                    'payment_recieved' => 'payment_received',
                     'payment_completed_' => 'payment_completed_'
                 ];
                 $metaTemplateName = $approvedMetaTemplateNames[$templateKey]
@@ -1081,7 +1081,8 @@ if (!function_exists('subhiksha_send_whatsapp')) {
 
         /*
          * Meta error 132001 means the requested template translation was not
-         * found. payment_recieved is an English approved template in this ERP.
+         * found. The internal payment_recieved key sends Meta's approved
+         * payment_received template.
          * If the account exposes it as English (US) instead of generic English
          * (or vice versa), retry only that failed translation once. The first
          * request was rejected, so this cannot duplicate a successful message.
