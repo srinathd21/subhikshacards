@@ -170,19 +170,42 @@ if (!function_exists('subhiksha_wa_get_template')) {
                 return null;
             }
 
-            $stmt = $conn->prepare(
-                'SELECT id, template_key, template_name, message_body
-                 FROM whatsapp_templates
-                 WHERE template_key = ?
-                   AND is_active = 1
-                 LIMIT 1'
-            );
-            $stmt->bind_param('s', $templateKey);
-            $stmt->execute();
-            $row = $stmt->get_result()->fetch_assoc();
-            $stmt->close();
+            /*
+             * payment_received is the real approved Meta template name.
+             * Older Subhiksha databases stored the same message using the
+             * misspelled ERP key payment_recieved (and, on still older dumps,
+             * advance_payment_received).  The database key is only used to
+             * load/render the local message; Meta still receives the exact
+             * approved template name payment_received later in this file.
+             *
+             * Trying the legacy keys here keeps existing live databases
+             * working while allowing the database to be migrated safely.
+             */
+            $lookupKeys = [$templateKey];
+            if ($templateKey === 'payment_received') {
+                $lookupKeys[] = 'payment_recieved';
+                $lookupKeys[] = 'advance_payment_received';
+            }
 
-            return $row ?: null;
+            foreach (array_values(array_unique($lookupKeys)) as $lookupKey) {
+                $stmt = $conn->prepare(
+                    'SELECT id, template_key, template_name, message_body
+                     FROM whatsapp_templates
+                     WHERE template_key = ?
+                       AND is_active = 1
+                     LIMIT 1'
+                );
+                $stmt->bind_param('s', $lookupKey);
+                $stmt->execute();
+                $row = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+
+                if ($row) {
+                    return $row;
+                }
+            }
+
+            return null;
         } catch (Throwable $e) {
             return null;
         }
@@ -303,8 +326,7 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'final_amount',
                     'advance_amount',
                     'balance_amount',
-                    'delivery_date',
-                    'proforma_pdf_link'
+                    'delivery_date'
                 ]
             ],
             'payment_received' => [
@@ -909,47 +931,47 @@ if (!function_exists('subhiksha_send_whatsapp')) {
             }
 
             /*
-             * payment_completed_ has seven BODY variables. The Proforma PDF
-             * link belongs to the approved "Download Invoice" URL button and
-             * must be sent as a button component, not as an eighth BODY value.
+             * proforma_created and payment_completed_ both have seven BODY
+             * variables plus one dynamic "Download Proforma" URL button.
+             * Meta stores the fixed URL. The API must send only the numeric
+             * Proforma Bill database ID as button index 0.
              */
-            if ($templateKey === 'payment_completed_') {
-                $invoiceLinkFound = false;
-                $invoiceLink = subhiksha_meta_variable_value(
-                    'proforma_pdf_link',
+            if (in_array($templateKey, ['proforma_created', 'payment_completed_'], true)) {
+                $proformaIdFound = false;
+                $invoiceButtonValue = trim(subhiksha_meta_variable_value(
+                    'proforma_bill_id',
                     $variables,
-                    $invoiceLinkFound
-                );
-
-                if (!$invoiceLinkFound || trim($invoiceLink) === '') {
-                    return subhiksha_wa_failed_result(
-                        $conn,
-                        $context,
-                        'WhatsApp template variables are incomplete.',
-                        'Missing template variable: proforma_pdf_link'
-                    );
-                }
+                    $proformaIdFound
+                ));
 
                 /*
-                 * Meta dynamic URL buttons already contain the fixed invoice
-                 * URL in the approved template. Only the dynamic Proforma ID
-                 * must be supplied here. Passing the complete PDF URL makes
-                 * Meta append one URL to another and produces an invalid link.
+                 * Backward compatibility for payment pages that still pass a
+                 * canonical proforma_pdf_link instead of proforma_bill_id.
                  */
-                $invoiceButtonValue = '';
-                $invoiceUrlParts = parse_url($invoiceLink);
-                if (is_array($invoiceUrlParts) && !empty($invoiceUrlParts['query'])) {
-                    $invoiceQuery = [];
-                    parse_str((string)$invoiceUrlParts['query'], $invoiceQuery);
-                    $invoiceButtonValue = trim((string)($invoiceQuery['id'] ?? ''));
+                if (!$proformaIdFound || $invoiceButtonValue === '') {
+                    $invoiceLinkFound = false;
+                    $invoiceLink = subhiksha_meta_variable_value(
+                        'proforma_pdf_link',
+                        $variables,
+                        $invoiceLinkFound
+                    );
+
+                    if ($invoiceLinkFound && trim($invoiceLink) !== '') {
+                        $invoiceUrlParts = parse_url($invoiceLink);
+                        if (is_array($invoiceUrlParts) && !empty($invoiceUrlParts['query'])) {
+                            $invoiceQuery = [];
+                            parse_str((string)$invoiceUrlParts['query'], $invoiceQuery);
+                            $invoiceButtonValue = trim((string)($invoiceQuery['id'] ?? ''));
+                        }
+                    }
                 }
 
-                if ($invoiceButtonValue === '') {
+                if ($invoiceButtonValue === '' || !ctype_digit($invoiceButtonValue) || (int)$invoiceButtonValue <= 0) {
                     return subhiksha_wa_failed_result(
                         $conn,
                         $context,
                         'WhatsApp invoice button could not be prepared.',
-                        'Proforma ID is missing from proforma_pdf_link.'
+                        'Valid Proforma Bill ID is missing for the dynamic PDF button.'
                     );
                 }
 
