@@ -31,6 +31,107 @@ function jcvTableExists(mysqli $conn, string $table): bool
     }
 }
 
+function jcvValidProductName($value): bool
+{
+    $value = trim((string)$value);
+    if ($value === '') return false;
+
+    return !in_array(strtolower($value), ['0', '-', 'null', 'n/a', 'na'], true);
+}
+
+function jcvResolvedProductName(mysqli $conn, array $job): string
+{
+    if (jcvValidProductName($job['product_name'] ?? '')) {
+        return trim((string)$job['product_name']);
+    }
+
+    $jobId = (int)($job['id'] ?? 0);
+    $productIds = [];
+
+    if (!empty($job['product_id'])) {
+        $productIds[] = (int)$job['product_id'];
+    }
+
+    // Older converted jobs can contain the sentinel text "0" in
+    // job_cards.product_name. Prefer the actual job-card item when present.
+    if ($jobId > 0 && jcvTableExists($conn, 'job_card_items')) {
+        try {
+            $stmt = $conn->prepare(
+                'SELECT product_id, item_name
+                 FROM job_card_items
+                 WHERE job_card_id = ?
+                 ORDER BY id ASC'
+            );
+            $stmt->bind_param('i', $jobId);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            while ($row = $res->fetch_assoc()) {
+                if (!empty($row['product_id'])) {
+                    $productIds[] = (int)$row['product_id'];
+                }
+                if (jcvValidProductName($row['item_name'] ?? '')) {
+                    $name = trim((string)$row['item_name']);
+                    $stmt->close();
+                    return $name;
+                }
+            }
+            $stmt->close();
+        } catch (Throwable $e) {
+            // Continue to the originating Proforma fallback.
+        }
+    }
+
+    // For Proforma-converted jobs, recover the product from the source item.
+    $proformaId = (int)($job['proforma_bill_id'] ?? 0);
+    if ($proformaId > 0 && jcvTableExists($conn, 'proforma_bill_items')) {
+        try {
+            $stmt = $conn->prepare(
+                'SELECT product_id, item_name
+                 FROM proforma_bill_items
+                 WHERE proforma_bill_id = ?
+                 ORDER BY sort_order ASC, id ASC'
+            );
+            $stmt->bind_param('i', $proformaId);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            while ($row = $res->fetch_assoc()) {
+                if (!empty($row['product_id'])) {
+                    $productIds[] = (int)$row['product_id'];
+                }
+                if (jcvValidProductName($row['item_name'] ?? '')) {
+                    $name = trim((string)$row['item_name']);
+                    $stmt->close();
+                    return $name;
+                }
+            }
+            $stmt->close();
+        } catch (Throwable $e) {
+            // Continue to product-master lookup.
+        }
+    }
+
+    if (jcvTableExists($conn, 'products')) {
+        foreach (array_values(array_unique(array_filter($productIds))) as $productId) {
+            try {
+                $stmt = $conn->prepare('SELECT product_name FROM products WHERE id = ? LIMIT 1');
+                $stmt->bind_param('i', $productId);
+                $stmt->execute();
+                $row = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+
+                if ($row && jcvValidProductName($row['product_name'] ?? '')) {
+                    return trim((string)$row['product_name']);
+                }
+            } catch (Throwable $e) {
+                // Try the next available product id.
+            }
+        }
+    }
+
+    // Never expose the old database sentinel value "0" to the customer.
+    return 'Cards';
+}
+
 function jcvDate($value): string
 {
     return !empty($value) ? date('d-m-Y', strtotime($value)) : '-';
@@ -1038,7 +1139,7 @@ function jcvSendPhotoApprovalByApi(mysqli $conn, array $job, array $step, array 
         'customer_name' => (string)($job['customer_name'] ?? 'Customer'),
         'job_card_no' => (string)($job['job_card_no'] ?? '-'),
         'stage_name' => (string)($step['step_name'] ?? 'Proofing'),
-        'product_name' => (string)($job['product_name'] ?? '-'),
+        'product_name' => jcvResolvedProductName($conn, $job),
         'delivery_date' => !empty($job['delivery_date']) ? date('d-m-Y', strtotime((string)$job['delivery_date'])) : '-',
         'approval_link' => $approvalLink,
         'tracking_link' => $trackingLink,
@@ -1196,7 +1297,7 @@ function jcvSendTrackingUpdateByApi(
         'job_card_no' => (string)($job['job_card_no'] ?? '-'),
         'stage_name' => (string)($step['step_name'] ?? 'Job Stage'),
         'status_name' => $statusLabel,
-        'product_name' => (string)($job['product_name'] ?? '-'),
+        'product_name' => jcvResolvedProductName($conn, $job),
         'delivery_date' => !empty($job['delivery_date']) ? date('d-m-Y', strtotime((string)$job['delivery_date'])) : '-',
         'remarks' => trim($remarks) !== '' ? trim($remarks) : '-',
         'delay_reason' => $delayReason !== '' ? $delayReason : '-',
@@ -3168,7 +3269,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                         <div class="col-md-4">
                             <div class="info-card">
                                 <small>Product Name</small>
-                                <strong><?= e($job['product_name'] ?: '-') ?></strong>
+                                <strong><?= e(jcvResolvedProductName($conn, $job)) ?></strong>
                             </div>
                         </div>
 
