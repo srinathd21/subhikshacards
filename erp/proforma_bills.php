@@ -105,117 +105,6 @@ function pb_fast_col_exists(mysqli $conn, string $table, string $col): bool
     }
 }
 
-function pb_fast_proforma_pdf_url(mysqli $conn, array $row): string
-{
-    $id = (int)($row['id'] ?? 0);
-    $path = trim((string)($row['proforma_pdf_path'] ?? ''));
-
-    if ($path === '' && $id > 0 && pb_fast_col_exists($conn, 'proforma_bills', 'proforma_pdf_path')) {
-        try {
-            $stmt = $conn->prepare("SELECT proforma_pdf_path FROM proforma_bills WHERE id = ? LIMIT 1");
-            $stmt->bind_param('i', $id);
-            $stmt->execute();
-            $path = trim((string)(($stmt->get_result()->fetch_assoc()['proforma_pdf_path'] ?? '')));
-            $stmt->close();
-        } catch (Throwable $e) {
-            $path = '';
-        }
-    }
-
-    /* WhatsApp/customer link must always open the same Proforma Bill PDF endpoint without authentication. */
-    return $id > 0 ? pb_fast_base_url($conn) . '/proforma_bill_pdf.php?id=' . $id . '&public=1&download=1' : '';
-}
-
-function pb_fast_append_invoice_link(mysqli $conn, array $row, string $message): string
-{
-    $link = pb_fast_proforma_pdf_url($conn, $row);
-    if ($link === '') return $message;
-    if (strpos($message, $link) !== false) return $message;
-
-    $message = rtrim($message);
-    if ($message !== '') $message .= "\n\n";
-    return $message . "Proforma Invoice PDF:\n" . $link;
-}
-
-function pb_fast_whatsapp_template_row(mysqli $conn, string $templateKey): ?array
-{
-    try {
-        if (!pb_fast_table_exists($conn, 'whatsapp_templates')) return null;
-
-        $stmt = $conn->prepare("
-            SELECT id, template_key, template_name, message_body
-            FROM whatsapp_templates
-            WHERE template_key = ?
-              AND is_active = 1
-            LIMIT 1
-        ");
-        $stmt->bind_param('s', $templateKey);
-        $stmt->execute();
-        $row = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
-
-        return $row ?: null;
-    } catch (Throwable $e) {
-        return null;
-    }
-}
-
-function pb_fast_render_template(string $message, array $variables): string
-{
-    foreach ($variables as $key => $value) {
-        $key = trim((string)$key);
-        $value = (string)$value;
-        $message = str_replace('{{' . $key . '}}', $value, $message);
-        $message = str_replace('{' . $key . '}', $value, $message);
-    }
-
-    return $message;
-}
-
-function pb_fast_whatsapp_variables(mysqli $conn, array $row): array
-{
-    return [
-        'customer_name' => trim((string)($row['customer_name'] ?? 'Customer')) ?: 'Customer',
-        'proforma_no' => trim((string)($row['proforma_no'] ?? '-')) ?: '-',
-        'job_card_no' => trim((string)($row['job_card_no'] ?? '-')) ?: '-',
-        'function_type' => trim((string)($row['function_name'] ?? '-')) ?: '-',
-        'product_name' => trim((string)($row['item_name'] ?? $row['function_name'] ?? '-')) ?: '-',
-        'order_type' => ucfirst((string)($row['order_type'] ?? '-')),
-        'final_amount' => pb_fast_money($row['final_amount'] ?? 0),
-        'advance_amount' => pb_fast_money($row['advance_amount'] ?? 0),
-        'balance_amount' => pb_fast_money($row['balance_amount'] ?? 0),
-        'delivery_date' => !empty($row['delivery_date']) ? date('d-m-Y', strtotime((string)$row['delivery_date'])) : '-',
-        'tracking_link' => pb_fast_tracking_url($conn, $row),
-        'proforma_pdf_link' => pb_fast_proforma_pdf_url($conn, $row),
-        'invoice_link' => pb_fast_proforma_pdf_url($conn, $row),
-        'proforma_view_link' => !empty($row['id']) ? pb_fast_base_url($conn) . '/proforma_bill_view.php?id=' . (int)$row['id'] : '',
-        'mobile' => (string)($row['mobile'] ?? '')
-    ];
-}
-
-function pb_fast_whatsapp_message(mysqli $conn, array $row): string
-{
-    $template = pb_fast_whatsapp_template_row($conn, 'proforma_created');
-    if (!$template) {
-        $vars = pb_fast_whatsapp_variables($conn, $row);
-        return pb_fast_append_invoice_link($conn, $row, 'Hi ' . ($vars['customer_name'] ?: 'Customer') . ', your proforma bill ' . ($vars['proforma_no'] ?: '-') . ' has been created. Final Amount: ' . ($vars['final_amount'] ?: '-') . '.');
-    }
-
-    $message = pb_fast_render_template((string)$template['message_body'], pb_fast_whatsapp_variables($conn, $row));
-    return pb_fast_append_invoice_link($conn, $row, $message);
-}
-
-function pb_fast_whatsapp_url(mysqli $conn, array $row): string
-{
-    $mobile = pb_fast_mobile($row['mobile'] ?? '');
-    if ($mobile === '') return '#';
-
-    $message = pb_fast_whatsapp_message($conn, $row);
-    if (trim($message) === '') return '#';
-
-    return 'https://wa.me/' . $mobile . '?text=' . rawurlencode($message);
-}
-
 function pb_fast_whatsapp_svg(): string
 {
     return '<svg viewBox="0 0 32 32" width="17" height="17" aria-hidden="true" focusable="false"><path fill="currentColor" d="M16.04 3C8.85 3 3 8.73 3 15.78c0 2.26.61 4.47 1.77 6.41L3 29l7.02-1.8a13.3 13.3 0 0 0 6.02 1.43C23.23 28.63 29 22.9 29 15.85S23.23 3 16.04 3Zm0 23.45c-1.9 0-3.76-.5-5.39-1.45l-.39-.23-4.16 1.07 1.11-4.01-.26-.41a11.05 11.05 0 0 1-1.73-5.64c0-5.84 4.85-10.6 10.82-10.6 5.96 0 10.81 4.76 10.81 10.67 0 5.84-4.85 10.6-10.81 10.6Zm5.93-7.95c-.32-.16-1.9-.92-2.2-1.03-.3-.11-.52-.16-.74.16-.22.32-.85 1.03-1.04 1.24-.19.22-.38.24-.7.08-.32-.16-1.36-.49-2.59-1.55-.96-.84-1.61-1.88-1.8-2.2-.19-.32-.02-.49.14-.65.14-.14.32-.38.49-.57.16-.19.22-.32.32-.54.11-.22.05-.41-.03-.57-.08-.16-.74-1.76-1.01-2.41-.27-.65-.54-.54-.74-.55h-.63c-.22 0-.57.08-.87.41-.3.32-1.14 1.09-1.14 2.68s1.17 3.12 1.33 3.34c.16.22 2.3 3.46 5.58 4.85.78.33 1.39.53 1.86.68.78.24 1.49.21 2.05.13.63-.09 1.9-.76 2.17-1.49.27-.73.27-1.36.19-1.49-.08-.13-.3-.21-.62-.37Z"/></svg>';
@@ -1036,9 +925,6 @@ foreach ($rows as $statRow) {
                             data.status ? 'Success' : 'Failed'
                         );
 
-                        if (data.open_whatsapp_url) {
-                            window.location.href = data.open_whatsapp_url;
-                        }
                     })
                     .catch(() => {
                         showToast(
