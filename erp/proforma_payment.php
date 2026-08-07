@@ -425,6 +425,12 @@ function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId)
         'related_id' => $paymentId,
         'customer_id' => !empty($row['bill_customer_id']) ? (int)$row['bill_customer_id'] : (!empty($row['customer_id']) ? (int)$row['customer_id'] : null),
         'sent_by' => (int)($_SESSION['user_id'] ?? 0),
+        // Use the exact approved Meta template names and English translation.
+        // payment_recieved is intentionally spelled this way in WhatsApp Manager.
+        'meta_template_name' => $templateKey === 'payment_recieved'
+            ? 'payment_recieved'
+            : 'payment_completed_',
+        'language_code' => 'en',
         'extra_payload' => ['type' => 'text']
     ];
 
