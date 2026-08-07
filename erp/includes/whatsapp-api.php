@@ -421,8 +421,9 @@ if (!function_exists('subhiksha_wa_canonical_template_key')) {
      *
      * The approved completed-payment Meta template has a trailing underscore,
      * so older calls using payment_completed are routed to payment_completed_.
-     * advance_payment_received is deliberately NOT aliased to payment_recieved;
-     * the payment page now calls the approved payment_recieved template directly.
+     * Meta's approved received-payment template is spelled payment_recieved.
+     * Keep older ERP callers compatible so every received-payment send reaches
+     * that same approved template instead of sending a non-existent name.
      */
     function subhiksha_wa_canonical_template_key(string $templateKey): string
     {
@@ -434,6 +435,8 @@ if (!function_exists('subhiksha_wa_canonical_template_key')) {
             'job_completed_review_request' => 'google_review_link',
             'proofing_ready_for_approval' => 'design_ready_for_approval',
             'design_approval' => 'design_ready_for_approval',
+            'advance_payment_received' => 'payment_recieved',
+            'payment_received' => 'payment_recieved',
             'payment_completed' => 'payment_completed_'
         ];
 
@@ -1031,9 +1034,13 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                 $params['meta_template_name'] ?? ''
             ));
             if ($metaTemplateName === '') {
-                $metaTemplateName = $templateKey === 'design_ready_for_approval'
-                    ? 'design_approval'
-                    : $templateKey;
+                $approvedMetaTemplateNames = [
+                    'design_ready_for_approval' => 'design_approval',
+                    'payment_recieved' => 'payment_recieved',
+                    'payment_completed_' => 'payment_completed_'
+                ];
+                $metaTemplateName = $approvedMetaTemplateNames[$templateKey]
+                    ?? $templateKey;
             }
 
             $payload = [
