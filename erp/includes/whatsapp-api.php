@@ -405,6 +405,7 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                 'variables' => [
                     'customer_name',
                     'job_card_no',
+                    'stage_name',
                     'delivery_date'
                 ]
             ]
