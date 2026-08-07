@@ -342,6 +342,23 @@ function pp_payment_whatsapp_row(mysqli $conn, int $proformaId, int $paymentId):
                 pb.final_amount,
                 pb.advance_amount,
                 pb.balance_amount,
+                COALESCE((
+                    SELECT SUM(p2.amount)
+                    FROM payments p2
+                    WHERE p2.proforma_bill_id = p.proforma_bill_id
+                      AND p2.id <= p.id
+                      AND COALESCE(p2.is_cancelled, 0) = 0
+                ), 0) AS total_paid_after_payment,
+                GREATEST(
+                    pb.final_amount - COALESCE((
+                        SELECT SUM(p3.amount)
+                        FROM payments p3
+                        WHERE p3.proforma_bill_id = p.proforma_bill_id
+                          AND p3.id <= p.id
+                          AND COALESCE(p3.is_cancelled, 0) = 0
+                    ), 0),
+                    0
+                ) AS balance_after_payment,
                 ft.function_name
             FROM payments p
             INNER JOIN proforma_bills pb ON pb.id = p.proforma_bill_id
@@ -363,7 +380,13 @@ function pp_payment_whatsapp_row(mysqli $conn, int $proformaId, int $paymentId):
 
 function pp_payment_whatsapp_template_key(array $row): string
 {
-    return ((float)($row['balance_amount'] ?? 0) <= 0.00001)
+    // Choose the template from the balance immediately after THIS payment.
+    // This keeps Retry WhatsApp correct even if later payments were collected.
+    $balanceAfterPayment = array_key_exists('balance_after_payment', $row)
+        ? (float)$row['balance_after_payment']
+        : (float)($row['balance_amount'] ?? 0);
+
+    return ($balanceAfterPayment <= 0.00001)
         ? 'payment_completed_'
         : 'payment_recieved';
 }
@@ -400,15 +423,22 @@ function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId)
     }
 
     $templateKey = pp_payment_whatsapp_template_key($row);
+    $balanceAfterPayment = array_key_exists('balance_after_payment', $row)
+        ? (float)$row['balance_after_payment']
+        : (float)($row['balance_amount'] ?? 0);
+    $totalPaidAfterPayment = array_key_exists('total_paid_after_payment', $row)
+        ? (float)$row['total_paid_after_payment']
+        : (float)($row['advance_amount'] ?? 0);
+
     $variables = [
         'customer_name' => trim((string)($row['customer_name'] ?? 'Customer')) ?: 'Customer',
         'proforma_no' => trim((string)($row['proforma_no'] ?? '-')) ?: '-',
         'payment_no' => trim((string)($row['payment_no'] ?? '-')) ?: '-',
         'paid_amount' => pp_payment_whatsapp_money($row['amount'] ?? 0),
         'payment_mode' => strtoupper((string)($row['payment_mode'] ?? '-')),
-        'balance_amount' => pp_payment_whatsapp_money($row['balance_amount'] ?? 0),
+        'balance_amount' => pp_payment_whatsapp_money($balanceAfterPayment),
         'final_amount' => pp_payment_whatsapp_money($row['final_amount'] ?? 0),
-        'total_paid' => pp_payment_whatsapp_money($row['advance_amount'] ?? 0),
+        'total_paid' => pp_payment_whatsapp_money($totalPaidAfterPayment),
         'payment_date' => !empty($row['payment_date']) ? date('d-m-Y', strtotime((string)$row['payment_date'])) : date('d-m-Y'),
         'reference_no' => trim((string)($row['reference_no'] ?? '-')) ?: '-',
         'function_type' => trim((string)($row['function_name'] ?? '-')) ?: '-',

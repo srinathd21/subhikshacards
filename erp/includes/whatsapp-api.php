@@ -1078,6 +1078,43 @@ if (!function_exists('subhiksha_send_whatsapp')) {
             rawurlencode($config['phone_number_id']) . '/messages',
             $payload
         );
+
+        /*
+         * Meta error 132001 means the requested template translation was not
+         * found. payment_recieved is an English approved template in this ERP.
+         * If the account exposes it as English (US) instead of generic English
+         * (or vice versa), retry only that failed translation once. The first
+         * request was rejected, so this cannot duplicate a successful message.
+         */
+        $translationRetry = null;
+        $metaErrorCode = (int)(
+            $apiResult['response']['error']['code']
+            ?? 0
+        );
+        if (
+            $templateKey === 'payment_recieved'
+            && $metaErrorCode === 132001
+            && isset($payload['template']['language']['code'])
+        ) {
+            $originalLanguage = trim((string)$payload['template']['language']['code']);
+            $fallbackLanguage = $originalLanguage === 'en_US' ? 'en' : 'en_US';
+
+            if (in_array($originalLanguage, ['en', 'en_US'], true)) {
+                $payload['template']['language']['code'] = $fallbackLanguage;
+                $translationRetry = [
+                    'from' => $originalLanguage,
+                    'to' => $fallbackLanguage
+                ];
+
+                $apiResult = subhiksha_meta_api_request(
+                    $conn,
+                    'POST',
+                    rawurlencode($config['phone_number_id']) . '/messages',
+                    $payload
+                );
+            }
+        }
+
         $messageId = (string)(
             $apiResult['response']['messages'][0]['id']
             ?? ''
@@ -1088,6 +1125,13 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                 'provider' => 'meta_cloud',
                 'http_code' => (int)($apiResult['http_code'] ?? 0),
                 'message_id' => $messageId,
+                'template_name' => $templateKey !== ''
+                    ? (string)($payload['template']['name'] ?? '')
+                    : '',
+                'language_code' => $templateKey !== ''
+                    ? (string)($payload['template']['language']['code'] ?? '')
+                    : '',
+                'translation_retry' => $translationRetry,
                 'response' => $apiResult['response'] ?? null,
                 'error' => $success
                     ? null
