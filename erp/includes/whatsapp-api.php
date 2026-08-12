@@ -301,6 +301,23 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
             'proforma_created' => [
                 'meta_id' => null,
                 'module' => 'Proforma Bills',
+
+                /*
+                 * Live Meta template:
+                 * 7 BODY parameters + 1 dynamic URL button.
+                 *
+                 * BODY:
+                 * {{1}} customer_name
+                 * {{2}} proforma_no
+                 * {{3}} product_name
+                 * {{4}} final_amount
+                 * {{5}} advance_amount
+                 * {{6}} balance_amount
+                 * {{7}} delivery_date
+                 *
+                 * BUTTON:
+                 * Download Proforma -> dynamic proforma id
+                 */
                 'body_variables' => [
                     'customer_name',
                     'proforma_no',
@@ -308,8 +325,15 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'final_amount',
                     'advance_amount',
                     'balance_amount',
-                    'delivery_date',
-                    'proforma_pdf_link'
+                    'delivery_date'
+                ],
+
+                'button' => [
+                    'index' => '0',
+                    'sub_type' => 'url',
+                    'variable' => 'proforma_pdf_link',
+                    'value_mode' => 'query:id',
+                    'required' => true
                 ]
             ],
             'payment_received' => [
