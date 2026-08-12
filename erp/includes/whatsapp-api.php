@@ -7,7 +7,7 @@
  *
  * $result = subhiksha_send_template_whatsapp(
  *     $conn,
- *     'enquiry_completed',
+ *     'enquiry_completed_new',
  *     $customerMobile,
  *     [
  *         'customer_name' => $customerName,
@@ -170,42 +170,19 @@ if (!function_exists('subhiksha_wa_get_template')) {
                 return null;
             }
 
-            /*
-             * payment_received is the real approved Meta template name.
-             * Older Subhiksha databases stored the same message using the
-             * misspelled ERP key payment_recieved (and, on still older dumps,
-             * advance_payment_received).  The database key is only used to
-             * load/render the local message; Meta still receives the exact
-             * approved template name payment_received later in this file.
-             *
-             * Trying the legacy keys here keeps existing live databases
-             * working while allowing the database to be migrated safely.
-             */
-            $lookupKeys = [$templateKey];
-            if ($templateKey === 'payment_received') {
-                $lookupKeys[] = 'payment_recieved';
-                $lookupKeys[] = 'advance_payment_received';
-            }
+            $stmt = $conn->prepare(
+                'SELECT id, template_key, template_name, message_body
+                 FROM whatsapp_templates
+                 WHERE template_key = ?
+                   AND is_active = 1
+                 LIMIT 1'
+            );
+            $stmt->bind_param('s', $templateKey);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
 
-            foreach (array_values(array_unique($lookupKeys)) as $lookupKey) {
-                $stmt = $conn->prepare(
-                    'SELECT id, template_key, template_name, message_body
-                     FROM whatsapp_templates
-                     WHERE template_key = ?
-                       AND is_active = 1
-                     LIMIT 1'
-                );
-                $stmt->bind_param('s', $lookupKey);
-                $stmt->execute();
-                $row = $stmt->get_result()->fetch_assoc();
-                $stmt->close();
-
-                if ($row) {
-                    return $row;
-                }
-            }
-
-            return null;
+            return $row ?: null;
         } catch (Throwable $e) {
             return null;
         }
@@ -290,15 +267,18 @@ if (!function_exists('subhiksha_wa_log')) {
 if (!function_exists('subhiksha_wa_supported_template_keys')) {
     /**
      * The 13 Meta-approved templates and their exact BODY variable order.
+     * meta_id values come from the active Meta Manager screenshots supplied
+     * on 2026-08-05. Meta sends by template NAME, not by this numeric ID.
      * Do not reorder these values unless the corresponding approved Meta
      * template is changed as well.
      */
     function subhiksha_wa_supported_template_keys(): array
     {
         return [
-            'enquiry_completed' => [
+            'enquiry_completed_new' => [
+                'meta_id' => null,
                 'module' => 'Enquiries',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'enquiry_no',
                     'function_type',
@@ -306,8 +286,9 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                 ]
             ],
             'quotation_created' => [
+                'meta_id' => '1702034991102239',
                 'module' => 'Quotations',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'quotation_no',
                     'function_type',
@@ -318,20 +299,23 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                 ]
             ],
             'proforma_created' => [
+                'meta_id' => null,
                 'module' => 'Proforma Bills',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'proforma_no',
                     'product_name',
                     'final_amount',
                     'advance_amount',
                     'balance_amount',
-                    'delivery_date'
+                    'delivery_date',
+                    'proforma_pdf_link'
                 ]
             ],
             'payment_received' => [
+                'meta_id' => '1417388883659644',
                 'module' => 'Payments',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'proforma_no',
                     'payment_no',
@@ -340,9 +324,10 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'balance_amount'
                 ]
             ],
-            'payment_completed_' => [
+            'payment_completed_new' => [
+                'meta_id' => null,
                 'module' => 'Payments',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'proforma_no',
                     'payment_no',
@@ -350,42 +335,74 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'total_paid',
                     'balance_amount',
                     'payment_date'
+                ],
+                'button' => [
+                    'index' => '0',
+                    'sub_type' => 'url',
+                    'variable' => 'proforma_pdf_link',
+                    'value_mode' => 'query:id',
+                    'required' => true
                 ]
             ],
             'job_card_created' => [
+                'meta_id' => '1518442136751108',
                 'module' => 'Job Cards',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'job_card_no',
                     'product_name',
                     'order_type',
                     'current_stage',
                     'delivery_date'
+                ],
+                'button' => [
+                    'index' => '0',
+                    'sub_type' => 'url',
+                    'variable' => 'tracking_link',
+                    'value_mode' => 'query:token',
+                    'required' => false
                 ]
             ],
             'job_card_status' => [
+                'meta_id' => '2163546151041820',
                 'module' => 'Job Tracking',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'job_card_no',
                     'stage_name',
                     'status_name',
                     'product_name',
                     'delivery_date'
+                ],
+                'button' => [
+                    'index' => '0',
+                    'sub_type' => 'url',
+                    'variable' => 'tracking_link',
+                    'value_mode' => 'query:token',
+                    'required' => true
                 ]
             ],
             'job_stage_completed' => [
+                'meta_id' => '1760813171616384',
                 'module' => 'Job Tracking',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'job_card_no',
                     'stage_name',
                     'delivery_date'
+                ],
+                'button' => [
+                    'index' => '0',
+                    'sub_type' => 'url',
+                    'variable' => 'tracking_link',
+                    'value_mode' => 'query:token',
+                    'required' => true
                 ]
             ],
             'job_stage_delayed' => [
+                'meta_id' => '28524458020489107',
                 'module' => 'Job Tracking',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'job_card_no',
                     'stage_name',
@@ -393,42 +410,84 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'delay_reason',
                     'delay_days',
                     'remarks'
+                ],
+                'button' => [
+                    'index' => '0',
+                    'sub_type' => 'url',
+                    'variable' => 'tracking_link',
+                    'value_mode' => 'query:token',
+                    'required' => true
                 ]
             ],
             'job_stage_cancelled_' => [
+                'meta_id' => '1534680831738366',
                 'module' => 'Job Tracking',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'job_card_no',
                     'stage_name',
                     'status_name',
                     'remarks'
+                ],
+                'button' => [
+                    'index' => '0',
+                    'sub_type' => 'url',
+                    'variable' => 'tracking_link',
+                    'value_mode' => 'query:token',
+                    'required' => true
                 ]
             ],
             'job_stage_updated' => [
+                'meta_id' => '2088865225340641',
                 'module' => 'Job Tracking',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'job_card_no',
                     'stage_name',
                     'status_name',
                     'remarks'
+                ],
+                'button' => [
+                    'index' => '0',
+                    'sub_type' => 'url',
+                    'variable' => 'tracking_link',
+                    'value_mode' => 'query:token',
+                    'required' => true
                 ]
             ],
             'google_review_link' => [
+                'meta_id' => '14922693262765208',
                 'module' => 'Reviews',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'job_card_no'
-                ]
+                ],
+                'button_label' => 'Give Your Feedback'
             ],
-            'design_ready_for_approval' => [
+            'design_approval_new' => [
+                'meta_id' => null,
                 'module' => 'Customer Approvals',
-                'variables' => [
+                'body_variables' => [
                     'customer_name',
                     'job_card_no',
                     'stage_name',
                     'delivery_date'
+                ],
+                'buttons' => [
+                    [
+                        'index' => '0',
+                        'sub_type' => 'url',
+                        'variable' => 'approval_link',
+                        'value_mode' => 'query:token',
+                        'required' => true
+                    ],
+                    [
+                        'index' => '1',
+                        'sub_type' => 'url',
+                        'variable' => 'tracking_link',
+                        'value_mode' => 'query:token',
+                        'required' => true
+                    ]
                 ]
             ]
         ];
@@ -437,29 +496,27 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
 
 if (!function_exists('subhiksha_wa_canonical_template_key')) {
     /**
-     * Compatibility for an older ERP status call. The approved Meta template
-     * is job_card_status; older job-card pages called the same message
-     * job_stage_started.
-     *
-     * The approved completed-payment Meta template has a trailing underscore,
-     * so older calls using payment_completed are routed to payment_completed_.
-     * The approved Meta received-payment template name is payment_received.
-     * Keep the historical misspelling payment_recieved as a compatibility
-     * alias so older ERP pages continue working after the database migration.
+     * ERP aliases -> exact active Meta template names. This keeps existing
+     * pages working while Meta names retain their exact spelling/underscores.
      */
     function subhiksha_wa_canonical_template_key(string $templateKey): string
     {
         $templateKey = strtolower(trim($templateKey));
 
         $aliases = [
+            'enquiry_completed' => 'enquiry_completed_new',
+            'enquiry_completed_' => 'enquiry_completed_new',
+            'advance_payment_received' => 'payment_received',
+            'payment_recieved' => 'payment_received',
+            'payment_completed' => 'payment_completed_new',
+            'payment_completed_' => 'payment_completed_new',
             'job_stage_started' => 'job_card_status',
             'job_stage_cancelled' => 'job_stage_cancelled_',
             'job_completed_review_request' => 'google_review_link',
-            'proofing_ready_for_approval' => 'design_ready_for_approval',
-            'design_approval' => 'design_ready_for_approval',
-            'advance_payment_received' => 'payment_received',
-            'payment_recieved' => 'payment_received',
-            'payment_completed' => 'payment_completed_'
+            'design_approval' => 'design_approval_new',
+            'design_approval_required' => 'design_approval_new',
+            'design_ready_for_approval' => 'design_approval_new',
+            'proofing_ready_for_approval' => 'design_approval_new'
         ];
 
         return $aliases[$templateKey] ?? $templateKey;
@@ -509,6 +566,39 @@ if (!function_exists('subhiksha_meta_variable_value')) {
 }
 
 if (!function_exists('subhiksha_meta_template_parameters')) {
+    /**
+     * Convert the full ERP URL into the value expected by a dynamic Meta URL
+     * button. For example tracking URLs send only the token, because the
+     * approved Meta button already contains the fixed URL prefix.
+     */
+    function subhiksha_meta_button_value(string $value, string $mode): string
+    {
+        $value = trim($value);
+        $mode = trim($mode);
+
+        if ($value === '' || strpos($mode, 'query:') !== 0) {
+            return $value;
+        }
+
+        $queryKey = substr($mode, 6);
+        if ($queryKey === '') {
+            return $value;
+        }
+
+        $query = (string)(parse_url($value, PHP_URL_QUERY) ?? '');
+        if ($query === '') {
+            return $value;
+        }
+
+        $queryValues = [];
+        parse_str($query, $queryValues);
+        if (!array_key_exists($queryKey, $queryValues)) {
+            return $value;
+        }
+
+        return subhiksha_wa_clean_text($queryValues[$queryKey]);
+    }
+
     function subhiksha_meta_template_parameters(
         string $templateKey,
         array $variables
@@ -526,9 +616,12 @@ if (!function_exists('subhiksha_meta_template_parameters')) {
         }
 
         $parameters = [];
+        $components = [];
         $missingVariables = [];
+        $definition = $definitions[$templateKey];
+        $bodyVariables = (array)($definition['body_variables'] ?? []);
 
-        foreach ($definitions[$templateKey]['variables'] as $variableKey) {
+        foreach ($bodyVariables as $variableKey) {
             $found = false;
             $value = subhiksha_meta_variable_value(
                 $variableKey,
@@ -546,9 +639,61 @@ if (!function_exists('subhiksha_meta_template_parameters')) {
             ];
         }
 
+        if (!empty($parameters)) {
+            $components[] = [
+                'type' => 'body',
+                'parameters' => $parameters
+            ];
+        }
+
+        $buttons = [];
+        if (isset($definition['buttons']) && is_array($definition['buttons'])) {
+            $buttons = $definition['buttons'];
+        } elseif (is_array($definition['button'] ?? null)) {
+            $buttons = [$definition['button']];
+        }
+
+        foreach ($buttons as $button) {
+            if (!is_array($button)) {
+                continue;
+            }
+            $buttonVariable = (string)($button['variable'] ?? '');
+            $buttonRequired = !empty($button['required']);
+            $found = false;
+            $rawValue = $buttonVariable !== ''
+                ? subhiksha_meta_variable_value(
+                    $buttonVariable,
+                    $variables,
+                    $found
+                )
+                : '';
+
+            if (!$found || $rawValue === '') {
+                if ($buttonRequired) {
+                    $missingVariables[] = $buttonVariable;
+                }
+            } else {
+                $buttonValue = subhiksha_meta_button_value(
+                    $rawValue,
+                    (string)($button['value_mode'] ?? '')
+                );
+
+                $components[] = [
+                    'type' => 'button',
+                    'sub_type' => (string)($button['sub_type'] ?? 'url'),
+                    'index' => (string)($button['index'] ?? '0'),
+                    'parameters' => [[
+                        'type' => 'text',
+                        'text' => $buttonValue
+                    ]]
+                ];
+            }
+        }
+
         return [
             'success' => empty($missingVariables),
             'parameters' => $parameters,
+            'components' => $components,
             'missing_variables' => $missingVariables,
             'message' => empty($missingVariables)
                 ? 'Template parameters prepared.'
@@ -922,148 +1067,7 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                 );
             }
 
-            $components = [];
-            if (!empty($parameterResult['parameters'])) {
-                $components[] = [
-                    'type' => 'body',
-                    'parameters' => $parameterResult['parameters']
-                ];
-            }
-
-            /*
-             * proforma_created and payment_completed_ both have seven BODY
-             * variables plus one dynamic "Download Proforma" URL button.
-             * Meta stores the fixed URL. The API must send only the numeric
-             * Proforma Bill database ID as button index 0.
-             */
-            if (in_array($templateKey, ['proforma_created', 'payment_completed_'], true)) {
-                $proformaIdFound = false;
-                $invoiceButtonValue = trim(subhiksha_meta_variable_value(
-                    'proforma_bill_id',
-                    $variables,
-                    $proformaIdFound
-                ));
-
-                /*
-                 * Backward compatibility for payment pages that still pass a
-                 * canonical proforma_pdf_link instead of proforma_bill_id.
-                 */
-                if (!$proformaIdFound || $invoiceButtonValue === '') {
-                    $invoiceLinkFound = false;
-                    $invoiceLink = subhiksha_meta_variable_value(
-                        'proforma_pdf_link',
-                        $variables,
-                        $invoiceLinkFound
-                    );
-
-                    if ($invoiceLinkFound && trim($invoiceLink) !== '') {
-                        $invoiceUrlParts = parse_url($invoiceLink);
-                        if (is_array($invoiceUrlParts) && !empty($invoiceUrlParts['query'])) {
-                            $invoiceQuery = [];
-                            parse_str((string)$invoiceUrlParts['query'], $invoiceQuery);
-                            $invoiceButtonValue = trim((string)($invoiceQuery['id'] ?? ''));
-                        }
-                    }
-                }
-
-                if ($invoiceButtonValue === '' || !ctype_digit($invoiceButtonValue) || (int)$invoiceButtonValue <= 0) {
-                    return subhiksha_wa_failed_result(
-                        $conn,
-                        $context,
-                        'WhatsApp invoice button could not be prepared.',
-                        'Valid Proforma Bill ID is missing for the dynamic PDF button.'
-                    );
-                }
-
-                $components[] = [
-                    'type' => 'button',
-                    'sub_type' => 'url',
-                    'index' => '0',
-                    'parameters' => [
-                        [
-                            'type' => 'text',
-                            'text' => $invoiceButtonValue
-                        ]
-                    ]
-                ];
-            }
-
-            /*
-             * Job tracking/approval templates use dynamic URL buttons.
-             * tracking_link and approval_link are button values, NOT BODY
-             * variables.  The indexes below match the approved Meta templates:
-             *   design_approval: Approve/Reject = 0, Track Now = 1
-             *   job status templates: Track Now = 0
-             */
-            $jobUrlButtons = [
-                'job_card_status' => [
-                    ['index' => '0', 'variable' => 'tracking_link']
-                ],
-                'job_stage_completed' => [
-                    ['index' => '0', 'variable' => 'tracking_link']
-                ],
-                'job_stage_delayed' => [
-                    ['index' => '0', 'variable' => 'tracking_link']
-                ],
-                'job_stage_cancelled_' => [
-                    ['index' => '0', 'variable' => 'tracking_link']
-                ],
-                'job_stage_updated' => [
-                    ['index' => '0', 'variable' => 'tracking_link']
-                ],
-                'design_ready_for_approval' => [
-                    ['index' => '0', 'variable' => 'approval_link'],
-                    ['index' => '1', 'variable' => 'tracking_link']
-                ]
-            ];
-
-            foreach (($jobUrlButtons[$templateKey] ?? []) as $buttonSpec) {
-                $buttonResult = subhiksha_meta_url_button_value(
-                    (string)$buttonSpec['variable'],
-                    $variables,
-                    'token'
-                );
-
-                if (empty($buttonResult['success'])) {
-                    return subhiksha_wa_failed_result(
-                        $conn,
-                        $context,
-                        'WhatsApp URL button could not be prepared.',
-                        (string)$buttonResult['message']
-                    );
-                }
-
-                $components[] = [
-                    'type' => 'button',
-                    'sub_type' => 'url',
-                    'index' => (string)$buttonSpec['index'],
-                    'parameters' => [
-                        [
-                            'type' => 'text',
-                            'text' => (string)$buttonResult['value']
-                        ]
-                    ]
-                ];
-            }
-
-            /*
-             * The database keeps the historical ERP key
-             * design_ready_for_approval. Meta's actual approved template name
-             * is design_approval. Keep the DB key for lookup/logging and send
-             * the exact approved Meta name to Cloud API.
-             */
-            $metaTemplateName = trim((string)(
-                $params['meta_template_name'] ?? ''
-            ));
-            if ($metaTemplateName === '') {
-                $approvedMetaTemplateNames = [
-                    'design_ready_for_approval' => 'design_approval',
-                    'payment_received' => 'payment_received',
-                    'payment_completed_' => 'payment_completed_'
-                ];
-                $metaTemplateName = $approvedMetaTemplateNames[$templateKey]
-                    ?? $templateKey;
-            }
+            $components = (array)($parameterResult['components'] ?? []);
 
             $payload = [
                 'messaging_product' => 'whatsapp',
@@ -1071,7 +1075,10 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                 'to' => $mobile,
                 'type' => 'template',
                 'template' => [
-                    'name' => $metaTemplateName,
+                    'name' => (string)(
+                        $params['meta_template_name']
+                        ?? $templateKey
+                    ),
                     'language' => [
                         'code' => (string)(
                             $params['language_code']
@@ -1100,43 +1107,6 @@ if (!function_exists('subhiksha_send_whatsapp')) {
             rawurlencode($config['phone_number_id']) . '/messages',
             $payload
         );
-
-        /*
-         * Meta error 132001 means the requested template translation was not
-         * found. payment_received is the approved received-payment template.
-         * If the account exposes it as English (US) instead of generic English
-         * (or vice versa), retry only that failed translation once. The first
-         * request was rejected, so this cannot duplicate a successful message.
-         */
-        $translationRetry = null;
-        $metaErrorCode = (int)(
-            $apiResult['response']['error']['code']
-            ?? 0
-        );
-        if (
-            $templateKey === 'payment_received'
-            && $metaErrorCode === 132001
-            && isset($payload['template']['language']['code'])
-        ) {
-            $originalLanguage = trim((string)$payload['template']['language']['code']);
-            $fallbackLanguage = $originalLanguage === 'en_US' ? 'en' : 'en_US';
-
-            if (in_array($originalLanguage, ['en', 'en_US'], true)) {
-                $payload['template']['language']['code'] = $fallbackLanguage;
-                $translationRetry = [
-                    'from' => $originalLanguage,
-                    'to' => $fallbackLanguage
-                ];
-
-                $apiResult = subhiksha_meta_api_request(
-                    $conn,
-                    'POST',
-                    rawurlencode($config['phone_number_id']) . '/messages',
-                    $payload
-                );
-            }
-        }
-
         $messageId = (string)(
             $apiResult['response']['messages'][0]['id']
             ?? ''
@@ -1147,13 +1117,6 @@ if (!function_exists('subhiksha_send_whatsapp')) {
                 'provider' => 'meta_cloud',
                 'http_code' => (int)($apiResult['http_code'] ?? 0),
                 'message_id' => $messageId,
-                'template_name' => $templateKey !== ''
-                    ? (string)($payload['template']['name'] ?? '')
-                    : '',
-                'language_code' => $templateKey !== ''
-                    ? (string)($payload['template']['language']['code'] ?? '')
-                    : '',
-                'translation_retry' => $translationRetry,
                 'response' => $apiResult['response'] ?? null,
                 'error' => $success
                     ? null
@@ -1219,7 +1182,7 @@ if (!function_exists('subhiksha_send_template_whatsapp')) {
 
 if (!function_exists('subhiksha_watzup_get_sent_messages')) {
     /**
-     * Compatibility stub for old pages that called the former Watzup report edited.
+     * Compatibility stub for old pages that called the former Watzup report.
      * Meta delivery updates should be handled through webhooks and local logs.
      */
     function subhiksha_watzup_get_sent_messages(
@@ -1229,65 +1192,10 @@ if (!function_exists('subhiksha_watzup_get_sent_messages')) {
     ): array {
         return [
             'success' => false,
-            'message' => 'The Watzup sent report is unavailable because the project now uses Meta WhatsApp Cloud API.',
+            'message' => 'The Watzup sent report is unavailable because the project now uses Meta WhatsApp Cloud API. Use whatsapp_logs and Meta webhooks.',
             'http_code' => 0,
             'response' => '',
             'data' => null
-        ];
-    }
-}
-
-if (!function_exists('subhiksha_meta_url_button_value')) {
-    /**
-     * Return only the dynamic value used by an approved Meta URL button.
-     *
-     * The ERP stores the complete customer URL (for example
-     * customer_tracking.php?token=abc123), while the Meta template already
-     * stores the fixed URL prefix. Sending the complete URL would make Meta
-     * append one URL to another. For job-card buttons the dynamic value is the
-     * token query-string value only.
-     */
-    function subhiksha_meta_url_button_value(
-        string $variableKey,
-        array $variables,
-        string $queryKey = 'token'
-    ): array {
-        $found = false;
-        $link = subhiksha_meta_variable_value(
-            $variableKey,
-            $variables,
-            $found
-        );
-
-        if (!$found || trim($link) === '') {
-            return [
-                'success' => false,
-                'value' => '',
-                'message' => 'Missing template variable: ' . $variableKey
-            ];
-        }
-
-        $buttonValue = '';
-        $urlParts = parse_url($link);
-        if (is_array($urlParts) && !empty($urlParts['query'])) {
-            $query = [];
-            parse_str((string)$urlParts['query'], $query);
-            $buttonValue = trim((string)($query[$queryKey] ?? ''));
-        }
-
-        if ($buttonValue === '') {
-            return [
-                'success' => false,
-                'value' => '',
-                'message' => 'Dynamic URL value "' . $queryKey
-                    . '" is missing from ' . $variableKey . '.'
-            ];
-        }
-
-        return [
-            'success' => true,
-            'value' => $buttonValue,
-            'message' => 'URL button value prepared.'
         ];
     }
 }

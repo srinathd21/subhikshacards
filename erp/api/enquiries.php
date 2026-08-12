@@ -344,38 +344,27 @@ function enqSettingValue(mysqli $conn, string $key, string $default = ''): strin
 
 function enqWhatsappApiReady(mysqli $conn): bool
 {
-    $enabled = enqSettingValue($conn, 'whatsapp_enabled', '0');
-    $apiUrl = enqSettingValue($conn, 'watzup_api_url', '');
-    $apiToken = enqSettingValue($conn, 'watzup_api_token', '');
-    $senderId = enqSettingValue($conn, 'watzup_sender_id', '');
-
-    if ($enabled !== '1') {
+    if (enqSettingValue($conn, 'whatsapp_enabled', '0') !== '1') {
         return false;
     }
 
-    $dummyValues = [
-        '',
-        'https://your-whatsapp-provider-url/send-message',
-        'PASTE_YOUR_SECRET_KEY_HERE',
-        'PASTE_YOUR_UNIQUE_ID_HERE',
-        'YOUR_REAL_API_URL',
-        'YOUR_REAL_SECRET_KEY',
-        'YOUR_REAL_UNIQUE_ID_OR_ACCOUNT_ID'
-    ];
-
-    if (in_array($apiUrl, $dummyValues, true)) {
+    $apiFile = __DIR__ . '/../includes/whatsapp-api.php';
+    if (!is_file($apiFile)) {
         return false;
     }
 
-    if (in_array($apiToken, $dummyValues, true)) {
+    try {
+        require_once $apiFile;
+        if (!function_exists('subhiksha_meta_config')) {
+            return false;
+        }
+
+        $config = subhiksha_meta_config($conn);
+        return trim((string)($config['access_token'] ?? '')) !== ''
+            && trim((string)($config['phone_number_id'] ?? '')) !== '';
+    } catch (Throwable $e) {
         return false;
     }
-
-    if (in_array($senderId, $dummyValues, true)) {
-        return false;
-    }
-
-    return filter_var($apiUrl, FILTER_VALIDATE_URL) !== false;
 }
 
 function enqWhatsappMobile($mobile): string
@@ -406,7 +395,7 @@ function enqWhatsappMessage(array $row): string
         . "Requirement: {$functionType}\n"
         . "Function Date: {$functionDate}\n\n"
         . "Our team will follow up shortly.\n\n"
-        . "- Subhiksha Cards";
+        . "Subhiksha Cards";
 }
 
 function enqWhatsappUrl(array $row): string
@@ -458,7 +447,7 @@ function enqWhatsappTemplateId(mysqli $conn, string $templateKey): ?int
             return null;
         }
 
-        $stmt = $conn->prepare("SELECT id FROM whatsapp_templates WHERE template_key = ? LIMIT 1");
+        $stmt = $conn->prepare("SELECT id FROM whatsapp_templates WHERE template_key = ? AND is_active = 1 LIMIT 1");
         $stmt->bind_param('s', $templateKey);
         $stmt->execute();
         $row = $stmt->get_result()->fetch_assoc();
@@ -498,7 +487,7 @@ function enqWhatsappLogManual(mysqli $conn, int $id): array
     }
 
     try {
-        $templateId = enqWhatsappTemplateId($conn, 'enquiry_completed');
+        $templateId = enqWhatsappTemplateId($conn, 'enquiry_completed_new');
         $relatedModule = 'Enquiries';
         $relatedId = $id;
         $customerId = !empty($enquiry['customer_id']) ? (int)$enquiry['customer_id'] : null;
@@ -580,7 +569,7 @@ function enqSendWhatsappByApi(mysqli $conn, int $id): array
 
     require_once $apiFile;
 
-    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
+    if (!function_exists('subhiksha_send_template_whatsapp')) {
         return [
             'success' => false,
             'message' => 'WhatsApp API function missing.'
@@ -600,28 +589,28 @@ function enqSendWhatsappByApi(mysqli $conn, int $id): array
      * IMPORTANT:
      * Message body must come from whatsapp_templates table.
      * Do not pass a direct message here, because each module uses its own template.
-     * Default enquiry template key is enquiry_completed to match existing master data.
-     * Change this key in DB if required by updating whatsapp_templates/template_key.
+     * Exact active Meta template key: enquiry_completed_new.
+     * BODY variable order: customer name, enquiry number, requirement,
+     * function date.
      */
-    return subhiksha_send_template_whatsapp($conn, 'enquiry_completed', (string)($enquiry['mobile'] ?? ''), [
+    return subhiksha_send_template_whatsapp(
+        $conn,
+        'enquiry_completed_new',
+        (string)($enquiry['mobile'] ?? ''),
+        [
             'customer_name' => (string)($enquiry['customer_name'] ?? 'Customer'),
             'enquiry_no' => (string)($enquiry['enquiry_no'] ?? '-'),
             'function_type' => (string)($enquiry['function_name'] ?? '-'),
-            'function_date' => !empty($enquiry['function_date']) ? date('d-m-Y', strtotime((string)$enquiry['function_date'])) : '-',
-            'venue' => (string)($enquiry['venue'] ?? '-'),
-            'address' => (string)($enquiry['address'] ?? '-'),
-            'enquiry_source' => (string)($enquiry['enquiry_source'] ?? '-'),
-            'status_name' => (string)($enquiry['status_name'] ?? '-'),
-            'mobile' => (string)($enquiry['mobile'] ?? ''),
-            'order_type' => '-'
-        ], [
-        'extra_payload' => [
-            'type' => 'text'
+            'function_date' => !empty($enquiry['function_date'])
+                ? date('d-m-Y', strtotime((string)$enquiry['function_date']))
+                : '-'
         ],
-        'related_module' => 'Enquiries',
-        'related_id' => $id,
-        'customer_id' => $enquiry['customer_id'] ?? null
-    ]);
+        [
+            'related_module' => 'Enquiries',
+            'related_id' => $id,
+            'customer_id' => $enquiry['customer_id'] ?? null
+        ]
+    );
 }
 
 function enqWhatsappSvg(): string
