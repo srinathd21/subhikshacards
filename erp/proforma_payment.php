@@ -380,14 +380,14 @@ function pp_payment_whatsapp_row(mysqli $conn, int $proformaId, int $paymentId):
 
 function pp_payment_whatsapp_template_key(array $row): string
 {
-    // Choose the template from the balance immediately after THIS payment.
-    // This keeps Retry WhatsApp correct even if later payments were collected.
+    // Use the balance immediately after this payment. This keeps Retry
+    // WhatsApp correct even if later payments have already been collected.
     $balanceAfterPayment = array_key_exists('balance_after_payment', $row)
         ? (float)$row['balance_after_payment']
         : (float)($row['balance_amount'] ?? 0);
 
     return ($balanceAfterPayment <= 0.00001)
-        ? 'payment_completed_'
+        ? 'payment_completed_new'
         : 'payment_received';
 }
 
@@ -429,6 +429,18 @@ function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId)
     $totalPaidAfterPayment = array_key_exists('total_paid_after_payment', $row)
         ? (float)$row['total_paid_after_payment']
         : (float)($row['advance_amount'] ?? 0);
+    $proformaPdfUrl = $templateKey === 'payment_completed_new'
+        ? pp_payment_proforma_pdf_url($conn, $proformaId)
+        : '';
+
+    if ($templateKey === 'payment_completed_new' && $proformaPdfUrl === '') {
+        return [
+            'success' => false,
+            'message' => 'Proforma PDF link could not be generated.',
+            'mode' => 'api',
+            'log_id' => 0
+        ];
+    }
 
     $variables = [
         'customer_name' => trim((string)($row['customer_name'] ?? 'Customer')) ?: 'Customer',
@@ -442,12 +454,7 @@ function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId)
         'payment_date' => !empty($row['payment_date']) ? date('d-m-Y', strtotime((string)$row['payment_date'])) : date('d-m-Y'),
         'reference_no' => trim((string)($row['reference_no'] ?? '-')) ?: '-',
         'function_type' => trim((string)($row['function_name'] ?? '-')) ?: '-',
-        'proforma_pdf_link' => $templateKey === 'payment_completed_'
-            ? pp_payment_proforma_pdf_url($conn, $proformaId)
-            : '',
-        'invoice_link' => $templateKey === 'payment_completed_'
-            ? pp_payment_proforma_pdf_url($conn, $proformaId)
-            : ''
+        'proforma_pdf_link' => $proformaPdfUrl
     ];
 
     $meta = [
@@ -455,11 +462,6 @@ function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId)
         'related_id' => $paymentId,
         'customer_id' => !empty($row['bill_customer_id']) ? (int)$row['bill_customer_id'] : (!empty($row['customer_id']) ? (int)$row['customer_id'] : null),
         'sent_by' => (int)($_SESSION['user_id'] ?? 0),
-        // Use the exact approved Meta received-payment template name.
-        'meta_template_name' => $templateKey === 'payment_received'
-            ? 'payment_received'
-            : 'payment_completed_',
-        'language_code' => 'en',
         'extra_payload' => ['type' => 'text']
     ];
 
@@ -1100,13 +1102,11 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                         </div>
                         <div class="col-md-3">
                             <div class="info-box">
-                                <small>Function</small><strong><?= e($bill['function_name'] ?? '-') ?></strong>
-                            </div>
+                                <small>Function</small><strong><?= e($bill['function_name'] ?? '-') ?></strong></div>
                         </div>
                         <div class="col-md-3">
                             <div class="info-box">
-                                <small>Status</small><strong><?= e($bill['status_name'] ?? '-') ?></strong>
-                            </div>
+                                <small>Status</small><strong><?= e($bill['status_name'] ?? '-') ?></strong></div>
                         </div>
                         <div class="col-md-4">
                             <div class="info-box"><small>Final
