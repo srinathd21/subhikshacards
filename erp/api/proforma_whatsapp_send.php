@@ -1,110 +1,198 @@
 <?php
 /**
  * api/proforma_whatsapp_send.php
- * Sends Proforma Bill PDF link through configured WhatsApp API using existing WhatsApp template.
- * No wa.me/manual browser fallback is used here.
+ *
+ * Sends the approved Meta template `proforma_created` immediately after a
+ * newly created Proforma Bill has been committed. Repeated calls are safe:
+ * an existing successful WhatsApp log prevents a duplicate message.
  */
+
+declare(strict_types=1);
+
 header('Content-Type: application/json; charset=utf-8');
 
 require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/auth.php';
-require_once __DIR__ . '/../includes/whatsapp-api.php';
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-function pws_json(bool $status, string $message, array $extra = []): void
+function pcw_response(bool $status, string $message, array $extra = []): void
 {
     echo json_encode(array_merge([
         'status' => $status,
-        'message' => $message,
+        'success' => $status,
+        'message' => $message
     ], $extra), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
-function pws_table_exists(mysqli $conn, string $table): bool
+function pcw_table_exists(mysqli $conn, string $table): bool
 {
     try {
-        $table = $conn->real_escape_string($table);
-        $res = $conn->query("SHOW TABLES LIKE '{$table}'");
-        $ok = $res && $res->num_rows > 0;
-        if ($res) {
-            $res->free();
+        $safe = $conn->real_escape_string($table);
+        $result = $conn->query("SHOW TABLES LIKE '{$safe}'");
+        $exists = $result && $result->num_rows > 0;
+        if ($result) {
+            $result->free();
         }
-        return $ok;
+        return $exists;
     } catch (Throwable $e) {
         return false;
     }
 }
 
-function pws_money($value): string
+function pcw_permission_allowed(mysqli $conn): bool
 {
-    return '₹' . number_format((float)$value, 2);
-}
+    $roleKey = strtolower(trim((string)(
+        $_SESSION['role_key']
+        ?? $_SESSION['role']
+        ?? $_SESSION['user_role']
+        ?? ''
+    )));
 
-function pws_base_url(mysqli $conn): string
-{
-    $setting = '';
-
-    try {
-        if (pws_table_exists($conn, 'system_settings')) {
-            $stmt = $conn->prepare("
-                SELECT setting_value
-                FROM system_settings
-                WHERE setting_key IN ('site_url','base_url','app_url')
-                  AND TRIM(setting_value) <> ''
-                ORDER BY FIELD(setting_key,'site_url','base_url','app_url')
-                LIMIT 1
-            ");
-            $stmt->execute();
-            $row = $stmt->get_result()->fetch_assoc();
-            $stmt->close();
-            $setting = trim((string)($row['setting_value'] ?? ''));
-        }
-    } catch (Throwable $e) {
-        $setting = '';
+    if (in_array($roleKey, ['admin', 'super_admin', 'superadmin'], true)) {
+        return true;
     }
 
-    if ($setting !== '') {
-        return rtrim($setting, '/');
+    foreach (['can_create', 'can_update', 'can_edit', 'can_send_whatsapp'] as $functionName) {
+        if (!function_exists($functionName)) {
+            continue;
+        }
+
+        try {
+            if ((bool)$functionName($conn, 'proforma_bills.php')) {
+                return true;
+            }
+        } catch (ArgumentCountError $e) {
+            try {
+                if ((bool)$functionName('proforma_bills.php')) {
+                    return true;
+                }
+            } catch (Throwable $inner) {
+            }
+        } catch (Throwable $e) {
+        }
+    }
+
+    return false;
+}
+
+function pcw_setting(mysqli $conn, string $key): string
+{
+    if (!pcw_table_exists($conn, 'system_settings')) {
+        return '';
+    }
+
+    try {
+        $stmt = $conn->prepare('SELECT setting_value FROM system_settings WHERE setting_key = ? LIMIT 1');
+        $stmt->bind_param('s', $key);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return trim((string)($row['setting_value'] ?? ''));
+    } catch (Throwable $e) {
+        return '';
+    }
+}
+
+function pcw_base_url(mysqli $conn): string
+{
+    foreach (['site_url', 'base_url', 'app_url'] as $key) {
+        $configured = pcw_setting($conn, $key);
+        if ($configured !== '') {
+            return rtrim($configured, '/');
+        }
     }
 
     $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-        || (($_SERVER['SERVER_PORT'] ?? '') == 443);
-
+        || (string)($_SERVER['SERVER_PORT'] ?? '') === '443';
     $scheme = $https ? 'https' : 'http';
-    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $host = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
+    $scriptDirectory = rtrim(str_replace('\\', '/', dirname((string)($_SERVER['SCRIPT_NAME'] ?? ''))), '/');
+    $erpDirectory = preg_replace('#/api$#', '', $scriptDirectory) ?: '';
 
-    /*
-     * Current file is /erp/api/proforma_whatsapp_send.php,
-     * so go one level up to /erp.
-     */
-    $scriptDir = str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? ''));
-    $erpDir = rtrim(dirname($scriptDir), '/');
+    return rtrim($scheme . '://' . $host . ($erpDirectory === '/' ? '' : $erpDirectory), '/');
+}
 
-    if ($erpDir === '/' || $erpDir === '.') {
-        $erpDir = '';
+function pcw_money($value): string
+{
+    return '₹' . number_format((float)$value, 2, '.', ',');
+}
+
+function pcw_already_sent(mysqli $conn, int $proformaId): bool
+{
+    if (!pcw_table_exists($conn, 'whatsapp_logs') || !pcw_table_exists($conn, 'whatsapp_templates')) {
+        return false;
     }
 
-    return rtrim($scheme . '://' . $host . $erpDir, '/');
+    try {
+        $stmt = $conn->prepare("
+            SELECT wl.id
+            FROM whatsapp_logs wl
+            INNER JOIN whatsapp_templates wt ON wt.id = wl.template_id
+            WHERE wl.related_module = 'Proforma Bills'
+              AND wl.related_id = ?
+              AND wl.status = 'sent'
+              AND wt.template_key = 'proforma_created'
+            ORDER BY wl.id DESC
+            LIMIT 1
+        ");
+        $stmt->bind_param('i', $proformaId);
+        $stmt->execute();
+        $exists = (bool)$stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return $exists;
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
-function pws_public_pdf_url(mysqli $conn, int $id): string
-{
-    return pws_base_url($conn)
-        . '/proforma_bill_pdf.php?id='
-        . $id
-        . '&public=1&download=1';
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    pcw_response(false, 'Invalid request method.');
 }
 
-function pws_customer_preview_url(mysqli $conn, int $id): string
-{
-    return pws_base_url($conn) . '/customer_proforma_bill.php?id=' . $id;
+if (!pcw_permission_allowed($conn)) {
+    http_response_code(403);
+    pcw_response(false, 'You do not have permission to send the Proforma WhatsApp message.');
 }
 
-function pws_fetch_proforma(mysqli $conn, int $id): ?array
-{
+$csrfToken = trim((string)($_POST['csrf_token'] ?? ''));
+$validCsrf = $csrfToken !== '' && (
+    (!empty($_SESSION['create_proforma_csrf'])
+        && hash_equals((string)$_SESSION['create_proforma_csrf'], $csrfToken))
+    || (!empty($_SESSION['proforma_csrf'])
+        && hash_equals((string)$_SESSION['proforma_csrf'], $csrfToken))
+);
+
+if (!$validCsrf) {
+    http_response_code(419);
+    pcw_response(false, 'Invalid CSRF token.');
+}
+
+$action = trim((string)($_POST['action'] ?? ''));
+if (!in_array($action, ['send_proforma_whatsapp', 'send_whatsapp_api'], true)) {
+    pcw_response(false, 'Invalid WhatsApp action.');
+}
+
+$proformaId = (int)($_POST['id'] ?? $_POST['proforma_id'] ?? 0);
+if ($proformaId <= 0) {
+    pcw_response(false, 'Invalid Proforma Bill.');
+}
+
+if (pcw_already_sent($conn, $proformaId)) {
+    pcw_response(true, 'The proforma_created WhatsApp template was already sent.', [
+        'already_sent' => true,
+        'template' => 'proforma_created',
+        'template_key' => 'proforma_created',
+        'proforma_id' => $proformaId,
+        'id' => $proformaId,
+        'mode' => 'api'
+    ]);
+}
+
+try {
     $stmt = $conn->prepare("
         SELECT
             pb.id,
@@ -112,203 +200,96 @@ function pws_fetch_proforma(mysqli $conn, int $id): ?array
             pb.customer_id,
             pb.customer_name,
             pb.mobile,
-            pb.order_type,
             pb.final_amount,
             pb.advance_amount,
             pb.balance_amount,
             pb.delivery_date,
-            ft.function_name,
-            pbi.item_name
+            COALESCE((
+                SELECT pbi.item_name
+                FROM proforma_bill_items pbi
+                WHERE pbi.proforma_bill_id = pb.id
+                ORDER BY pbi.sort_order ASC, pbi.id ASC
+                LIMIT 1
+            ), 'Invitation Cards') AS product_name
         FROM proforma_bills pb
-        LEFT JOIN function_types ft ON ft.id = pb.function_type_id
-        LEFT JOIN (
-            SELECT proforma_bill_id, MIN(id) AS first_item_id
-            FROM proforma_bill_items
-            GROUP BY proforma_bill_id
-        ) first_pbi ON first_pbi.proforma_bill_id = pb.id
-        LEFT JOIN proforma_bill_items pbi ON pbi.id = first_pbi.first_item_id
         WHERE pb.id = ?
         LIMIT 1
     ");
-
-    $stmt->bind_param('i', $id);
+    $stmt->bind_param('i', $proformaId);
     $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc();
+    $proforma = $stmt->get_result()->fetch_assoc();
     $stmt->close();
-
-    return $row ?: null;
-}
-
-try {
-    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-        pws_json(false, 'Invalid request method.');
-    }
-
-    if (function_exists('require_permission')) {
-        require_permission($conn, 'can_view', 'proforma_bills.php');
-    }
-
-    if (
-        function_exists('can_send_whatsapp')
-        && !can_send_whatsapp($conn, 'proforma_bills.php')
-    ) {
-        pws_json(false, 'You do not have permission to send WhatsApp messages.');
-    }
-
-    $token = (string)($_POST['csrf_token'] ?? '');
-
-    $validCsrf = $token !== '' && (
-        (
-            !empty($_SESSION['proforma_csrf'])
-            && hash_equals((string)$_SESSION['proforma_csrf'], $token)
-        )
-        ||
-        (
-            !empty($_SESSION['create_proforma_csrf'])
-            && hash_equals((string)$_SESSION['create_proforma_csrf'], $token)
-        )
-    );
-
-    if (!$validCsrf) {
-        pws_json(false, 'Invalid CSRF token.');
-    }
-
-    $action = trim((string)($_POST['action'] ?? ''));
-
-    if (
-        $action !== 'send_proforma_whatsapp'
-        && $action !== 'send_whatsapp_api'
-    ) {
-        pws_json(false, 'Invalid WhatsApp action.');
-    }
-
-    $id = (int)($_POST['id'] ?? 0);
-
-    if ($id <= 0) {
-        pws_json(false, 'Invalid proforma bill id.');
-    }
-
-    $row = pws_fetch_proforma($conn, $id);
-
-    if (!$row) {
-        pws_json(false, 'Proforma bill not found.');
-    }
-
-    $mobile = trim((string)($row['mobile'] ?? ''));
-
-    if ($mobile === '') {
-        pws_json(false, 'Customer mobile number is missing.');
-    }
-
-    $pdfUrl = pws_public_pdf_url($conn, $id);
-    $customerPreviewUrl = pws_customer_preview_url($conn, $id);
-
-    $deliveryDate = '-';
-
-    if (!empty($row['delivery_date']) && $row['delivery_date'] !== '0000-00-00') {
-        $deliveryTimestamp = strtotime((string)$row['delivery_date']);
-        if ($deliveryTimestamp !== false) {
-            $deliveryDate = date('d-m-Y', $deliveryTimestamp);
-        }
-    }
-
-    /*
-     * Exact values required by Meta template: proforma_created
-     *
-     * {{1}} customer_name
-     * {{2}} proforma_no
-     * {{3}} product_name
-     * {{4}} final_amount
-     * {{5}} advance_amount
-     * {{6}} balance_amount
-     * {{7}} delivery_date
-     * {{8}} proforma_pdf_link
-     *
-     * Additional aliases are kept for compatibility with existing ERP code.
-     */
-    $variables = [
-        'customer_name' => trim((string)($row['customer_name'] ?? 'Customer')) ?: 'Customer',
-        'proforma_no' => trim((string)($row['proforma_no'] ?? '-')) ?: '-',
-        'product_name' => trim(
-            (string)(($row['item_name'] ?? '') ?: ($row['function_name'] ?? '-'))
-        ) ?: '-',
-
-        'final_amount' => pws_money($row['final_amount'] ?? 0),
-        'advance_amount' => pws_money($row['advance_amount'] ?? 0),
-        'balance_amount' => pws_money($row['balance_amount'] ?? 0),
-        'delivery_date' => $deliveryDate,
-        'proforma_pdf_link' => $pdfUrl,
-
-        /* Compatibility aliases */
-        'function_type' => trim((string)($row['function_name'] ?? '-')) ?: '-',
-        'order_type' => ucfirst((string)($row['order_type'] ?? '-')),
-        'invoice_link' => $pdfUrl,
-        'proforma_download_link' => $pdfUrl,
-        'customer_proforma_link' => $customerPreviewUrl,
-        'proforma_view_link' => $customerPreviewUrl,
-    ];
-
-    /*
-     * Send the exact Meta-approved template: proforma_created.
-     * Do NOT set message_type = text because this is a Meta template message.
-     */
-    if (function_exists('subhiksha_send_template_whatsapp')) {
-        $wa = subhiksha_send_template_whatsapp(
-            $conn,
-            'proforma_created',
-            $mobile,
-            $variables,
-            [
-                'related_module' => 'Proforma Bills',
-                'related_id' => $id,
-                'customer_id' => !empty($row['customer_id'])
-                    ? (int)$row['customer_id']
-                    : null,
-                'sent_by' => (int)($_SESSION['user_id'] ?? 0),
-            ]
-        );
-    } else {
-        $wa = subhiksha_send_whatsapp(
-            $conn,
-            [
-                'mobile' => $mobile,
-                'template_key' => 'proforma_created',
-                'variables' => $variables,
-                'related_module' => 'Proforma Bills',
-                'related_id' => $id,
-                'customer_id' => !empty($row['customer_id'])
-                    ? (int)$row['customer_id']
-                    : null,
-                'sent_by' => (int)($_SESSION['user_id'] ?? 0),
-            ]
-        );
-    }
-
-    if (!empty($wa['success'])) {
-        pws_json(
-            true,
-            'Proforma created WhatsApp message sent successfully.',
-            [
-                'template' => 'proforma_created',
-                'log_id' => $wa['log_id'] ?? 0,
-                'pdf_url' => $pdfUrl,
-                'customer_url' => $customerPreviewUrl,
-            ]
-        );
-    }
-
-    pws_json(
-        false,
-        $wa['message'] ?? 'WhatsApp API template sending failed.',
-        [
-            'template' => 'proforma_created',
-            'log_id' => $wa['log_id'] ?? 0,
-            'pdf_url' => $pdfUrl,
-            'customer_url' => $customerPreviewUrl,
-            'response' => $wa['response'] ?? '',
-        ]
-    );
-
 } catch (Throwable $e) {
-    pws_json(false, 'WhatsApp API error: ' . $e->getMessage());
+    pcw_response(false, 'Unable to load the created Proforma Bill.');
 }
+
+if (empty($proforma)) {
+    pcw_response(false, 'Created Proforma Bill not found.');
+}
+
+$mobile = trim((string)($proforma['mobile'] ?? ''));
+if ($mobile === '') {
+    pcw_response(false, 'Customer mobile number is missing.');
+}
+
+$whatsappApiFile = __DIR__ . '/../includes/whatsapp-api.php';
+if (!is_file($whatsappApiFile)) {
+    pcw_response(false, 'WhatsApp API file is missing.');
+}
+
+require_once $whatsappApiFile;
+
+if (!function_exists('subhiksha_send_template_whatsapp')) {
+    pcw_response(false, 'WhatsApp template API function is missing.');
+}
+
+$pdfUrl = pcw_base_url($conn)
+    . '/proforma_bill_pdf.php?public=1&download=1&id=' . $proformaId;
+
+$variables = [
+    'customer_name' => trim((string)($proforma['customer_name'] ?? 'Customer')) ?: 'Customer',
+    'proforma_no' => trim((string)($proforma['proforma_no'] ?? '-')) ?: '-',
+    'product_name' => trim((string)($proforma['product_name'] ?? 'Invitation Cards')) ?: 'Invitation Cards',
+    'final_amount' => pcw_money($proforma['final_amount'] ?? 0),
+    'advance_amount' => pcw_money($proforma['advance_amount'] ?? 0),
+    'balance_amount' => pcw_money($proforma['balance_amount'] ?? 0),
+    'delivery_date' => !empty($proforma['delivery_date'])
+        ? date('d-m-Y', strtotime((string)$proforma['delivery_date']))
+        : '-',
+    'proforma_pdf_link' => $pdfUrl
+];
+
+$meta = [
+    'related_module' => 'Proforma Bills',
+    'related_id' => $proformaId,
+    'customer_id' => !empty($proforma['customer_id']) ? (int)$proforma['customer_id'] : null,
+    'sent_by' => (int)($_SESSION['user_id'] ?? 0),
+    'language_code' => 'en',
+    'extra_payload' => [
+        'type' => 'text',
+        'proforma_pdf_link' => $pdfUrl
+    ]
+];
+
+$result = subhiksha_send_template_whatsapp(
+    $conn,
+    'proforma_created',
+    $mobile,
+    $variables,
+    $meta
+);
+
+$sent = (bool)($result['success'] ?? false);
+pcw_response($sent, $sent
+    ? 'Proforma created WhatsApp template sent successfully.'
+    : (string)($result['message'] ?? 'WhatsApp template sending failed.'), [
+        'template' => 'proforma_created',
+        'template_key' => 'proforma_created',
+        'proforma_id' => $proformaId,
+        'id' => $proformaId,
+        'proforma_pdf_link' => $pdfUrl,
+        'pdf_url' => $pdfUrl,
+        'whatsapp_sent' => $sent,
+        'mode' => 'api',
+        'log_id' => (int)($result['log_id'] ?? 0)
+    ]);
