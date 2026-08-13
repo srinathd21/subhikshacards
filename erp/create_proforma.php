@@ -3169,9 +3169,52 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                 credentials: 'same-origin'
             })
             .then(response => response.json())
-            .then(data => {
+            .then(async data => {
                 if (data.status) {
-                    let toastMessage = data.message || (editData ? 'Proforma bill updated successfully.' :
+                    const savedProformaId = parseInt(data.proforma_id || data.id || 0, 10);
+
+                    /*
+                     * A successful new Proforma must send the approved
+                     * proforma_created Meta template. The save API may already
+                     * have sent it; the dedicated endpoint safely skips an
+                     * existing successful log and prevents a duplicate.
+                     */
+                    const approvedTemplateAlreadySent = data.whatsapp_sent === true &&
+                        data.whatsapp?.template_key === 'proforma_created';
+
+                    if (!isEditSubmit && savedProformaId > 0 && !approvedTemplateAlreadySent) {
+                        try {
+                            const whatsappBody = new FormData();
+                            const csrfInput = form.querySelector('[name="csrf_token"]');
+                            whatsappBody.append('csrf_token', csrfInput ? csrfInput.value : '');
+                            whatsappBody.append('action', 'send_proforma_whatsapp');
+                            whatsappBody.append('id', String(savedProformaId));
+
+                            const whatsappResponse = await fetch(
+                                'api/proforma_whatsapp_send.php', {
+                                    method: 'POST',
+                                    body: whatsappBody,
+                                    credentials: 'same-origin'
+                                }
+                            );
+                            const whatsappData = await whatsappResponse.json();
+
+                            data.whatsapp = whatsappData;
+                            data.whatsapp_sent = whatsappData.status === true || whatsappData
+                                .success === true;
+                            data.whatsapp_mode = data.whatsapp_sent ? 'api' : 'failed';
+                            data.whatsapp_error = data.whatsapp_sent ? '' :
+                                (whatsappData.message || 'WhatsApp template sending failed.');
+                        } catch (whatsappError) {
+                            data.whatsapp_sent = false;
+                            data.whatsapp_mode = 'failed';
+                            data.whatsapp_error =
+                                'WhatsApp request failed. Use Retry WhatsApp from the Proforma list.';
+                        }
+                    }
+
+                    let toastMessage = data.message || (editData ?
+                        'Proforma bill updated successfully.' :
                         'Proforma bill created successfully.');
                     if (data.proforma_no) {
                         toastMessage += '<br>Proforma: ' + data.proforma_no;
@@ -3179,15 +3222,21 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                     if (data.job_card_no) {
                         toastMessage += '<br>Job Card: ' + data.job_card_no;
                     }
-                    if (data.whatsapp_mode === 'api') {
+                    if (!isEditSubmit && data.whatsapp_sent === true) {
                         toastMessage += '<br>WhatsApp: Sent using API.';
-                    }
-                    if (data.whatsapp_mode === 'manual') {
+                    } else if (!isEditSubmit && data.whatsapp_sent === false) {
+                        toastMessage += '<br>WhatsApp failed: ' + (data.whatsapp_error ||
+                            data.whatsapp?.message || 'Please use Retry WhatsApp.');
+                    } else if (data.whatsapp_mode === 'manual') {
                         toastMessage += '<br>WhatsApp: Manual window opened.';
                     }
 
                     clearFormDraft();
-                    showActionToast(toastMessage, 'success', 'Success');
+                    const toastType = (!isEditSubmit && data.whatsapp_sent === false) ? 'warning' :
+                        'success';
+                    const toastTitle = toastType === 'warning' ? 'Proforma Saved — WhatsApp Failed' :
+                        'Success';
+                    showActionToast(toastMessage, toastType, toastTitle);
 
                     if (data.open_whatsapp_url) {
                         window.open(data.open_whatsapp_url, '_blank');
@@ -3197,7 +3246,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                         window.location.href = data.redirect_url || 'proforma_bills.php';
                     }, 1200);
                 } else {
-                    showActionToast(data.message || 'Proforma bill creation failed.', 'danger', 'Failed');
+                    showActionToast(data.message || 'Proforma bill creation failed.', 'danger',
+                        'Failed');
                     if (btn) {
                         btn.disabled = false;
                         btn.textContent = oldText || (editData ? 'Update Proforma Bill' :
