@@ -1,7 +1,7 @@
 <?php
 /**
  * proforma_payment.php
- * Separate balance payment collection page with cancel/revert option.
+ * Separate balance payment collection page with excess-payment return and cancel/revert options.
  */
 require_once __DIR__ . '/includes/auth.php';
 require_permission($conn, 'can_view', 'proforma_bills.php');
@@ -57,6 +57,44 @@ function pp_ensure_payment_cancel_columns(mysqli $conn): void
     if (!pp_col_exists($conn, 'payments', 'cancel_reason')) $alters[] = "ADD COLUMN `cancel_reason` TEXT DEFAULT NULL AFTER `cancelled_by`";
     if ($alters) {
         $conn->query("ALTER TABLE `payments` " . implode(', ', $alters));
+    }
+}
+
+function pp_ensure_payment_return_columns(mysqli $conn): void
+{
+    if (!pp_table_exists($conn, 'payments')) return;
+
+    $alters = [];
+    if (!pp_col_exists($conn, 'payments', 'tendered_amount')) {
+        $alters[] = "ADD COLUMN `tendered_amount` DECIMAL(12,2) DEFAULT NULL AFTER `amount`";
+    }
+    if (!pp_col_exists($conn, 'payments', 'return_amount')) {
+        $after = pp_col_exists($conn, 'payments', 'tendered_amount')
+            ? 'tendered_amount'
+            : 'amount';
+        $alters[] = "ADD COLUMN `return_amount` DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER `{$after}`";
+    }
+
+    if ($alters) {
+        $conn->query("ALTER TABLE `payments` " . implode(', ', $alters));
+    }
+}
+
+function pp_payment_return_columns_ready(mysqli $conn): bool
+{
+    try {
+        $res = $conn->query("
+            SELECT COUNT(*) AS total
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'payments'
+              AND COLUMN_NAME IN ('tendered_amount', 'return_amount')
+        ");
+        $row = $res ? $res->fetch_assoc() : null;
+        if ($res) $res->free();
+        return (int)($row['total'] ?? 0) === 2;
+    } catch (Throwable $e) {
+        return false;
     }
 }
 
@@ -519,8 +557,9 @@ function pp_last_payment_whatsapp_status(mysqli $conn, int $paymentId): array
 
 try {
     pp_ensure_payment_cancel_columns($conn);
+    pp_ensure_payment_return_columns($conn);
 } catch (Throwable $e) {
-    // Page will still load; cancellation will fail with a clear error if ALTER permission is unavailable.
+    // Page will still work with its legacy columns if ALTER permission is unavailable.
 }
 
 if (empty($_SESSION['payment_csrf'])) {
@@ -553,6 +592,11 @@ if ($pageMsg === 'payment_collected') {
     $messageType = 'danger';
 }
 
+$returnedAfterPayment = round((float)str_replace(',', '', (string)($_GET['return_amount'] ?? '0')), 2);
+if ($message !== '' && $returnedAfterPayment > 0.009) {
+    $message .= ' Return ' . pp_money($returnedAfterPayment) . ' to the customer.';
+}
+
 if ($id <= 0) {
     $error = 'Invalid proforma bill.';
 }
@@ -567,7 +611,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
         }
 
         if ($action === 'collect_payment') {
-            $amount = (float)str_replace(',', '', (string)($_POST['amount'] ?? '0'));
+            $tenderedAmount = round((float)str_replace(',', '', (string)($_POST['amount'] ?? '0')), 2);
             $paymentMode = trim((string)($_POST['payment_mode'] ?? 'cash'));
             $paymentDate = trim((string)($_POST['payment_date'] ?? date('Y-m-d')));
             $referenceNo = trim((string)($_POST['reference_no'] ?? ''));
@@ -575,14 +619,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
 
             $allowedModes = ['cash', 'upi'];
             if (!in_array($paymentMode, $allowedModes, true)) $paymentMode = 'cash';
-            if ($amount <= 0) throw new RuntimeException('Payment amount must be greater than zero.');
+            if ($tenderedAmount <= 0) throw new RuntimeException('Amount received must be greater than zero.');
             if ($paymentDate === '') $paymentDate = date('Y-m-d');
 
             $cashDenominationPayload = null;
             if ($paymentMode === 'cash') {
                 $cashDenominationPayload = pp_cash_denomination_payload();
-                if (abs((float)$cashDenominationPayload['total'] - round($amount, 2)) > 0.009) {
-                    throw new RuntimeException('Cash denomination total must match the collected amount. Denomination total: ' . pp_money($cashDenominationPayload['total']) . ', Payment amount: ' . pp_money($amount));
+                if (abs((float)$cashDenominationPayload['total'] - $tenderedAmount) > 0.009) {
+                    throw new RuntimeException('Cash denomination total must match the cash received. Denomination total: ' . pp_money($cashDenominationPayload['total']) . ', Cash received: ' . pp_money($tenderedAmount));
                 }
             }
 
@@ -596,15 +640,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
 
             $balance = (float)$bill['balance_amount'];
             if ($balance <= 0) throw new RuntimeException('This proforma bill is already fully paid.');
-            if ($amount > $balance) throw new RuntimeException('Payment amount cannot be greater than balance amount.');
+
+            /*
+             * The customer may hand over more than the balance due. Only the
+             * balance is posted as payment; the excess is returned as change.
+             */
+            $amount = round(min($tenderedAmount, $balance), 2);
+            $returnAmount = round(max(0, $tenderedAmount - $amount), 2);
 
             $paymentNo = pp_next_no($conn);
-            $paymentType = ($amount >= $balance) ? 'balance' : 'balance';
+            $paymentType = ($amount >= $balance) ? 'full' : 'balance';
             $customerId = !empty($bill['customer_id']) ? (int)$bill['customer_id'] : null;
             $userId = (int)($_SESSION['user_id'] ?? 0);
 
-            $stmt = $conn->prepare("INSERT INTO payments (customer_id, proforma_bill_id, payment_no, payment_type, payment_mode, amount, payment_date, reference_no, remarks, received_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
-            $stmt->bind_param('iisssdsssi', $customerId, $id, $paymentNo, $paymentType, $paymentMode, $amount, $paymentDate, $referenceNo, $remarks, $userId);
+            if ($returnAmount > 0.009) {
+                $returnAudit = 'Customer paid ' . pp_money($tenderedAmount)
+                    . '; Applied ' . pp_money($amount)
+                    . '; Return ' . pp_money($returnAmount);
+                $remarks = trim($remarks) !== ''
+                    ? trim($remarks) . ' | ' . $returnAudit
+                    : $returnAudit;
+            }
+
+            if (pp_payment_return_columns_ready($conn)) {
+                $stmt = $conn->prepare("INSERT INTO payments (customer_id, proforma_bill_id, payment_no, payment_type, payment_mode, amount, tendered_amount, return_amount, payment_date, reference_no, remarks, received_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
+                $stmt->bind_param('iisssdddsssi', $customerId, $id, $paymentNo, $paymentType, $paymentMode, $amount, $tenderedAmount, $returnAmount, $paymentDate, $referenceNo, $remarks, $userId);
+            } else {
+                $stmt = $conn->prepare("INSERT INTO payments (customer_id, proforma_bill_id, payment_no, payment_type, payment_mode, amount, payment_date, reference_no, remarks, received_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
+                $stmt->bind_param('iisssdsssi', $customerId, $id, $paymentNo, $paymentType, $paymentMode, $amount, $paymentDate, $referenceNo, $remarks, $userId);
+            }
             $stmt->execute();
             $paymentId = (int)$stmt->insert_id;
             $stmt->close();
@@ -618,12 +682,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
 
             $waResult = pp_send_payment_whatsapp($conn, $id, $paymentId);
             if (!empty($waResult['success'])) {
-                pp_redirect($id, 'payment_collected_wa_sent');
+                pp_redirect($id, 'payment_collected_wa_sent', '', [
+                    'return_amount' => $returnAmount > 0.009 ? number_format($returnAmount, 2, '.', '') : ''
+                ]);
             }
 
             pp_redirect($id, 'payment_collected_wa_failed', '', [
                 'payment_id' => $paymentId,
-                'wa_err' => (string)($waResult['message'] ?? 'Unknown WhatsApp error.')
+                'wa_err' => (string)($waResult['message'] ?? 'Unknown WhatsApp error.'),
+                'return_amount' => $returnAmount > 0.009 ? number_format($returnAmount, 2, '.', '') : ''
             ]);
         }
 
@@ -800,6 +867,43 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         background: color-mix(in srgb, var(--success-color, #16a34a) 6%, var(--card-bg))
     }
 
+    .payment-calculation-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+    }
+
+    .payment-calculation-box {
+        border: 1px solid var(--border-soft);
+        border-radius: 15px;
+        padding: 11px 13px;
+        background: var(--card-bg);
+    }
+
+    .payment-calculation-box small {
+        display: block;
+        color: var(--text-muted);
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+        margin-bottom: 4px;
+    }
+
+    .payment-calculation-box strong {
+        color: var(--text-main);
+        font-size: 18px;
+        font-weight: 900;
+    }
+
+    .payment-calculation-box.return-box {
+        border-color: rgba(245, 158, 11, .42);
+        background: rgba(245, 158, 11, .10);
+    }
+
+    .payment-calculation-box.return-box strong {
+        color: #9a3412;
+    }
+
     .table-view th {
         font-size: 12px;
         text-transform: uppercase;
@@ -946,7 +1050,7 @@ if ($bill && pp_table_exists($conn, 'payments')) {
     }
 
     .denom-modal-compact .modal-dialog {
-        max-width: 430px
+        max-width: 610px
     }
 
     .denom-modal-compact .modal-content {
@@ -1002,12 +1106,19 @@ if ($bill && pp_table_exists($conn, 'payments')) {
     }
 
     .denom-total-box {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
         border-radius: 14px;
         background: rgba(22, 163, 74, .10);
         border: 1px solid rgba(22, 163, 74, .24);
         padding: 9px 11px;
         font-weight: 900;
         font-size: 13px
+    }
+
+    .denom-total-box span {
+        white-space: nowrap;
     }
 
     body.modal-open-fallback {
@@ -1030,6 +1141,11 @@ if ($bill && pp_table_exists($conn, 'payments')) {
     @media(max-width:575.98px) {
         .payment-mode-grid {
             grid-template-columns: 1fr
+        }
+
+        .payment-calculation-grid,
+        .denom-total-box {
+            grid-template-columns: 1fr;
         }
 
         .denom-modal-compact .modal-dialog {
@@ -1102,11 +1218,13 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                         </div>
                         <div class="col-md-3">
                             <div class="info-box">
-                                <small>Function</small><strong><?= e($bill['function_name'] ?? '-') ?></strong></div>
+                                <small>Function</small><strong><?= e($bill['function_name'] ?? '-') ?></strong>
+                            </div>
                         </div>
                         <div class="col-md-3">
                             <div class="info-box">
-                                <small>Status</small><strong><?= e($bill['status_name'] ?? '-') ?></strong></div>
+                                <small>Status</small><strong><?= e($bill['status_name'] ?? '-') ?></strong>
+                            </div>
                         </div>
                         <div class="col-md-4">
                             <div class="info-box"><small>Final
@@ -1137,21 +1255,43 @@ if ($bill && pp_table_exists($conn, 'payments')) {
 
                         <div class="row g-3 align-items-end">
                             <div class="col-md-4">
-                                <label class="form-label fw-bold">Amount</label>
-                                <input type="number" step="0.01" min="0.01" max="<?= e($bill['balance_amount']) ?>"
-                                    name="amount" id="paymentAmount" class="form-control"
+                                <label class="form-label fw-bold">Customer Paid / Amount Received</label>
+                                <input type="number" step="0.01" min="0.01" name="amount" id="paymentAmount"
+                                    class="form-control"
                                     value="<?= e(number_format((float)$bill['balance_amount'], 2, '.', '')) ?>"
                                     required>
+                                <small class="text-muted-custom fw-bold">Excess cash is allowed and shown as Return
+                                    Amount.</small>
                             </div>
                             <div class="col-md-4">
                                 <label class="form-label fw-bold">Payment Date</label>
                                 <input type="date" name="payment_date" class="form-control"
                                     value="<?= e(date('Y-m-d')) ?>" required>
                             </div>
+
                             <div class="col-md-4">
                                 <label class="form-label fw-bold" id="referenceLabel">UPI Reference / Remarks</label>
                                 <input type="text" name="reference_no" id="referenceNo" class="form-control"
                                     placeholder="Optional reference">
+                            </div>
+
+                            <div class="col-12">
+                                <div class="payment-calculation-grid" aria-live="polite">
+                                    <div class="payment-calculation-box">
+                                        <small>Balance Due</small>
+                                        <strong
+                                            id="paymentBalanceDue"><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong>
+                                    </div>
+                                    <div class="payment-calculation-box">
+                                        <small>Applied to Bill</small>
+                                        <strong
+                                            id="paymentAppliedAmount"><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong>
+                                    </div>
+                                    <div class="payment-calculation-box return-box">
+                                        <small>Return Amount</small>
+                                        <strong id="paymentReturnAmount">₹0.00</strong>
+                                    </div>
+                                </div>
                             </div>
 
                             <div class="col-12">
@@ -1205,9 +1345,10 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                                         aria-label="Close"></button>
                                 </div>
                                 <div class="modal-body">
-                                    <div class="denom-total-box d-flex justify-content-between gap-2 mb-2">
-                                        <span>Payment Amount: <span id="denomTarget">₹0.00</span></span>
+                                    <div class="denom-total-box mb-2">
+                                        <span>Cash Received: <span id="denomTarget">₹0.00</span></span>
                                         <span>Total: <span id="denomTotal">₹0.00</span></span>
+                                        <span>Return: <span id="denomReturn">₹0.00</span></span>
                                     </div>
 
                                     <div class="denom-section-title">Notes:</div>
@@ -1258,7 +1399,9 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                                     <th>No</th>
                                     <th>Type</th>
                                     <th>Mode</th>
-                                    <th>Amount</th>
+                                    <th>Received</th>
+                                    <th>Applied</th>
+                                    <th>Return</th>
                                     <th>Date</th>
                                     <th>Reference</th>
                                     <th>Received By</th>
@@ -1269,15 +1412,25 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                             </thead>
                             <tbody>
                                 <?php if (!$activePayments): ?><tr>
-                                    <td colspan="10" class="text-center text-muted-custom py-3">No active payment found.
+                                    <td colspan="12" class="text-center text-muted-custom py-3">No active payment found.
                                     </td>
                                 </tr><?php endif; ?>
                                 <?php foreach ($activePayments as $pay): ?>
+                                <?php
+                                    $receivedAmount = array_key_exists('tendered_amount', $pay) && $pay['tendered_amount'] !== null
+                                        ? (float)$pay['tendered_amount']
+                                        : (float)($pay['amount'] ?? 0);
+                                    $returnedAmount = array_key_exists('return_amount', $pay)
+                                        ? (float)($pay['return_amount'] ?? 0)
+                                        : 0.0;
+                                ?>
                                 <tr>
                                     <td><strong><?= e($pay['payment_no'] ?? '-') ?></strong></td>
                                     <td><?= e(ucfirst((string)($pay['payment_type'] ?? '-'))) ?></td>
                                     <td><?= e(strtoupper((string)($pay['payment_mode'] ?? '-'))) ?></td>
+                                    <td><strong><?= e(pp_money($receivedAmount)) ?></strong></td>
                                     <td><strong><?= e(pp_money($pay['amount'] ?? 0)) ?></strong></td>
+                                    <td><strong><?= e(pp_money($returnedAmount)) ?></strong></td>
                                     <td><?= e(pp_date($pay['payment_date'] ?? null)) ?></td>
                                     <td><?= e($pay['reference_no'] ?? '-') ?></td>
                                     <td><?= e($pay['received_by_name'] ?? '-') ?></td>
@@ -1329,7 +1482,9 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                                 <tr>
                                     <th>No</th>
                                     <th>Mode</th>
-                                    <th>Amount</th>
+                                    <th>Received</th>
+                                    <th>Applied</th>
+                                    <th>Return</th>
                                     <th>Payment Date</th>
                                     <th>Cancelled At</th>
                                     <th>Cancelled By</th>
@@ -1338,14 +1493,24 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                             </thead>
                             <tbody>
                                 <?php if (!$cancelledPayments): ?><tr>
-                                    <td colspan="7" class="text-center text-muted-custom py-3">No cancelled payment
+                                    <td colspan="9" class="text-center text-muted-custom py-3">No cancelled payment
                                         found.</td>
                                 </tr><?php endif; ?>
                                 <?php foreach ($cancelledPayments as $pay): ?>
+                                <?php
+                                    $receivedAmount = array_key_exists('tendered_amount', $pay) && $pay['tendered_amount'] !== null
+                                        ? (float)$pay['tendered_amount']
+                                        : (float)($pay['amount'] ?? 0);
+                                    $returnedAmount = array_key_exists('return_amount', $pay)
+                                        ? (float)($pay['return_amount'] ?? 0)
+                                        : 0.0;
+                                ?>
                                 <tr class="cancelled-row">
                                     <td><strong><?= e($pay['payment_no'] ?? '-') ?></strong></td>
                                     <td><?= e(strtoupper((string)($pay['payment_mode'] ?? '-'))) ?></td>
+                                    <td><strong><?= e(pp_money($receivedAmount)) ?></strong></td>
                                     <td><strong><?= e(pp_money($pay['amount'] ?? 0)) ?></strong></td>
+                                    <td><strong><?= e(pp_money($returnedAmount)) ?></strong></td>
                                     <td><?= e(pp_date($pay['payment_date'] ?? null)) ?></td>
                                     <td><?= e(pp_datetime($pay['cancelled_at'] ?? null)) ?></td>
                                     <td><?= e($pay['cancelled_by_name'] ?? '-') ?></td>
@@ -1388,16 +1553,40 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         const denomInputs = [...document.querySelectorAll('.cash-denom-count')];
         const denomTarget = document.getElementById('denomTarget');
         const denomTotal = document.getElementById('denomTotal');
+        const denomReturn = document.getElementById('denomReturn');
         const denomError = document.getElementById('denomError');
         const saveDenomBtn = document.getElementById('saveDenomBtn');
+        const appliedAmountEl = document.getElementById('paymentAppliedAmount');
+        const returnAmountEl = document.getElementById('paymentReturnAmount');
+        const balanceDue = <?= json_encode(round((float)($bill['balance_amount'] ?? 0), 2)) ?>;
         let fallbackBackdrop = null;
 
         function money(v) {
-            return '₹' + (Number(v || 0).toFixed(2));
+            return '₹' + Number(v || 0).toLocaleString('en-IN', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
         }
 
         function amountValue() {
             return Math.round((parseFloat(amountInput?.value || '0') || 0) * 100) / 100;
+        }
+
+        function paymentAmounts() {
+            const tendered = Math.max(0, amountValue());
+            const applied = Math.round(Math.min(tendered, balanceDue) * 100) / 100;
+            const returned = Math.round(Math.max(0, tendered - applied) * 100) / 100;
+
+            if (appliedAmountEl) appliedAmountEl.textContent = money(applied);
+            if (returnAmountEl) returnAmountEl.textContent = money(returned);
+            if (denomTarget) denomTarget.textContent = money(tendered);
+            if (denomReturn) denomReturn.textContent = money(returned);
+
+            return {
+                tendered,
+                applied,
+                returned
+            };
         }
 
         function denominationTotal() {
@@ -1417,9 +1606,7 @@ if ($bill && pp_table_exists($conn, 'payments')) {
             if (denomTotal) {
                 denomTotal.textContent = money(total);
             }
-            if (denomTarget) {
-                denomTarget.textContent = money(amountValue());
-            }
+            paymentAmounts();
             return total;
         }
 
@@ -1534,7 +1721,7 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         });
 
         saveDenomBtn?.addEventListener('click', function() {
-            const expected = amountValue();
+            const expected = paymentAmounts().tendered;
             const total = denominationTotal();
             if (Math.abs(total - expected) > 0.009) {
                 showError('Denomination total ' + money(total) + ' must match payment amount ' + money(
@@ -1546,8 +1733,9 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         });
 
         form.addEventListener('submit', function(e) {
+            const amounts = paymentAmounts();
             if (modeInput.value === 'cash') {
-                const expected = amountValue();
+                const expected = amounts.tendered;
                 const total = denominationTotal();
                 if (Math.abs(total - expected) > 0.009) {
                     e.preventDefault();
@@ -1557,7 +1745,13 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                     return false;
                 }
             }
-            if (!confirm('Collect this payment?')) {
+
+            let confirmMessage = 'Apply ' + money(amounts.applied) + ' to this bill?';
+            if (amounts.returned > 0.009) {
+                confirmMessage += '\n\nCustomer paid ' + money(amounts.tendered) +
+                    '. Return ' + money(amounts.returned) + ' to the customer.';
+            }
+            if (!confirm(confirmMessage)) {
                 e.preventDefault();
                 return false;
             }

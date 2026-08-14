@@ -624,6 +624,27 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         color: #991b1b;
     }
 
+    .amount-summary-item.return-payment {
+        border-color: color-mix(in srgb, var(--warning-color, #f59e0b) 48%, var(--border-soft));
+        background: color-mix(in srgb, var(--warning-color, #f59e0b) 8%, var(--card-bg));
+    }
+
+    .amount-summary-item.return-payment strong {
+        color: #9a3412;
+        font-weight: 900;
+    }
+
+    .return-payment-notice {
+        border: 1px solid color-mix(in srgb, var(--warning-color, #f59e0b) 50%, var(--border-soft));
+        border-radius: 16px;
+        padding: 12px 14px;
+        background: color-mix(in srgb, var(--warning-color, #f59e0b) 10%, var(--card-bg));
+        color: var(--text-main);
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.45;
+    }
+
     .amount-summary-note {
         margin-top: 10px;
         color: var(--text-muted);
@@ -1627,8 +1648,12 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                             id="taxableValueText">₹0.00</strong></div>
                                     <div class="amount-summary-item"><small>GST Amount</small><strong
                                             id="gstAmountText">₹0.00</strong></div>
-                                    <div class="amount-summary-item"><small>Advance Paid Now</small><strong
+                                    <div class="amount-summary-item"><small>Customer Paid</small><strong
+                                            id="tenderedAmountText">₹0.00</strong></div>
+                                    <div class="amount-summary-item"><small>Applied to Bill</small><strong
                                             id="advanceAmountText">₹0.00</strong></div>
+                                    <div class="amount-summary-item return-payment"><small>Return Amount</small><strong
+                                            id="returnAmountText">₹0.00</strong></div>
                                     <div class="amount-summary-item balance"><small>Balance</small><strong
                                             id="balanceAmountText">₹0.00</strong></div>
                                     <div class="amount-summary-item final"><small>Final Amount</small><strong
@@ -1643,6 +1668,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
 
                         <input type="hidden" name="advance_amount" id="advance_amount" value="0">
+                        <input type="hidden" name="tendered_amount" id="tendered_amount" value="0">
+                        <input type="hidden" name="return_amount" id="return_amount" value="0">
                         <input type="hidden" name="payment_mode" id="payment_mode" value="">
                         <input type="hidden" name="payment_reference" id="payment_reference" value="">
 
@@ -1663,9 +1690,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                         </div>
 
                         <div class="col-md-4 payment-cash-wrap hide-field">
-                            <label class="form-label fw-bold">Cash Amount</label>
+                            <label class="form-label fw-bold">Cash Received</label>
                             <input type="number" step="0.01" min="0" name="cash_amount" id="cash_amount"
-                                class="form-control" value="0" placeholder="Cash collected">
+                                class="form-control" value="0" placeholder="Amount given by customer">
                         </div>
                         <div class="col-md-4 payment-cash-wrap hide-field">
                             <label class="form-label fw-bold">Cash Remarks</label>
@@ -1678,7 +1705,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                         </div>
 
                         <div class="col-md-6 payment-upi-wrap hide-field">
-                            <label class="form-label fw-bold">UPI Amount</label>
+                            <label class="form-label fw-bold">UPI Received</label>
                             <input type="number" step="0.01" min="0" name="upi_amount" id="upi_amount"
                                 class="form-control" value="0" placeholder="UPI collected">
                         </div>
@@ -1686,6 +1713,11 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                             <label class="form-label fw-bold">UPI Reference / Transaction ID</label>
                             <input type="text" name="upi_reference" id="upi_reference" class="form-control"
                                 placeholder="Enter UPI transaction ID">
+                        </div>
+
+                        <div class="col-12">
+                            <div id="returnPaymentNotice" class="return-payment-notice d-none" role="status"
+                                aria-live="polite"></div>
                         </div>
 
                         <div class="col-12"><label class="form-label fw-bold">Internal Remarks</label><textarea
@@ -1738,8 +1770,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                             </div>
                             <div class="modal-body">
                                 <div class="cash-denom-summary-bar">
-                                    <span>Payment Amount: <b id="cashModalAmount">₹0.00</b></span>
+                                    <span>Cash Received: <b id="cashModalAmount">₹0.00</b></span>
                                     <span>Total: <b id="cashDenomTotal">₹0.00</b></span>
+                                    <span>Return: <b id="cashModalReturn">₹0.00</b></span>
                                 </div>
 
                                 <div id="cashDenominationSection">
@@ -2080,23 +2113,40 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         const upiChecked = document.getElementById('pay_upi')?.checked === true;
         const cashAmount = cashChecked ? (parseFloat(getValue('cash_amount')) || 0) : 0;
         const upiAmount = upiChecked ? (parseFloat(getValue('upi_amount')) || 0) : 0;
-        const advance = Math.max(0, cashAmount + upiAmount);
+
+        const sub = Math.max(0, qty * rate);
+        const chargeTotal = Math.max(0, extraCardCharge + packingCharge + printingCharge);
+        const final = Math.round(Math.max(0, sub - discount + chargeTotal) * 100) / 100;
+        const taxable = gstPercent > 0 ? (final / (1 + (gstPercent / 100))) : final;
+        const gstAmount = Math.max(0, final - taxable);
+        const tenderedAmount = Math.round(Math.max(0, cashAmount + upiAmount) * 100) / 100;
+
+        /*
+         * The amount applied to an invoice must never exceed its final amount.
+         * Any extra cash/UPI entered is retained as the tendered amount and shown
+         * separately as money that must be returned to the customer.
+         */
+        const advance = Math.min(tenderedAmount, final);
+        const returnAmount = Math.round(Math.max(0, tenderedAmount - final) * 100) / 100;
+        const balance = Math.max(0, final - advance);
+
         setValue('advance_amount', advance.toFixed(2));
+        setValue('tendered_amount', tenderedAmount.toFixed(2));
+        setValue('return_amount', returnAmount.toFixed(2));
 
         let paymentMode = '';
         if (cashChecked && upiChecked) paymentMode = 'split';
         else if (upiChecked) paymentMode = 'upi';
         else if (cashChecked) paymentMode = 'cash';
         setValue('payment_mode', paymentMode);
-        setValue('payment_reference', [getValue('cash_reference'), getValue('upi_reference')].filter(Boolean).join(
-            ' | '));
 
-        const sub = Math.max(0, qty * rate);
-        const chargeTotal = Math.max(0, extraCardCharge + packingCharge + printingCharge);
-        const final = Math.max(0, sub - discount + chargeTotal);
-        const taxable = gstPercent > 0 ? (final / (1 + (gstPercent / 100))) : final;
-        const gstAmount = Math.max(0, final - taxable);
-        const balance = Math.max(0, final - advance);
+        const paymentReferenceParts = [getValue('cash_reference'), getValue('upi_reference')].filter(Boolean);
+        if (returnAmount > 0.009) {
+            paymentReferenceParts.push(
+                'Customer paid Rs. ' + tenderedAmount.toFixed(2) + '; Return Rs. ' + returnAmount.toFixed(2)
+            );
+        }
+        setValue('payment_reference', paymentReferenceParts.join(' | '));
 
         document.getElementById('subTotalText').textContent = rupee(sub);
         document.getElementById('chargeTotalText') && (document.getElementById('chargeTotalText').textContent = rupee(
@@ -2107,10 +2157,29 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             taxable));
         document.getElementById('gstAmountText') && (document.getElementById('gstAmountText').textContent = rupee(
             gstAmount));
+        document.getElementById('tenderedAmountText') && (document.getElementById('tenderedAmountText').textContent =
+            rupee(tenderedAmount));
         document.getElementById('advanceAmountText') && (document.getElementById('advanceAmountText').textContent =
             rupee(advance));
+        document.getElementById('returnAmountText') && (document.getElementById('returnAmountText').textContent =
+            rupee(returnAmount));
         document.getElementById('finalAmountText').textContent = rupee(final);
         document.getElementById('balanceAmountText').textContent = rupee(balance);
+
+        const returnNotice = document.getElementById('returnPaymentNotice');
+        if (returnNotice) {
+            if (returnAmount > 0.009) {
+                returnNotice.textContent = 'Customer paid ' + rupee(tenderedAmount) + '. Apply ' + rupee(advance) +
+                    ' to this bill and return ' + rupee(returnAmount) + ' to the customer.';
+                returnNotice.classList.remove('d-none');
+            } else {
+                returnNotice.textContent = '';
+                returnNotice.classList.add('d-none');
+            }
+        }
+
+        const cashModalReturn = document.getElementById('cashModalReturn');
+        if (cashModalReturn) cashModalReturn.textContent = rupee(returnAmount);
         updatePricingSummaryValues({
             sub,
             chargeTotal,
@@ -2118,6 +2187,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             taxable,
             gstAmount,
             advance,
+            tenderedAmount,
+            returnAmount,
             balance,
             cashAmount,
             upiAmount
@@ -2129,6 +2200,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             taxable,
             gstAmount,
             advance,
+            tenderedAmount,
+            returnAmount,
             balance,
             cashAmount,
             upiAmount
@@ -2904,11 +2977,6 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             0;
     }
 
-    function currentAdvanceAmount() {
-        calculate();
-        return parseFloat(getValue('advance_amount')) || 0;
-    }
-
     function updateAdvancePaymentModalView() {
         const cash = currentCashAmount();
         const amountEl = document.getElementById('cashModalAmount') || document.getElementById('advanceModalAmount');
@@ -3120,7 +3188,10 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         const form = this;
         const btn = document.getElementById('createProformaBtn');
         const oldText = btn ? btn.textContent : '';
-        const advance = currentAdvanceAmount();
+        const paymentAmounts = calculate();
+        const advance = paymentAmounts.advance;
+        const tenderedAmount = paymentAmounts.tenderedAmount;
+        const returnAmount = paymentAmounts.returnAmount;
         const cashAmount = currentCashAmount();
         const upiAmount = (document.getElementById('pay_upi')?.checked === true) ? (parseFloat(getValue(
             'upi_amount')) || 0) : 0;
@@ -3221,6 +3292,10 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                     }
                     if (data.job_card_no) {
                         toastMessage += '<br>Job Card: ' + data.job_card_no;
+                    }
+                    if (!isEditSubmit && returnAmount > 0.009) {
+                        toastMessage += '<br>Customer Paid: ' + rupee(tenderedAmount) +
+                            '<br>Return Amount: ' + rupee(returnAmount);
                     }
                     if (!isEditSubmit && data.whatsapp_sent === true) {
                         toastMessage += '<br>WhatsApp: Sent using API.';
