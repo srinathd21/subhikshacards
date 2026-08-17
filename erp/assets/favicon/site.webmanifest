@@ -1,6 +1,6 @@
 {
-  "name": "MyWebSite",
-  "short_name": "MySite",
+  "name": "subhikshacards",
+  "short_name": "subhikshacards",
   "icons": [
     {
       "src": "/web-app-manifest-192x192.png",
