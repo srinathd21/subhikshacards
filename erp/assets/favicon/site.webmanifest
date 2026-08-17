@@ -2,7 +2,7 @@
   "id": "/subhikshacards/",
   "name": "Subhiksha Cards ERP",
   "short_name": "Subhiksha",
-  "start_url": "/subhikshacards/",
+
   "scope": "/subhikshacards/",
   "display": "standalone",
   "background_color": "#ffffff",
