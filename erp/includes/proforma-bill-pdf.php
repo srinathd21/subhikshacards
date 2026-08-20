@@ -159,37 +159,99 @@ if (!function_exists('sbp_clean')) {
 }
 
 if (!function_exists('sbp_amount_summary')) {
-    function sbp_amount_summary(array $bill): array
+    function sbp_amount_summary(array $bill, array $items = []): array
     {
-        $subTotal = round((float)($bill['sub_total'] ?? 0), 2);
-        $discount = round((float)($bill['discount_amount'] ?? 0), 2);
-        $extra = round((float)($bill['card_extra_charge'] ?? 0), 2);
-        $packing = round((float)($bill['packing_charge'] ?? 0), 2);
-        $printing = round((float)($bill['printing_charge'] ?? 0), 2);
-        $gstPercent = round((float)($bill['gst_percent'] ?? 18), 2);
-        $storedFinal = round((float)($bill['final_amount'] ?? 0), 2);
+        $orderType = strtolower(trim((string)($bill['order_type'] ?? 'readymade')));
+        $discount = round(max(0, (float)($bill['discount_amount'] ?? 0)), 2);
+        $gstPercent = round(max(0, (float)($bill['gst_percent'] ?? 0)), 2);
 
-        $calculatedFinal = round(max(0, $subTotal + $extra + $packing + $printing - $discount), 2);
-        $final = $storedFinal > 0 ? $storedFinal : $calculatedFinal;
-        $taxable = round((float)($bill['taxable_value'] ?? 0), 2);
-        $gstAmount = round((float)($bill['gst_amount'] ?? 0), 2);
+        $itemSubTotal = 0.0;
+        $itemPlate = 0.0;
+        $itemAdditional = 0.0;
+        $itemPrinting = 0.0;
+        $itemPackage = 0.0;
 
-        if ($gstPercent > 0 && ($taxable <= 0 || abs(($taxable + $gstAmount) - $final) > 0.05)) {
-            $taxable = round($final / (1 + ($gstPercent / 100)), 2);
-            $gstAmount = round(max(0, $final - $taxable), 2);
-        } elseif ($taxable <= 0) {
-            $taxable = $final;
-            $gstAmount = 0.00;
-        } elseif ($gstAmount <= 0 && $final >= $taxable) {
-            $gstAmount = round($final - $taxable, 2);
+        foreach ($items as $item) {
+            $qty = (float)($item['qty'] ?? 0);
+            $rate = (float)($item['rate'] ?? 0);
+            $amount = isset($item['amount'])
+                ? (float)$item['amount']
+                : ($qty * $rate);
+
+            $itemSubTotal += $amount;
+            $itemPlate += (float)($item['plate_charge'] ?? 0);
+            $itemAdditional += (float)($item['item_additional_charge'] ?? 0);
+            $itemPrinting += (float)($item['item_printing_charge'] ?? 0);
+            $itemPackage += (float)($item['item_package_charge'] ?? 0);
         }
 
+        $storedSubTotal = round(max(0, (float)($bill['sub_total'] ?? 0)), 2);
+        $subTotal = $items
+            ? round(max(0, $itemSubTotal), 2)
+            : $storedSubTotal;
+
+        if ($orderType === 'customized' && $items) {
+            $plate = round(max(0, $itemPlate), 2);
+            $additional = round(max(0, $itemAdditional), 2);
+            $printing = round(max(0, $itemPrinting), 2);
+            $packing = round(max(0, $itemPackage), 2);
+
+            $itemChargeTotal = round($plate + $additional + $printing + $packing, 2);
+            $storedChargeTotal = round(
+                max(0, (float)($bill['card_extra_charge'] ?? 0))
+                + max(0, (float)($bill['printing_charge'] ?? 0))
+                + max(0, (float)($bill['packing_charge'] ?? 0)),
+                2
+            );
+
+            if ($itemChargeTotal <= 0.009 && $storedChargeTotal > 0.009) {
+                $plate = round(max(0, (float)($bill['card_extra_charge'] ?? 0)), 2);
+                $additional = 0.0;
+                $printing = round(max(0, (float)($bill['printing_charge'] ?? 0)), 2);
+                $packing = round(max(0, (float)($bill['packing_charge'] ?? 0)), 2);
+            }
+        } else {
+            $plate = round(max(0, (float)($bill['card_extra_charge'] ?? 0)), 2);
+            $additional = 0.0;
+            $printing = round(max(0, (float)($bill['printing_charge'] ?? 0)), 2);
+            $packing = round(max(0, (float)($bill['packing_charge'] ?? 0)), 2);
+        }
+
+        $extra = round($plate + $additional, 2);
+        $chargeTotal = round($extra + $printing + $packing, 2);
+        $grossBeforeDiscount = round($subTotal + $chargeTotal, 2);
+        $final = round(max(0, $grossBeforeDiscount - $discount), 2);
+
+        if ($gstPercent > 0) {
+            $taxable = round($final / (1 + ($gstPercent / 100)), 2);
+            $gstAmount = round(max(0, $final - $taxable), 2);
+        } else {
+            $taxable = $final;
+            $gstAmount = 0.0;
+        }
+
+        $advance = round(max(0, (float)($bill['advance_amount'] ?? 0)), 2);
+        $advance = min($advance, $final);
+        $balance = round(max(0, $final - $advance), 2);
+
         return [
+            'order_type' => $orderType,
+            'sub_total' => $subTotal,
+            'plate' => $plate,
+            'additional' => $additional,
+            'extra' => $extra,
+            'printing' => $printing,
+            'packing' => $packing,
+            'charge_total' => $chargeTotal,
+            'gross_before_discount' => $grossBeforeDiscount,
+            'discount' => $discount,
             'gst_percent' => $gstPercent,
+            'taxable' => $taxable,
             'gst_amount' => $gstAmount,
             'final' => $final,
-            'advance' => round((float)($bill['advance_amount'] ?? 0), 2),
-            'balance' => round((float)($bill['balance_amount'] ?? 0), 2),
+            'advance' => $advance,
+            'balance' => $balance,
+            'stored_final' => round((float)($bill['final_amount'] ?? 0), 2),
         ];
     }
 }
@@ -387,35 +449,7 @@ class SubhikshaLegacyProformaInvoicePDF extends FPDF
             $this->fitCell($tableX + array_sum(array_slice($cols, 0, 4)), $yy + 2.2, $cols[4] - 1, 4, number_format((float)($item['amount'] ?? 0), 2), 8, '', 'R');
             $this->multi($tableX + array_sum(array_slice($cols, 0, 5)) + 1, $yy + 1.2, $cols[5] - 2, 3.3, $printing ?: '-', 7);
         }
-
-        // Summary and remarks - kept above footer to avoid overlap/clipping.
-        $sumX = $x + 104;
-        $sumY = 221;
-        $labelW = 48;
-        $amtW = 28;
-        $lineH = 6.8;
-        $summary = [
-            'Sub Total' => $bill['sub_total'] ?? 0,
-            'Discount' => $bill['discount_amount'] ?? 0,
-            'Extra Charge' => $bill['card_extra_charge'] ?? 0,
-            'Final Amount' => $bill['final_amount'] ?? 0,
-            'Advance Paid' => $bill['advance_amount'] ?? 0,
-            'Balance Amount' => $bill['balance_amount'] ?? 0,
-        ];
-        $this->Rect($sumX, $sumY, $labelW + $amtW, $lineH * count($summary));
-        $this->Line($sumX + $labelW, $sumY, $sumX + $labelW, $sumY + ($lineH * count($summary)));
-        $i = 0;
-        foreach ($summary as $label => $value) {
-            if ($i > 0) $this->Line($sumX, $sumY + ($lineH * $i), $sumX + $labelW + $amtW, $sumY + ($lineH * $i));
-            $bold = in_array($label, ['Final Amount', 'Balance Amount'], true) ? 'B' : '';
-            $this->fitCell($sumX + 1, $sumY + ($lineH * $i) + 1.8, $labelW - 2, 4, $label, 8, $bold, 'R');
-            $this->fitCell($sumX + $labelW + 1, $sumY + ($lineH * $i) + 1.8, $amtW - 2, 4, sbp_money($value), 8, $bold, 'R');
-            $i++;
-        }
-
-        $remarks = trim((string)($bill['remarks'] ?? ''));
-        $this->fitCell($x + 8, 221, 55, 5, 'Remarks:', 8, 'B');
-        $this->multi($x + 8, 228, 88, 4, $remarks !== '' ? $remarks : '-', 8);
+        // Remarks intentionally omitted from the Proforma Bill PDF.
 
         // Footer area is separated from the summary box.
         $this->fitCell($x + 8, 266, 65, 5, 'Terms & Conditions:', 8, 'B');
@@ -457,7 +491,7 @@ class SubhikshaProformaInvoicePDF extends FPDF
         float $w,
         float $h,
         string $text,
-        float $maxSize = 8.5,
+        float $maxSize = 10.0,
         string $style = '',
         string $align = 'L'
     ): void {
@@ -465,9 +499,9 @@ class SubhikshaProformaInvoicePDF extends FPDF
         $size = $maxSize;
         do {
             $this->SetFont('Arial', $style, $size);
-            if ($this->GetStringWidth($text) <= $w - 2 || $size <= 5.5) break;
+            if ($this->GetStringWidth($text) <= $w - 2 || $size <= 6.2) break;
             $size -= 0.3;
-        } while ($size > 5.5);
+        } while ($size > 6.2);
 
         $this->SetXY($x, $y);
         $this->Cell($w, $h, $text, 0, 0, $align);
@@ -477,17 +511,17 @@ class SubhikshaProformaInvoicePDF extends FPDF
     {
         // "No." is part of the original artwork. Only its value is dynamic.
         $this->SetTextColor(40, 40, 40);
-        $this->fitText(29, 91.1, 72, 6, (string)($bill['proforma_no'] ?? '-'), 8.2, 'B');
+        $this->fitText(29, 91.1, 72, 6, (string)($bill['proforma_no'] ?? '-'), 10.0, 'B');
 
         // Cover the Tamil date caption while preserving the exact original UI.
         $this->SetFillColor(255, 199, 26);
         $this->Rect(151, 90.4, 45, 7.0, 'F');
         $this->SetTextColor(204, 26, 24);
-        $this->SetFont('Arial', 'B', 8.2);
+        $this->SetFont('Arial', 'B', 9.5);
         $this->SetXY(153, 91.0);
         $this->Cell(13, 5.8, 'Date:', 0, 0, 'L');
         $this->SetTextColor(40, 40, 40);
-        $this->fitText(165.5, 91.0, 29.5, 5.8, sbp_date($bill['created_at'] ?? date('Y-m-d')), 8.0, 'B', 'L');
+        $this->fitText(165.5, 91.0, 29.5, 5.8, sbp_date($bill['created_at'] ?? date('Y-m-d')), 9.2, 'B', 'L');
     }
 
     private function detailPair(
@@ -498,26 +532,26 @@ class SubhikshaProformaInvoicePDF extends FPDF
         string $rightValue
     ): void {
         $this->SetTextColor(111, 31, 25);
-        $this->SetFont('Arial', 'B', 6.2);
+        $this->SetFont('Arial', 'B', 7.5);
         $this->SetXY(14, $y + 0.7);
         $this->Cell(40, 3.2, sbp_pdf_text($leftLabel), 0, 0, 'L');
         $this->SetXY(107, $y + 0.7);
         $this->Cell(40, 3.2, sbp_pdf_text($rightLabel), 0, 0, 'L');
 
         $this->SetTextColor(35, 35, 35);
-        $this->fitText(14, $y + 3.6, 88, 5.2, sbp_clean($leftValue), 8.2, 'B');
-        $this->fitText(107, $y + 3.6, 88, 5.2, sbp_clean($rightValue), 8.2, 'B');
+        $this->fitText(14, $y + 3.6, 88, 5.2, sbp_clean($leftValue), 9.5, 'B');
+        $this->fitText(107, $y + 3.6, 88, 5.2, sbp_clean($rightValue), 9.5, 'B');
     }
 
     private function detailFull(float $y, string $label, string $value): void
     {
         $this->SetTextColor(111, 31, 25);
-        $this->SetFont('Arial', 'B', 6.2);
+        $this->SetFont('Arial', 'B', 7.5);
         $this->SetXY(14, $y + 0.7);
         $this->Cell(55, 3.2, sbp_pdf_text($label), 0, 0, 'L');
 
         $this->SetTextColor(35, 35, 35);
-        $this->fitText(14, $y + 3.6, 181, 5.2, sbp_clean($value), 8.2, 'B');
+        $this->fitText(14, $y + 3.6, 181, 5.2, sbp_clean($value), 9.5, 'B');
     }
 
     private function dottedLine(float $x1, float $y, float $x2): void
@@ -534,8 +568,8 @@ class SubhikshaProformaInvoicePDF extends FPDF
         $rowHeight = $compact ? 4.1 : 5.6;
         $cellHeight = $compact ? 3.8 : 5.2;
         $lineOffset = $compact ? 3.6 : 4.7;
-        $labelSize = $compact ? 6.5 : 7.2;
-        $valueSize = $compact ? 7.0 : 7.4;
+        $labelSize = $compact ? 7.6 : 8.5;
+        $valueSize = $compact ? 8.2 : 8.8;
 
         $this->SetFillColor(255, 199, 26);
         $this->Rect(23.5, $y, 175.0, $rowHeight, 'F');
@@ -552,7 +586,7 @@ class SubhikshaProformaInvoicePDF extends FPDF
     {
         $orderType = strtolower(trim($orderType));
         $this->SetTextColor(85, 35, 24);
-        $this->SetFont('Arial', 'B', 5.5);
+        $this->SetFont('Arial', 'B', 6.8);
         $this->SetXY(181.5, 104.2);
         $this->Cell(17.5, 5, 'READYMADE', 0, 0, 'L');
         $this->SetXY(181.5, 115.6);
@@ -621,139 +655,853 @@ class SubhikshaProformaInvoicePDF extends FPDF
 
     private function tableFrame(): void
     {
-        // Keep the exact white header and red table borders from the artwork.
-        // Only cover the baked Tamil captions and print English captions.
+        /*
+         * CLEAN SINGLE GRID v21
+         * ---------------------
+         * The background artwork already contains old table lines. Drawing
+         * new lines on top made the border look doubled/thick/unfamiliar.
+         *
+         * First cover the complete table area, then draw ONE fresh grid.
+         */
+        $tableX = 22.9;
+        $tableY = 127.3;
+        $tableRight = 185.9;
+        $tableBottom = 263.0;
+        $headerBottom = 136.6;
+
+        // Clean body: removes all baked borders/artwork beneath the table.
+        $this->SetFillColor(255, 198, 26);
+        $this->Rect(
+            $tableX,
+            $tableY,
+            $tableRight - $tableX,
+            $tableBottom - $tableY,
+            'F'
+        );
+
+        // Clean white header.
         $this->SetFillColor(255, 255, 255);
+        $this->Rect(
+            $tableX,
+            $tableY,
+            $tableRight - $tableX,
+            $headerBottom - $tableY,
+            'F'
+        );
+
         $headers = [
-            [22.9, 19.5, 'S.NO'],
-            [43.2, 69.1, 'DESCRIPTION'],
-            [113.1, 24.1, 'QTY'],
-            [138.2, 21.9, 'RATE'],
+            [22.9, 20.3, 'S.NO'],
+            [43.2, 69.9, 'DESCRIPTION'],
+            [113.1, 25.1, 'QTY'],
+            [138.2, 22.7, 'RATE'],
             [160.9, 25.0, 'AMOUNT'],
         ];
-        foreach ($headers as $header) {
-            $this->Rect($header[0], 127.7, $header[1], 7.9, 'F');
-        }
 
         $this->SetTextColor(199, 27, 24);
-        $this->SetFont('Arial', 'B', 7.6);
+        $this->SetFont('Arial', 'B', 10.5);
+
         foreach ($headers as $header) {
-            $this->SetXY($header[0], 128.4);
-            $this->Cell($header[1], 6.5, $header[2], 0, 0, 'C');
+            $this->SetXY($header[0], 128.2);
+            $this->Cell($header[1], 7.6, $header[2], 0, 0, 'C');
         }
 
-        // Remove the baked Tamil totals captions on every page. The last page
-        // receives the live English totals in totals().
-        $this->SetFillColor(255, 198, 26);
-        $totalRows = [
-            [235.5, 4.7],
-            [240.9, 5.0],
-            [246.6, 4.8],
-            [252.0, 5.2],
-        ];
-        foreach ($totalRows as $row) {
-            $this->Rect(138.2, $row[0], 21.9, $row[1], 'F');
+        /*
+         * Draw the vertical grid ONCE only.
+         * Product/detail methods do not redraw these same lines.
+         */
+        $this->SetDrawColor(211, 31, 28);
+        $this->SetLineWidth(0.22);
+
+        foreach ([22.9, 43.2, 113.1, 138.2, 160.9, 185.9] as $x) {
+            $this->Line($x, $tableY, $x, $tableBottom);
         }
+
+        $this->Line($tableX, $tableY, $tableRight, $tableY);
+        $this->Line($tableX, $headerBottom, $tableRight, $headerBottom);
+        $this->Line($tableX, $tableBottom, $tableRight, $tableBottom);
     }
 
-    private function compactText(string $text, int $maxChars = 95): string
+    private function compactText(string $text, int $maxChars = 240): string
     {
         $text = preg_replace('/\s+/', ' ', trim(sbp_pdf_text($text)));
         if (strlen($text) <= $maxChars) return $text;
         return rtrim(substr($text, 0, $maxChars - 3)) . '...';
     }
 
-    private function itemRow(float $y, array $item, int $serial): void
+    private function titleCaseValue($value): string
     {
+        $value = trim((string)$value);
+        if ($value === '') return '';
+        return ucwords(str_replace(['_', '-'], ' ', strtolower($value)));
+    }
+
+    private function wrappedLines(
+        string $text,
+        float $width,
+        float $fontSize = 9.5,
+        string $style = '',
+        int $maxLines = 3
+    ): array {
+        $text = trim(preg_replace('/\s+/', ' ', sbp_pdf_text($text)));
+        if ($text === '') return [];
+
+        $this->SetFont('Arial', $style, $fontSize);
+        $words = preg_split('/\s+/', $text) ?: [];
+        $lines = [];
+        $line = '';
+
+        foreach ($words as $word) {
+            $candidate = $line === '' ? $word : $line . ' ' . $word;
+
+            if ($this->GetStringWidth($candidate) <= ($width - 1.5)) {
+                $line = $candidate;
+                continue;
+            }
+
+            if ($line !== '') {
+                $lines[] = $line;
+            }
+
+            $line = $word;
+
+            if (count($lines) >= $maxLines - 1) {
+                break;
+            }
+        }
+
+        if ($line !== '' && count($lines) < $maxLines) {
+            $lines[] = $line;
+        }
+
+        if (count($words) > 0 && count($lines) === $maxLines) {
+            $joined = implode(' ', $lines);
+            if (strlen($joined) < strlen($text)) {
+                $lastIndex = count($lines) - 1;
+                $last = rtrim($lines[$lastIndex], ' .');
+
+                while (
+                    $last !== '' &&
+                    $this->GetStringWidth($last . '...') > ($width - 1.5)
+                ) {
+                    $last = rtrim(substr($last, 0, -1));
+                }
+
+                $lines[$lastIndex] = $last . '...';
+            }
+        }
+
+        return $lines;
+    }
+
+    private function itemDetailRows(array $item, string $orderType): array
+    {
+        $rows = [];
+
+        $printingType = trim((string)($item['printing_name'] ?? ''));
+        $printingSubType = trim((string)($item['sub_type_name'] ?? ''));
+
+        /*
+         * Printing Type and Sub Type are shown on separate lines.
+         *
+         * Example:
+         * Printing: Screen Print
+         * Sub Type: Single Colour
+         */
+        if ($printingType !== '') {
+            $rows[] = [
+                'text' => 'Printing: ' . $printingType,
+                'amount' => null,
+                'style' => 'printing',
+                'max_lines' => 2,
+            ];
+        }
+
+        if ($printingSubType !== '') {
+            $rows[] = [
+                'text' => 'Sub Type: ' . $printingSubType,
+                'amount' => null,
+                'style' => 'printing',
+                'max_lines' => 2,
+            ];
+        }
+
+        $specs1 = [];
+        if (trim((string)($item['size_text'] ?? '')) !== '') {
+            $specs1[] = 'Size: ' . trim((string)$item['size_text']);
+        }
+        if (trim((string)($item['gsm_thickness'] ?? '')) !== '') {
+            $specs1[] = 'GSM / Thickness: ' . trim((string)$item['gsm_thickness']);
+        }
+        if (trim((string)($item['printing_side'] ?? '')) !== '') {
+            $specs1[] = 'Side: ' . $this->titleCaseValue($item['printing_side']);
+        }
+
+        if ($specs1) {
+            $rows[] = [
+                'text' => implode(' | ', $specs1),
+                'amount' => null,
+                'style' => 'detail',
+                'max_lines' => 2,
+            ];
+        }
+
+        $specs2 = [];
+        if (trim((string)($item['screening_type'] ?? '')) !== '') {
+            $specs2[] = 'Scoring: ' . $this->titleCaseValue($item['screening_type']);
+        }
+
+        if ((int)($item['lamination_required'] ?? 0) === 1) {
+            $lamination = trim((string)($item['lamination_type'] ?? ''));
+            $specs2[] = 'Lamination: ' . ($lamination !== ''
+                ? $this->titleCaseValue($lamination)
+                : 'Required');
+        }
+
+        /*
+         * Optional fields are printed only when they are actually included
+         * in this Proforma. Do not print "Finishing: No".
+         */
+        if ((int)($item['finishing_required'] ?? 0) === 1) {
+            $specs2[] = 'Finishing: Yes';
+        }
+
+        if ($specs2) {
+            $rows[] = [
+                'text' => implode(' | ', $specs2),
+                'amount' => null,
+                'style' => 'detail',
+                'max_lines' => 2,
+            ];
+        }
+
+        if (trim((string)($item['price_slab_text'] ?? '')) !== '') {
+            $rows[] = [
+                'text' => 'Pricing Slab: ' . trim((string)$item['price_slab_text']),
+                'amount' => null,
+                'style' => 'detail',
+                'max_lines' => 2,
+            ];
+        }
+
+        $plate = round(max(0, (float)($item['plate_charge'] ?? 0)), 2);
+        $printing = round(max(0, (float)($item['item_printing_charge'] ?? 0)), 2);
+        $package = round(max(0, (float)($item['item_package_charge'] ?? 0)), 2);
+        $additional = round(max(0, (float)($item['item_additional_charge'] ?? 0)), 2);
+
+        if ($orderType === 'customized') {
+            if ($plate > 0.009) {
+                $rows[] = [
+                    'text' => 'Plate Charge',
+                    'amount' => $plate,
+                    'style' => 'charge',
+                    'max_lines' => 1,
+                ];
+            }
+
+            if ($printing > 0.009) {
+                $rows[] = [
+                    'text' => 'Printing Charge',
+                    'amount' => $printing,
+                    'style' => 'charge',
+                    'max_lines' => 1,
+                ];
+            }
+
+            if ($package > 0.009) {
+                $rows[] = [
+                    'text' => 'Package Charge',
+                    'amount' => $package,
+                    'style' => 'charge',
+                    'max_lines' => 1,
+                ];
+            }
+
+            if ($additional > 0.009) {
+                $rows[] = [
+                    'text' => 'Additional Charge',
+                    'amount' => $additional,
+                    'style' => 'charge',
+                    'max_lines' => 1,
+                ];
+            }
+
+            $baseAmount = round((float)(
+                $item['amount']
+                ?? ((float)($item['qty'] ?? 0) * (float)($item['rate'] ?? 0))
+            ), 2);
+
+            $lineTotal = round(
+                $baseAmount + $plate + $printing + $package + $additional,
+                2
+            );
+
+            if ($plate + $printing + $package + $additional > 0.009) {
+                $rows[] = [
+                    'text' => 'Product Total (including charges)',
+                    'amount' => $lineTotal,
+                    'style' => 'line_total',
+                    'max_lines' => 1,
+                ];
+            }
+        }
+
+        return $rows;
+    }
+
+    private function productRecordDetailRows(array $item, string $orderType): array
+    {
+        $details = [];
+
+        foreach ($this->itemDetailRows($item, $orderType) as $row) {
+            if ($row['amount'] === null) {
+                $details[] = $row;
+            }
+        }
+
+        return $details;
+    }
+
+    private function productChargeRows(array $item, string $orderType): array
+    {
+        $charges = [];
+
+        foreach ($this->itemDetailRows($item, $orderType) as $row) {
+            if ($row['amount'] !== null) {
+                $charges[] = $row;
+            }
+        }
+
+        return $charges;
+    }
+
+    private function productRecordLayout(array $item, string $orderType): array
+    {
+        $descriptionWidth = 66.2;
+        $product = sbp_clean(
+            ($item['item_name'] ?? '')
+            ?: ($item['master_product_name'] ?? ''),
+            'Item'
+        );
+
+        $entries = [];
+
+        $productLines = $this->wrappedLines(
+            $product,
+            $descriptionWidth,
+            9.5,
+            '',
+            3
+        );
+
+        $entries[] = [
+            'lines' => $productLines ?: [$product],
+            'font_size' => 9.5,
+            'style' => '',
+            'line_height' => 4.2,
+            'gap_after' => 1.4,
+            'kind' => 'product',
+        ];
+
+        foreach ($this->productRecordDetailRows($item, $orderType) as $row) {
+            $text = trim((string)($row['text'] ?? ''));
+            if ($text === '') {
+                continue;
+            }
+
+            $maxLines = max(1, (int)($row['max_lines'] ?? 2));
+
+            /*
+             * All printing/scoring/size/lamination/finishing information stays
+             * inside this same Product record. Long values such as
+             * "Multicolor Offset Print" wrap naturally inside DESCRIPTION.
+             */
+            $lines = $this->wrappedLines(
+                $text,
+                $descriptionWidth,
+                9.5,
+                '',
+                max(2, $maxLines)
+            );
+
+            $entries[] = [
+                'lines' => $lines ?: [$text],
+                'font_size' => 9.5,
+                'style' => '',
+                'line_height' => 4.15,
+                'gap_after' => 1.05,
+                'kind' => 'detail',
+            ];
+        }
+
+        $contentHeight = 0.0;
+
+        foreach ($entries as $entry) {
+            $contentHeight += max(1, count($entry['lines']))
+                * (float)$entry['line_height'];
+            $contentHeight += (float)$entry['gap_after'];
+        }
+
+        /*
+         * Minimum record height for simple products; otherwise grow based on
+         * the wrapped description/detail content.
+         */
+        $height = max(10.4, $contentHeight + 1.6);
+
+        return [
+            'height' => $height,
+            'entries' => $entries,
+        ];
+    }
+
+    private function detailRowHeight(array $row): float
+    {
+        $fontSize = 9.5;
+        $maxLines = max(1, (int)($row['max_lines'] ?? 1));
+        $style = (string)($row['style'] ?? 'detail');
+
+        /*
+         * Every detail is wrapped strictly inside DESCRIPTION.
+         * Charge values are rendered separately inside AMOUNT.
+         */
+        $descriptionWidth = 66.2;
+
+        $lines = $this->wrappedLines(
+            (string)($row['text'] ?? ''),
+            $descriptionWidth,
+            $fontSize,
+            $style === 'line_total' ? 'B' : '',
+            $maxLines
+        );
+
+        $lineCount = max(1, count($lines));
+        return max(6.4, ($lineCount * 4.4) + 1.4);
+    }
+
+    private function itemBlockHeight(array $item, string $orderType): float
+    {
+        $record = $this->productRecordLayout($item, $orderType);
+        $height = (float)$record['height'];
+
+        /*
+         * Descriptive details are already part of the Product record.
+         * Only amount-bearing charge rows remain below it.
+         */
+        foreach ($this->productChargeRows($item, $orderType) as $row) {
+            $height += $this->detailRowHeight($row);
+        }
+
+        return $height + 1.0;
+    }
+
+    private function pageItemGroups(
+        array $items,
+        string $orderType,
+        array $summary
+    ): array {
+        if (!$items) return [[]];
+
+        $startY = 136.6;
+        $summaryBottom = 263.0;
+        $summaryGap = 3.0;
+        $summaryRowH = 5.85;
+        $summaryRows = $this->summaryRows($summary);
+        $summaryHeight = count($summaryRows) * $summaryRowH;
+
+        /*
+         * Last page gets a protected area for Summary.
+         * Earlier pages can use much more of the item table.
+         */
+        $lastPageMaxHeight = max(
+            24.0,
+            ($summaryBottom - $summaryHeight - $summaryGap) - $startY
+        );
+
+        $regularPageMaxHeight = 106.0;
+
+        /*
+         * Build the last page backwards so there is always enough room for
+         * the dynamic Summary, regardless of how many products are entered.
+         */
+        $lastPage = [];
+        $lastUsed = 0.0;
+        $lastStartIndex = count($items);
+
+        for ($i = count($items) - 1; $i >= 0; $i--) {
+            $height = $this->itemBlockHeight($items[$i], $orderType);
+
+            if ($lastPage && ($lastUsed + $height) > $lastPageMaxHeight) {
+                break;
+            }
+
+            array_unshift($lastPage, $items[$i]);
+            $lastUsed += $height;
+            $lastStartIndex = $i;
+        }
+
+        $remaining = array_slice($items, 0, $lastStartIndex);
+        $pages = [];
+        $page = [];
+        $used = 0.0;
+
+        foreach ($remaining as $item) {
+            $height = $this->itemBlockHeight($item, $orderType);
+
+            if ($page && ($used + $height) > $regularPageMaxHeight) {
+                $pages[] = $page;
+                $page = [];
+                $used = 0.0;
+            }
+
+            $page[] = $item;
+            $used += $height;
+        }
+
+        if ($page) {
+            $pages[] = $page;
+        }
+
+        if ($lastPage) {
+            $pages[] = $lastPage;
+        }
+
+        return $pages ?: [[]];
+    }
+
+    private function horizontalSeparator(float $y, bool $strong = false): void
+    {
+        $this->SetDrawColor(211, 31, 28);
+        $this->SetLineWidth(0.22);
+        $this->Line(22.9, $y, 185.9, $y);
+    }
+
+    private function itemMainRow(
+        float $y,
+        array $item,
+        int $serial,
+        string $orderType
+    ): float {
         $qty = (float)($item['qty'] ?? 0);
         $rate = (float)($item['rate'] ?? 0);
         $amount = round((float)($item['amount'] ?? ($qty * $rate)), 2);
 
-        $description = sbp_clean(($item['item_name'] ?? '') ?: ($item['master_product_name'] ?? ''), 'Item');
-        $details = [];
-        if (!empty($item['description']) && trim((string)$item['description']) !== trim($description)) $details[] = trim((string)$item['description']);
-        if (!empty($item['printing_name'])) $details[] = trim((string)$item['printing_name']);
-        if (!empty($item['sub_type_name'])) $details[] = trim((string)$item['sub_type_name']);
-        if (!empty($item['size_text'])) $details[] = 'Size ' . trim((string)$item['size_text']);
-        if (!empty($item['gsm_thickness'])) $details[] = 'GSM ' . trim((string)$item['gsm_thickness']);
-        if ((int)($item['lamination_required'] ?? 0) === 1 && !empty($item['lamination_type'])) $details[] = ucfirst((string)$item['lamination_type']) . ' lamination';
-        if ($details) $description .= ' - ' . implode(', ', array_unique($details));
-        $description = $this->compactText($description);
+        $record = $this->productRecordLayout($item, $orderType);
+        $height = (float)$record['height'];
+        $entries = (array)$record['entries'];
 
+        /*
+         * One Product = one table record.
+         *
+         * DESCRIPTION contains:
+         * Product Name
+         * Printing
+         * Sub Type
+         * Size / GSM / Side
+         * Scoring / Lamination / Finishing
+         *
+         * Customer-requested separator lines are drawn only inside the
+         * DESCRIPTION cell between each logical detail line. QTY/RATE/AMOUNT
+         * remain one continuous cell for the complete Product record.
+         */
+        $cursorY = $y + 1.0;
+        $entryCount = count($entries);
+
+        foreach ($entries as $entryIndex => $entry) {
+            $lines = (array)($entry['lines'] ?? []);
+            $fontSize = (float)($entry['font_size'] ?? 9.5);
+            $fontStyle = (string)($entry['style'] ?? '');
+            $lineHeight = (float)($entry['line_height'] ?? 4.15);
+            $gapAfter = (float)($entry['gap_after'] ?? 1.0);
+
+            $this->SetTextColor(45, 37, 32);
+            $this->SetFont('Arial', $fontStyle, $fontSize);
+            $this->SetXY(45.0, $cursorY);
+            $this->MultiCell(
+                66.2,
+                $lineHeight,
+                implode("\n", $lines),
+                0,
+                'L'
+            );
+
+            $contentHeight = max(1, count($lines)) * $lineHeight;
+            $cursorY += $contentHeight + $gapAfter;
+
+            /*
+             * Thin separator after every logical DESCRIPTION entry except the
+             * final one. It stays strictly inside DESCRIPTION so this does not
+             * turn Printing/Sub Type/Size/etc. into separate table records.
+             */
+            if ($entryIndex < $entryCount - 1) {
+                $separatorY = $cursorY - ($gapAfter / 2);
+                $this->SetDrawColor(211, 31, 28);
+                $this->SetLineWidth(0.12);
+                $this->Line(43.2, $separatorY, 113.1, $separatorY);
+            }
+        }
+
+        /*
+         * S.No stays near the Product Name.
+         * QTY / RATE / AMOUNT are vertically centered in the entire Product
+         * record, including all Printing/Sub Type/Size/Scoring details.
+         */
         $this->SetTextColor(45, 37, 32);
-        $this->SetFont('Arial', '', 7.4);
-        $this->SetXY(22.7, $y + 0.6);
-        $this->Cell(20.1, 7.2, (string)$serial, 0, 0, 'C');
+        $this->SetFont('Arial', '', 10.5);
 
-        $this->SetFont('Arial', '', 6.9);
-        $this->SetXY(44.0, $y + 0.5);
-        $this->MultiCell(67.8, 3.2, sbp_pdf_text($description), 0, 'L');
+        $this->SetXY(22.9, $y + 1.0);
+        $this->Cell(20.3, 8.0, (string)$serial, 0, 0, 'C');
 
-        $this->SetFont('Arial', '', 7.4);
-        $this->SetXY(113.0, $y + 0.6);
-        $this->Cell(24.2, 7.2, sbp_qty($qty), 0, 0, 'C');
-        $this->SetXY(138.0, $y + 0.6);
-        $this->Cell(22.0, 7.2, sbp_number($rate), 0, 0, 'R');
-        $this->SetXY(161.0, $y + 0.6);
-        $this->Cell(24.6, 7.2, sbp_number($amount), 0, 0, 'R');
+        $valueCellH = 8.0;
+        $valueY = $y + max(0.8, (($height - $valueCellH) / 2));
+
+        $this->SetXY(113.1, $valueY);
+        $this->Cell(25.1, $valueCellH, sbp_qty($qty), 0, 0, 'C');
+
+        $this->SetXY(138.2, $valueY);
+        $this->Cell(22.2, $valueCellH, sbp_number($rate), 0, 0, 'R');
+
+        $this->SetXY(160.9, $valueY);
+        $this->Cell(24.2, $valueCellH, sbp_number($amount), 0, 0, 'R');
+
+        /*
+         * One normal full-width line closes the complete Product record.
+         */
+        $this->SetDrawColor(211, 31, 28);
+        $this->SetLineWidth(0.22);
+        $this->Line(22.9, $y + $height, 185.9, $y + $height);
+
+        return $height;
     }
 
-    private function totals(array $summary, string $remarks): void
+    private function itemChildRow(float $y, array $row): float
     {
-        $rows = [
-            ['GST ' . sbp_number($summary['gst_percent']) . '%', $summary['gst_amount']],
-            ['TOTAL', $summary['final']],
-            ['ADVANCE', $summary['advance']],
-            ['BALANCE', $summary['balance']],
-        ];
+        $style = (string)($row['style'] ?? 'charge');
+        $height = $this->detailRowHeight($row);
+        $fontStyle = $style === 'line_total' ? 'B' : '';
 
-        $rowTops = [235.5, 240.9, 246.6, 252.0];
-        $rowHeights = [4.7, 5.0, 4.8, 5.2];
-        $this->SetFillColor(255, 198, 26);
-        foreach ($rowTops as $index => $top) {
-            $this->Rect(138.2, $top, 21.9, $rowHeights[$index], 'F');
+        /*
+         * Only amount-bearing rows reach this renderer now:
+         * Plate Charge / Printing Charge / Package Charge /
+         * Additional Charge / Product Total.
+         */
+        $descriptionWidth = 66.2;
+
+        $this->SetTextColor(55, 45, 40);
+        $this->SetFont('Arial', $fontStyle, 9.5);
+
+        $lines = $this->wrappedLines(
+            (string)($row['text'] ?? ''),
+            $descriptionWidth,
+            9.5,
+            $fontStyle,
+            max(1, (int)($row['max_lines'] ?? 1))
+        );
+
+        $this->SetXY(45.0, $y + 1.0);
+        $this->MultiCell(
+            $descriptionWidth,
+            4.4,
+            implode("\n", $lines ?: [(string)($row['text'] ?? '')]),
+            0,
+            'L'
+        );
+
+        if ($row['amount'] !== null) {
+            $this->SetTextColor(45, 37, 32);
+            $this->SetFont(
+                'Arial',
+                $style === 'line_total' ? 'B' : '',
+                9.5
+            );
+            $this->SetXY(160.9, $y + 0.8);
+            $this->Cell(
+                24.2,
+                min(6.2, $height - 0.8),
+                sbp_number($row['amount']),
+                0,
+                0,
+                'R'
+            );
         }
 
-        $this->SetTextColor(204, 26, 24);
-        $this->SetFont('Arial', 'B', 6.6);
+        $this->SetDrawColor(211, 31, 28);
+        $this->SetLineWidth(0.22);
+        $this->Line(22.9, $y + $height, 185.9, $y + $height);
+
+        return $height;
+    }
+
+    private function itemBlock(float $y, array $item, int $serial, string $orderType): float
+    {
+        $start = $y;
+
+        // Product + all descriptive printing/scoring details in ONE record.
+        $y += $this->itemMainRow($y, $item, $serial, $orderType);
+
+        // Only monetary charge rows remain as separate rows.
+        foreach ($this->productChargeRows($item, $orderType) as $row) {
+            $y += $this->itemChildRow($y, $row);
+        }
+
+        return ($y - $start) + 1.0;
+    }
+
+    private function summaryRows(array $summary): array
+    {
+        $extra = (float)$summary['extra'];
+        $printing = (float)$summary['printing'];
+        $packing = (float)$summary['packing'];
+        $discount = (float)$summary['discount'];
+        $subTotal = (float)$summary['sub_total'];
+        $final = (float)$summary['final'];
+
+        $hasAmountAdjustment =
+            $extra > 0.009
+            || $printing > 0.009
+            || $packing > 0.009
+            || $discount > 0.009
+            || abs($subTotal - $final) > 0.009;
+
+        $rows = [];
+
+        if ($hasAmountAdjustment) {
+            $rows[] = ['PRODUCT SUBTOTAL', $subTotal, false, 'normal'];
+        }
+
+        if ($extra > 0.009) {
+            $rows[] = ['PLATE / ADDITIONAL', $extra, false, 'charge'];
+        }
+
+        if ($printing > 0.009) {
+            $rows[] = ['PRINTING CHARGE', $printing, false, 'charge'];
+        }
+
+        if ($packing > 0.009) {
+            $rows[] = ['PACKAGE CHARGE', $packing, false, 'charge'];
+        }
+
+        if ($discount > 0.009) {
+            $rows[] = ['DISCOUNT (-)', $discount, false, 'discount'];
+        }
+
+        if (
+            (float)$summary['gst_percent'] > 0.009
+            && (float)$summary['gst_amount'] > 0.009
+        ) {
+            $rows[] = ['TAXABLE VALUE', (float)$summary['taxable'], false, 'tax'];
+            $rows[] = [
+                'GST ' . sbp_number($summary['gst_percent']) . '% (INCL.)',
+                (float)$summary['gst_amount'],
+                false,
+                'tax'
+            ];
+        }
+
+        $rows[] = ['TOTAL', $final, true, 'total'];
+
+        if ((float)$summary['advance'] > 0.009) {
+            $rows[] = ['ADVANCE', (float)$summary['advance'], false, 'advance'];
+        }
+
+        if ((float)$summary['balance'] > 0.009) {
+            $rows[] = ['BALANCE', (float)$summary['balance'], true, 'balance'];
+        }
+
+        return $rows;
+    }
+
+    private function detailedTotals(array $summary): void
+    {
+        $rows = $this->summaryRows($summary);
+
+        $boxX = 113.1;
+        $labelW = 47.8;
+        $valueW = 25.0;
+        $boxW = $labelW + $valueW;
+        $rowH = 5.85;
+
+        /*
+         * Slightly lower than v16.
+         * Pagination above already reserves this exact space.
+         */
+        $bottom = 263.0;
+        $top = $bottom - (count($rows) * $rowH);
+
+        $this->SetDrawColor(211, 31, 28);
+        $this->SetLineWidth(0.28);
+
         foreach ($rows as $index => $row) {
-            $this->SetXY(138.4, $rowTops[$index] + 0.1);
-            $this->Cell(21.5, $rowHeights[$index], sbp_pdf_text($row[0]), 0, 0, 'R');
+            [$label, $amount, $strong, $type] = $row;
+            $y = $top + ($index * $rowH);
 
-            $this->SetTextColor(45, 37, 32);
-            $this->SetXY(160.9, $rowTops[$index] + 0.1);
-            $this->Cell(24.8, $rowHeights[$index], sbp_number($row[1]), 0, 0, 'R');
+            $this->SetFillColor(255, 198, 26);
+            $this->Rect($boxX, $y, $boxW, $rowH, 'F');
+
+            $this->SetLineWidth(0.22);
+            $this->Line($boxX, $y, $boxX + $boxW, $y);
+            $this->Line(
+                $boxX + $labelW,
+                $y,
+                $boxX + $labelW,
+                $y + $rowH
+            );
+
             $this->SetTextColor(204, 26, 24);
+            $this->SetFont('Arial', 'B', $strong ? 8.5 : 7.8);
+            $this->SetXY($boxX + 0.8, $y + 0.20);
+            $this->Cell(
+                $labelW - 1.6,
+                $rowH - 0.2,
+                sbp_pdf_text($label),
+                0,
+                0,
+                'R'
+            );
+
+            $this->SetTextColor(45, 37, 32);
+            $this->SetFont('Arial', $strong ? 'B' : '', $strong ? 8.8 : 8.2);
+            $this->SetXY($boxX + $labelW + 0.4, $y + 0.20);
+            $this->Cell(
+                $valueW - 0.9,
+                $rowH - 0.2,
+                sbp_number($amount),
+                0,
+                0,
+                'R'
+            );
         }
 
-        if (trim($remarks) !== '') {
-            $this->SetTextColor(45, 37, 32);
-            $this->SetFont('Arial', '', 6.0);
-            $this->SetXY(24, 229.0);
-            $this->MultiCell(105, 3.2, sbp_pdf_text('Remarks: ' . trim($remarks)), 0, 'L');
-        }
+        $this->Line($boxX, $bottom, $boxX + $boxW, $bottom);
+        $this->Rect($boxX, $top, $boxW, count($rows) * $rowH);
     }
 
     public function draw(array $bill, array $items): void
     {
-        $summary = sbp_amount_summary($bill);
-        $chunks = array_chunk($items ?: [[]], 9);
+        $summary = sbp_amount_summary($bill, $items);
+        $orderType = strtolower(trim((string)($bill['order_type'] ?? 'readymade')));
+        $pages = $this->pageItemGroups($items, $orderType, $summary);
         $serial = 1;
 
-        foreach ($chunks as $pageIndex => $pageItems) {
+        foreach ($pages as $pageIndex => $pageItems) {
             $this->AddPage('P', 'A4');
             $this->invoiceIdentity($bill);
             $this->customerEventDetails($bill, $items);
             $this->tableFrame();
 
-            $rowY = 138.2;
+            $rowY = 136.6;
+
             foreach ($pageItems as $item) {
-                if (!empty($item)) $this->itemRow($rowY, $item, $serial++);
-                $rowY += 10.0;
+                if (!empty($item)) {
+                    $rowY += $this->itemBlock(
+                        $rowY,
+                        $item,
+                        $serial++,
+                        $orderType
+                    );
+                }
             }
 
-            if ($pageIndex === count($chunks) - 1) {
-                $this->totals($summary, (string)($bill['remarks'] ?? ''));
+            if ($pageIndex === count($pages) - 1) {
+                $this->detailedTotals($summary);
             }
         }
     }
@@ -770,20 +1518,20 @@ if (!function_exists('sbp_generate_proforma_pdf_file')) {
         $existingPath = (string)($bill['proforma_pdf_path'] ?? '');
         $root = dirname(__DIR__);
         $background = $root . '/assets/img/subhiksha_proforma_invoice_bg.png';
-        $isCurrentLayout = strpos(basename($existingPath), '_closer_title_value_v10_') !== false;
+        $isCurrentLayout = strpos(basename($existingPath), '_detail_separator_lines_v25_') !== false;
         if (!$force && $isCurrentLayout && $existingPath !== '' && is_file($root . '/' . ltrim($existingPath, '/'))) {
             return ['path' => $existingPath, 'url' => sbp_base_url($conn) . '/' . ltrim($existingPath, '/'), 'filename' => basename($existingPath)];
         }
         $dir = $root . '/uploads/proforma_bills';
         if (!is_dir($dir) && !mkdir($dir, 0755, true)) throw new RuntimeException('Unable to create uploads/proforma_bills folder.');
         $proformaNo = (string)($bill['proforma_no'] ?? ('PROFORMA_' . $id));
-        $fileName = sbp_safe_filename($proformaNo) . '_closer_title_value_v10_' . date('YmdHis') . '.pdf';
+        $fileName = sbp_safe_filename($proformaNo) . '_detail_separator_lines_v25_' . date('YmdHis') . '.pdf';
         $abs = $dir . '/' . $fileName;
         $rel = 'uploads/proforma_bills/' . $fileName;
         $pdf = new SubhikshaProformaInvoicePDF($background);
         $pdf->SetTitle('Proforma Bill - ' . $proformaNo);
         $pdf->SetAuthor('Subhiksha Cards');
-        $pdf->SetCreator('Subhiksha Cards Closer Title Value v10');
+        $pdf->SetCreator('Subhiksha Cards Detail Separator Lines v25');
         $pdf->draw($bill, $data['items']);
         $pdf->Output('F', $abs);
         if (!is_file($abs)) throw new RuntimeException('PDF file was not generated.');
@@ -814,13 +1562,13 @@ if (!function_exists('sbp_output_proforma_pdf_inline')) {
         $pdf = new SubhikshaProformaInvoicePDF($background);
         $pdf->SetTitle('Proforma Bill - ' . $proformaNo);
         $pdf->SetAuthor('Subhiksha Cards');
-        $pdf->SetCreator('Subhiksha Cards Closer Title Value v10');
+        $pdf->SetCreator('Subhiksha Cards Detail Separator Lines v25');
         $pdf->draw($data['bill'], $data['items']);
 
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
         header('Expires: 0');
-        header('X-Subhiksha-Proforma-Layout: closer-title-value-v10');
+        header('X-Subhiksha-Proforma-Layout: detail-separator-lines-v25');
         $pdf->Output($download ? 'D' : 'I', sbp_safe_filename($proformaNo) . '.pdf');
     }
 }

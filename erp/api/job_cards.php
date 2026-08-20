@@ -73,6 +73,93 @@ function apiProducts(mysqli $conn): array
     return $rows;
 }
 
+
+function apiJobCardItems(mysqli $conn, int $jobCardId): array
+{
+    $rows = [];
+
+    if ($jobCardId <= 0 || !jc_table_exists($conn, 'job_card_items')) {
+        return $rows;
+    }
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT *
+            FROM job_card_items
+            WHERE job_card_id = ?
+            ORDER BY id ASC
+        ");
+        $stmt->bind_param('i', $jobCardId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        while ($row = $res->fetch_assoc()) {
+            $rows[] = $row;
+        }
+
+        $stmt->close();
+    } catch (Throwable $e) {
+        return [];
+    }
+
+    return $rows;
+}
+
+function apiApplyJobItemSummary(array $row, array $items): array
+{
+    $row['items'] = $items;
+    $row['item_count'] = count($items);
+
+    $totalQty = 0.0;
+    $totalAmount = 0.0;
+
+    foreach ($items as $item) {
+        $totalQty += (float)($item['qty'] ?? 0);
+        $totalAmount += (float)($item['amount'] ?? 0);
+    }
+
+    $row['total_item_qty'] = $totalQty;
+    $row['total_item_amount'] = $totalAmount;
+
+    /*
+     * Backward compatibility:
+     * existing UI code that expects the old single-item keys still receives
+     * the first item, while the full items[] array is now also available.
+     */
+    $first = $items[0] ?? null;
+
+    foreach ([
+        'item_name',
+        'qty',
+        'rate',
+        'amount',
+        'size_text',
+        'gsm_thickness',
+        'lamination_required',
+        'lamination_type',
+        'printing_side',
+        'screening_type',
+        'finishing_required'
+    ] as $field) {
+        if ($first && array_key_exists($field, $first)) {
+            $row[$field] = $first[$field];
+        } elseif (!array_key_exists($field, $row)) {
+            $row[$field] = null;
+        }
+    }
+
+    $firstName = trim((string)($first['item_name'] ?? $row['product_name'] ?? ''));
+    if ($firstName === '') {
+        $firstName = 'Cards';
+    }
+
+    $row['product_summary'] = count($items) > 1
+        ? $firstName . ' +' . (count($items) - 1) . ' more'
+        : $firstName;
+
+    return $row;
+}
+
 function apiJobCardRow(mysqli $conn, int $id): ?array
 {
     if ($id <= 0 || !jc_table_exists($conn, 'job_cards')) {
@@ -80,21 +167,59 @@ function apiJobCardRow(mysqli $conn, int $id): ?array
     }
 
     try {
-        $jobNoExpr = jc_col($conn,'job_cards','job_card_no') ? 'jc.job_card_no' : (jc_col($conn,'job_cards','job_no') ? 'jc.job_no' : "CONCAT('JOB-',jc.id)");
-        $statusJoin = jc_table_exists($conn,'job_card_statuses') && jc_col($conn,'job_cards','job_card_status_id') ? 'LEFT JOIN job_card_statuses jcs ON jcs.id=jc.job_card_status_id' : '';
-        $workflowJoin = jc_table_exists($conn,'workflow_steps') && jc_col($conn,'job_cards','current_workflow_step_id') ? 'LEFT JOIN workflow_steps ws ON ws.id=jc.current_workflow_step_id' : '';
-        $printingJoin = jc_table_exists($conn,'printing_types') && jc_col($conn,'job_cards','printing_type_id') ? 'LEFT JOIN printing_types pt ON pt.id=jc.printing_type_id' : '';
-        $subJoin = jc_table_exists($conn,'printing_sub_types') && jc_col($conn,'job_cards','printing_sub_type_id') ? 'LEFT JOIN printing_sub_types pst ON pst.id=jc.printing_sub_type_id' : '';
-        $itemJoin = jc_table_exists($conn,'job_card_items') ? 'LEFT JOIN job_card_items jci ON jci.job_card_id=jc.id' : '';
-        $statusExpr = "COALESCE(" . (jc_table_exists($conn,'job_card_statuses') && jc_col($conn,'job_card_statuses','status_name') ? 'jcs.status_name,' : '') . (jc_col($conn,'job_cards','status') ? 'jc.status,' : '') . "'Active')";
-        $itemSelect = jc_table_exists($conn,'job_card_items') ? 'jci.item_name,jci.qty,jci.rate,jci.amount,jci.size_text,jci.gsm_thickness,jci.lamination_required,jci.lamination_type,jci.printing_side,jci.screening_type,jci.finishing_required' : 'NULL item_name,NULL qty,NULL rate,NULL amount,NULL size_text,NULL gsm_thickness,NULL lamination_required,NULL lamination_type,NULL printing_side,NULL screening_type,NULL finishing_required';
-        $sql = "SELECT jc.*,{$jobNoExpr} display_job_no,{$statusExpr} display_status," . (jc_table_exists($conn,'workflow_steps') ? 'ws.step_name' : 'NULL') . " current_step_name," . (jc_table_exists($conn,'printing_types') ? 'pt.printing_name' : 'NULL') . " printing_name," . (jc_table_exists($conn,'printing_sub_types') ? 'pst.sub_type_name' : 'NULL') . " sub_type_name,{$itemSelect} FROM job_cards jc {$statusJoin} {$workflowJoin} {$printingJoin} {$subJoin} {$itemJoin} WHERE jc.id=? LIMIT 1";
+        $jobNoExpr = jc_col($conn,'job_cards','job_card_no')
+            ? 'jc.job_card_no'
+            : (jc_col($conn,'job_cards','job_no') ? 'jc.job_no' : "CONCAT('JOB-',jc.id)");
+
+        $statusJoin = jc_table_exists($conn,'job_card_statuses') && jc_col($conn,'job_cards','job_card_status_id')
+            ? 'LEFT JOIN job_card_statuses jcs ON jcs.id=jc.job_card_status_id'
+            : '';
+
+        $workflowJoin = jc_table_exists($conn,'workflow_steps') && jc_col($conn,'job_cards','current_workflow_step_id')
+            ? 'LEFT JOIN workflow_steps ws ON ws.id=jc.current_workflow_step_id'
+            : '';
+
+        $printingJoin = jc_table_exists($conn,'printing_types') && jc_col($conn,'job_cards','printing_type_id')
+            ? 'LEFT JOIN printing_types pt ON pt.id=jc.printing_type_id'
+            : '';
+
+        $subJoin = jc_table_exists($conn,'printing_sub_types') && jc_col($conn,'job_cards','printing_sub_type_id')
+            ? 'LEFT JOIN printing_sub_types pst ON pst.id=jc.printing_sub_type_id'
+            : '';
+
+        $statusExpr = "COALESCE("
+            . (jc_table_exists($conn,'job_card_statuses') && jc_col($conn,'job_card_statuses','status_name') ? 'jcs.status_name,' : '')
+            . (jc_col($conn,'job_cards','status') ? 'jc.status,' : '')
+            . "'Active')";
+
+        $sql = "
+            SELECT
+                jc.*,
+                {$jobNoExpr} AS display_job_no,
+                {$statusExpr} AS display_status,
+                " . (jc_table_exists($conn,'workflow_steps') ? 'ws.step_name' : 'NULL') . " AS current_step_name,
+                " . (jc_table_exists($conn,'printing_types') ? 'pt.printing_name' : 'NULL') . " AS printing_name,
+                " . (jc_table_exists($conn,'printing_sub_types') ? 'pst.sub_type_name' : 'NULL') . " AS sub_type_name
+            FROM job_cards jc
+            {$statusJoin}
+            {$workflowJoin}
+            {$printingJoin}
+            {$subJoin}
+            WHERE jc.id = ?
+            LIMIT 1
+        ";
+
         $stmt = $conn->prepare($sql);
         $stmt->bind_param('i', $id);
         $stmt->execute();
         $row = $stmt->get_result()->fetch_assoc();
         $stmt->close();
-        return $row ?: null;
+
+        if (!$row) {
+            return null;
+        }
+
+        return apiApplyJobItemSummary($row, apiJobCardItems($conn, $id));
     } catch (Throwable $e) {
         return null;
     }
@@ -103,30 +228,133 @@ function apiJobCardRow(mysqli $conn, int $id): ?array
 function apiJobCardList(mysqli $conn): array
 {
     $rows = [];
+
     if (!jc_table_exists($conn, 'job_cards')) {
         return $rows;
     }
 
     try {
-        $jobNoExpr = jc_col($conn,'job_cards','job_card_no') ? 'jc.job_card_no' : (jc_col($conn,'job_cards','job_no') ? 'jc.job_no' : "CONCAT('JOB-',jc.id)");
-        $statusJoin = jc_table_exists($conn,'job_card_statuses') && jc_col($conn,'job_cards','job_card_status_id') ? 'LEFT JOIN job_card_statuses jcs ON jcs.id=jc.job_card_status_id' : '';
-        $workflowJoin = jc_table_exists($conn,'workflow_steps') && jc_col($conn,'job_cards','current_workflow_step_id') ? 'LEFT JOIN workflow_steps ws ON ws.id=jc.current_workflow_step_id' : '';
-        $printingJoin = jc_table_exists($conn,'printing_types') && jc_col($conn,'job_cards','printing_type_id') ? 'LEFT JOIN printing_types pt ON pt.id=jc.printing_type_id' : '';
-        $subJoin = jc_table_exists($conn,'printing_sub_types') && jc_col($conn,'job_cards','printing_sub_type_id') ? 'LEFT JOIN printing_sub_types pst ON pst.id=jc.printing_sub_type_id' : '';
-        $itemJoin = jc_table_exists($conn,'job_card_items') ? 'LEFT JOIN job_card_items jci ON jci.job_card_id=jc.id' : '';
-        $statusExpr = "COALESCE(" . (jc_table_exists($conn,'job_card_statuses') && jc_col($conn,'job_card_statuses','status_name') ? 'jcs.status_name,' : '') . (jc_col($conn,'job_cards','status') ? 'jc.status,' : '') . "'Active')";
-        $itemSelect = jc_table_exists($conn,'job_card_items') ? 'jci.item_name,jci.qty,jci.rate,jci.amount,jci.size_text,jci.gsm_thickness,jci.lamination_required,jci.lamination_type,jci.printing_side,jci.screening_type,jci.finishing_required' : 'NULL item_name,NULL qty,NULL rate,NULL amount,NULL size_text,NULL gsm_thickness,NULL lamination_required,NULL lamination_type,NULL printing_side,NULL screening_type,NULL finishing_required';
-        $sql = "SELECT jc.*,{$jobNoExpr} display_job_no,{$statusExpr} display_status," . (jc_table_exists($conn,'workflow_steps') ? 'ws.step_name' : 'NULL') . " current_step_name," . (jc_table_exists($conn,'printing_types') ? 'pt.printing_name' : 'NULL') . " printing_name," . (jc_table_exists($conn,'printing_sub_types') ? 'pst.sub_type_name' : 'NULL') . " sub_type_name,{$itemSelect} FROM job_cards jc {$statusJoin} {$workflowJoin} {$printingJoin} {$subJoin} {$itemJoin} ORDER BY jc.id DESC LIMIT 300";
+        $jobNoExpr = jc_col($conn,'job_cards','job_card_no')
+            ? 'jc.job_card_no'
+            : (jc_col($conn,'job_cards','job_no') ? 'jc.job_no' : "CONCAT('JOB-',jc.id)");
+
+        $statusJoin = jc_table_exists($conn,'job_card_statuses') && jc_col($conn,'job_cards','job_card_status_id')
+            ? 'LEFT JOIN job_card_statuses jcs ON jcs.id=jc.job_card_status_id'
+            : '';
+
+        $workflowJoin = jc_table_exists($conn,'workflow_steps') && jc_col($conn,'job_cards','current_workflow_step_id')
+            ? 'LEFT JOIN workflow_steps ws ON ws.id=jc.current_workflow_step_id'
+            : '';
+
+        $printingJoin = jc_table_exists($conn,'printing_types') && jc_col($conn,'job_cards','printing_type_id')
+            ? 'LEFT JOIN printing_types pt ON pt.id=jc.printing_type_id'
+            : '';
+
+        $subJoin = jc_table_exists($conn,'printing_sub_types') && jc_col($conn,'job_cards','printing_sub_type_id')
+            ? 'LEFT JOIN printing_sub_types pst ON pst.id=jc.printing_sub_type_id'
+            : '';
+
+        $statusExpr = "COALESCE("
+            . (jc_table_exists($conn,'job_card_statuses') && jc_col($conn,'job_card_statuses','status_name') ? 'jcs.status_name,' : '')
+            . (jc_col($conn,'job_cards','status') ? 'jc.status,' : '')
+            . "'Active')";
+
+        $itemAggJoin = '';
+        $itemSelect = "
+            NULL AS item_name,
+            NULL AS qty,
+            NULL AS rate,
+            NULL AS amount,
+            NULL AS size_text,
+            NULL AS gsm_thickness,
+            NULL AS lamination_required,
+            NULL AS lamination_type,
+            NULL AS printing_side,
+            NULL AS screening_type,
+            NULL AS finishing_required,
+            0 AS item_count,
+            0 AS total_item_qty,
+            0 AS total_item_amount
+        ";
+
+        if (jc_table_exists($conn, 'job_card_items')) {
+            /*
+             * Aggregate first, then join only the first item.
+             * This guarantees ONE API row per Job Card even when it has many items.
+             */
+            $itemAggJoin = "
+                LEFT JOIN (
+                    SELECT
+                        job_card_id,
+                        MIN(id) AS first_item_id,
+                        COUNT(*) AS item_count,
+                        COALESCE(SUM(qty), 0) AS total_item_qty,
+                        COALESCE(SUM(amount), 0) AS total_item_amount
+                    FROM job_card_items
+                    GROUP BY job_card_id
+                ) jai ON jai.job_card_id = jc.id
+                LEFT JOIN job_card_items jci ON jci.id = jai.first_item_id
+            ";
+
+            $itemSelect = "
+                jci.item_name,
+                jci.qty,
+                jci.rate,
+                jci.amount,
+                jci.size_text,
+                jci.gsm_thickness,
+                jci.lamination_required,
+                jci.lamination_type,
+                jci.printing_side,
+                jci.screening_type,
+                jci.finishing_required,
+                COALESCE(jai.item_count, 0) AS item_count,
+                COALESCE(jai.total_item_qty, 0) AS total_item_qty,
+                COALESCE(jai.total_item_amount, 0) AS total_item_amount
+            ";
+        }
+
+        $sql = "
+            SELECT
+                jc.*,
+                {$jobNoExpr} AS display_job_no,
+                {$statusExpr} AS display_status,
+                " . (jc_table_exists($conn,'workflow_steps') ? 'ws.step_name' : 'NULL') . " AS current_step_name,
+                " . (jc_table_exists($conn,'printing_types') ? 'pt.printing_name' : 'NULL') . " AS printing_name,
+                " . (jc_table_exists($conn,'printing_sub_types') ? 'pst.sub_type_name' : 'NULL') . " AS sub_type_name,
+                {$itemSelect}
+            FROM job_cards jc
+            {$statusJoin}
+            {$workflowJoin}
+            {$printingJoin}
+            {$subJoin}
+            {$itemAggJoin}
+            ORDER BY jc.id DESC
+            LIMIT 300
+        ";
+
         $res = $conn->query($sql);
+
         while ($row = $res->fetch_assoc()) {
+            $count = (int)($row['item_count'] ?? 0);
+            $firstName = trim((string)($row['item_name'] ?? $row['product_name'] ?? ''));
+
+            if ($firstName === '') {
+                $firstName = 'Cards';
+            }
+
+            $row['product_summary'] = $count > 1
+                ? $firstName . ' +' . ($count - 1) . ' more'
+                : $firstName;
+
             $rows[] = $row;
         }
+
         $res->free();
     } catch (Throwable $e) {}
 
     return $rows;
 }
-
 
 function jc_current_role_ids(mysqli $conn): array
 {
@@ -922,6 +1150,31 @@ try {
         if (!jc_table_exists($conn,'job_cards')) throw new RuntimeException('job_cards table is missing.');
 
         $id = jc_int($_POST['id'] ?? 0);
+
+        /*
+         * Proforma-created Job Cards now support multiple products.
+         * Their item rows are owned/synchronized by Create/Edit Proforma.
+         * Generic Job Card edit must never collapse them back to one item.
+         */
+        $existingJobForSave = null;
+        $preserveProformaItems = false;
+
+        if ($id > 0) {
+            try {
+                $st = $conn->prepare("SELECT id, proforma_bill_id FROM job_cards WHERE id = ? LIMIT 1");
+                $st->bind_param('i', $id);
+                $st->execute();
+                $existingJobForSave = $st->get_result()->fetch_assoc();
+                $st->close();
+
+                $preserveProformaItems = $existingJobForSave
+                    && (int)($existingJobForSave['proforma_bill_id'] ?? 0) > 0;
+            } catch (Throwable $e) {
+                $existingJobForSave = null;
+                $preserveProformaItems = false;
+            }
+        }
+
         $orderType = jc_post('order_type','readymade');
         $jobNo = jc_post('job_card_no') ?: jc_next_no($conn);
         $customerName = jc_post('customer_name');
@@ -974,7 +1227,9 @@ try {
             'job_card_no'=>$jobNo,
             'job_no'=>$jobNo,
             'tracking_token'=>bin2hex(random_bytes(24)),
-            'proforma_bill_id'=>jc_int($_POST['proforma_bill_id']??0)?:null,
+            'proforma_bill_id'=>$preserveProformaItems
+                ? (int)($existingJobForSave['proforma_bill_id'] ?? 0)
+                : (jc_int($_POST['proforma_bill_id']??0)?:null),
             'quotation_id'=>jc_int($_POST['quotation_id']??0)?:null,
             'customer_id'=>jc_int($_POST['customer_id']??0)?:null,
             'order_type'=>$orderType,
@@ -1000,12 +1255,18 @@ try {
         if($id>0){
             jc_update($conn,'job_cards',$jobData,$id);
             $jobId=$id;
-            if(jc_table_exists($conn,'job_card_items')){
+
+            /*
+             * Standalone/manual Job Cards keep the existing single-item edit behavior.
+             * Proforma-created Job Cards keep ALL synchronized multi-product items.
+             */
+            if(!$preserveProformaItems && jc_table_exists($conn,'job_card_items')){
                 $st=$conn->prepare('DELETE FROM job_card_items WHERE job_card_id=?');
                 $st->bind_param('i',$jobId);
                 $st->execute();
                 $st->close();
             }
+
             $msg='Job card updated successfully.';
         } else {
             $jobData['created_at']=date('Y-m-d H:i:s');
@@ -1013,7 +1274,7 @@ try {
             $msg='Job card saved successfully.';
         }
 
-        if(jc_table_exists($conn,'job_card_items')) {
+        if(!$preserveProformaItems && jc_table_exists($conn,'job_card_items')) {
             jc_insert($conn,'job_card_items',[
                 'job_card_id'=>$jobId,
                 'product_id'=>$productId,
@@ -1022,6 +1283,8 @@ try {
                 'qty'=>$qty,
                 'rate'=>$rate,
                 'amount'=>$amount,
+                'printing_type_id'=>$printingTypeId,
+                'printing_sub_type_id'=>$printingSubTypeId,
                 'size_text'=>$sizeText,
                 'gsm_thickness'=>$gsm,
                 'lamination_required'=>$lamReq,

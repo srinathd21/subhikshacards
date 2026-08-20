@@ -302,6 +302,119 @@ function pp_update_bill_and_job_amounts(mysqli $conn, int $proformaId, float $ne
 
 
 
+
+/**
+ * Read the authoritative active payment total for a Proforma.
+ *
+ * If payment rows exist, payments.amount is the source of truth.
+ * If this is a legacy bill with no payment rows at all, fall back to the
+ * stored proforma_bills.advance_amount value.
+ */
+function pp_payment_totals_from_db(mysqli $conn, int $proformaId): array
+{
+    $stmt = $conn->prepare("
+        SELECT final_amount, advance_amount
+        FROM proforma_bills
+        WHERE id = ?
+        LIMIT 1
+    ");
+    $stmt->bind_param('i', $proformaId);
+    $stmt->execute();
+    $bill = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$bill) {
+        throw new RuntimeException('Proforma bill not found.');
+    }
+
+    $finalAmount = max(0, (float)($bill['final_amount'] ?? 0));
+    $storedAdvance = max(0, (float)($bill['advance_amount'] ?? 0));
+    $paymentCount = 0;
+    $activePaid = 0.0;
+
+    if (pp_table_exists($conn, 'payments')) {
+        $cancelExpr = pp_col_exists($conn, 'payments', 'is_cancelled')
+            ? "CASE WHEN COALESCE(is_cancelled, 0) = 0 THEN amount ELSE 0 END"
+            : "amount";
+
+        $stmt = $conn->prepare("
+            SELECT
+                COUNT(*) AS payment_count,
+                COALESCE(SUM({$cancelExpr}), 0) AS active_paid
+            FROM payments
+            WHERE proforma_bill_id = ?
+        ");
+        $stmt->bind_param('i', $proformaId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        $paymentCount = (int)($row['payment_count'] ?? 0);
+        $activePaid = max(0, (float)($row['active_paid'] ?? 0));
+    }
+
+    /*
+     * New/current bills normally have payment rows for the advance.
+     * Legacy bills may have only advance_amount stored on proforma_bills.
+     */
+    $paidAmount = $paymentCount > 0 ? $activePaid : $storedAdvance;
+    $paidAmount = min($paidAmount, $finalAmount);
+    $balanceAmount = max(0, $finalAmount - $paidAmount);
+
+    return [
+        'final_amount' => round($finalAmount, 2),
+        'paid_amount' => round($paidAmount, 2),
+        'balance_amount' => round($balanceAmount, 2),
+        'payment_count' => $paymentCount,
+    ];
+}
+
+/**
+ * Synchronize Proforma + every linked Job Card from actual active payments.
+ *
+ * This fixes stale advance_amount/balance_amount values while preserving the
+ * existing payment rows and payment workflow.
+ */
+function pp_sync_bill_and_job_amounts_from_payments(mysqli $conn, int $proformaId): array
+{
+    $totals = pp_payment_totals_from_db($conn, $proformaId);
+
+    $paidAmount = (float)$totals['paid_amount'];
+    $balanceAmount = (float)$totals['balance_amount'];
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+
+    $stmt = $conn->prepare("
+        UPDATE proforma_bills
+        SET
+            advance_amount = ?,
+            balance_amount = ?,
+            updated_by = ?,
+            updated_at = NOW()
+        WHERE id = ?
+    ");
+    $stmt->bind_param('ddii', $paidAmount, $balanceAmount, $userId, $proformaId);
+    $stmt->execute();
+    $stmt->close();
+
+    if (pp_table_exists($conn, 'job_cards')) {
+        $stmt = $conn->prepare("
+            UPDATE job_cards
+            SET
+                advance_amount = ?,
+                balance_amount = ?,
+                updated_by = ?,
+                updated_at = NOW()
+            WHERE proforma_bill_id = ?
+        ");
+        $stmt->bind_param('ddii', $paidAmount, $balanceAmount, $userId, $proformaId);
+        $stmt->execute();
+        $stmt->close();
+    }
+
+    return $totals;
+}
+
+
 function pp_payment_base_url(mysqli $conn): string
 {
     try {
@@ -638,7 +751,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
 
             if (!$bill) throw new RuntimeException('Proforma bill not found.');
 
-            $balance = (float)$bill['balance_amount'];
+            /*
+             * Recalculate before collecting so the advance payment already recorded
+             * in payment history is always deducted from the current balance.
+             */
+            $currentTotals = pp_payment_totals_from_db($conn, $id);
+            $balance = (float)$currentTotals['balance_amount'];
             if ($balance <= 0) throw new RuntimeException('This proforma bill is already fully paid.');
 
             /*
@@ -677,8 +795,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
                 pp_save_cash_denominations($conn, $paymentId, $cashDenominationPayload);
             }
 
-            $newAdvance = (float)$bill['advance_amount'] + $amount;
-            pp_update_bill_and_job_amounts($conn, $id, $newAdvance);
+            /*
+             * Rebuild Paid + Balance from all active payment rows.
+             * This includes the original advance and this new payment.
+             */
+            pp_sync_bill_and_job_amounts_from_payments($conn, $id);
 
             $waResult = pp_send_payment_whatsapp($conn, $id, $paymentId);
             if (!empty($waResult['success'])) {
@@ -741,8 +862,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
             $stmt->execute();
             $stmt->close();
 
-            $newAdvance = (float)$bill['advance_amount'] - (float)$payment['amount'];
-            pp_update_bill_and_job_amounts($conn, $id, $newAdvance);
+            /*
+             * After cancellation, recalculate from the remaining active payments.
+             * This also correctly handles cancelling the last/advance payment.
+             */
+            pp_sync_bill_and_job_amounts_from_payments($conn, $id);
             pp_redirect($id, 'payment_cancelled');
         }
 
@@ -766,6 +890,16 @@ if ($id > 0 && $error === '') {
         if (!$bill) $error = 'Proforma bill not found.';
     } catch (Throwable $e) {
         $error = $e->getMessage();
+    }
+}
+
+if ($bill) {
+    try {
+        $pagePaymentTotals = pp_sync_bill_and_job_amounts_from_payments($conn, $id);
+        $bill['advance_amount'] = $pagePaymentTotals['paid_amount'];
+        $bill['balance_amount'] = $pagePaymentTotals['balance_amount'];
+    } catch (Throwable $e) {
+        // Keep the stored bill values if payment synchronization cannot run.
     }
 }
 

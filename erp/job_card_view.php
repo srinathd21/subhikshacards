@@ -132,6 +132,149 @@ function jcvResolvedProductName(mysqli $conn, array $job): string
     return 'Cards';
 }
 
+
+/**
+ * Return every product/item belonging to this Job Card.
+ *
+ * New Proforma logic creates ONE Job Card with multiple job_card_items.
+ * This reader is display-only and does not change workflow/status logic.
+ * It falls back to proforma_bill_items for older converted jobs if needed.
+ */
+function jcvFetchJobItems(mysqli $conn, array $job): array
+{
+    $jobId = (int)($job['id'] ?? 0);
+    $proformaId = (int)($job['proforma_bill_id'] ?? 0);
+    $items = [];
+
+    if ($jobId > 0 && jcvTableExists($conn, 'job_card_items')) {
+        try {
+            $stmt = $conn->prepare("
+                SELECT
+                    id,
+                    product_id,
+                    item_name,
+                    description,
+                    qty,
+                    rate,
+                    amount,
+                    size_text,
+                    gsm_thickness,
+                    lamination_required,
+                    lamination_type,
+                    printing_side,
+                    screening_type,
+                    finishing_required
+                FROM job_card_items
+                WHERE job_card_id = ?
+                ORDER BY id ASC
+            ");
+            $stmt->bind_param('i', $jobId);
+            $stmt->execute();
+            $res = $stmt->get_result();
+
+            while ($row = $res->fetch_assoc()) {
+                $items[] = $row;
+            }
+
+            $stmt->close();
+        } catch (Throwable $e) {
+            $items = [];
+        }
+    }
+
+    /*
+     * Backward-compatible fallback:
+     * If an older Proforma-created Job Card has no job_card_items yet,
+     * show the original Proforma items instead of showing only the header product.
+     */
+    if (!$items && $proformaId > 0 && jcvTableExists($conn, 'proforma_bill_items')) {
+        try {
+            $stmt = $conn->prepare("
+                SELECT
+                    id,
+                    product_id,
+                    item_name,
+                    description,
+                    qty,
+                    rate,
+                    amount,
+                    size_text,
+                    gsm_thickness,
+                    lamination_required,
+                    lamination_type,
+                    printing_side,
+                    screening_type,
+                    finishing_required
+                FROM proforma_bill_items
+                WHERE proforma_bill_id = ?
+                ORDER BY sort_order ASC, id ASC
+            ");
+            $stmt->bind_param('i', $proformaId);
+            $stmt->execute();
+            $res = $stmt->get_result();
+
+            while ($row = $res->fetch_assoc()) {
+                $items[] = $row;
+            }
+
+            $stmt->close();
+        } catch (Throwable $e) {
+            $items = [];
+        }
+    }
+
+    /*
+     * Very old single-product Job Cards may have no item row.
+     * Keep the existing header product visible in that case.
+     */
+    if (!$items && $jobId > 0) {
+        $name = jcvResolvedProductName($conn, $job);
+
+        $items[] = [
+            'id' => 0,
+            'product_id' => !empty($job['product_id']) ? (int)$job['product_id'] : null,
+            'item_name' => $name,
+            'description' => (string)($job['notes'] ?? ''),
+            'qty' => 0,
+            'rate' => 0,
+            'amount' => 0,
+            'size_text' => '',
+            'gsm_thickness' => '',
+            'lamination_required' => 0,
+            'lamination_type' => null,
+            'printing_side' => null,
+            'screening_type' => null,
+            'finishing_required' => 0,
+        ];
+    }
+
+    return $items;
+}
+
+function jcvProductItemsSummary(array $items): string
+{
+    $names = [];
+
+    foreach ($items as $item) {
+        $name = trim((string)($item['item_name'] ?? ''));
+        if (jcvValidProductName($name)) {
+            $names[] = $name;
+        }
+    }
+
+    $names = array_values(array_unique($names));
+
+    if (!$names) {
+        return 'Cards';
+    }
+
+    if (count($names) === 1) {
+        return $names[0];
+    }
+
+    return $names[0] . ' +' . (count($names) - 1) . ' more';
+}
+
 function jcvDate($value): string
 {
     return !empty($value) ? date('d-m-Y', strtotime($value)) : '-';
@@ -1723,6 +1866,7 @@ $message = '';
 $messageType = 'danger';
 $toastTitle = 'Info';
 $job = null;
+$jobItems = [];
 $trackingRows = [];
 $trackingPhotosById = [];
 $delayReasons = [];
@@ -2524,8 +2668,22 @@ if ($job) {
 }
 
 if ($job) {
+    $jobItems = jcvFetchJobItems($conn, $job);
     $trackingPhotosById = jcvGetTrackingPhotos($conn, $jobId);
 }
+
+$jobItemCount = count($jobItems);
+$jobItemTotalQty = 0.0;
+$jobItemProductTotal = 0.0;
+
+foreach ($jobItems as $jobItem) {
+    $jobItemTotalQty += (float)($jobItem['qty'] ?? 0);
+    $jobItemProductTotal += (float)($jobItem['amount'] ?? 0);
+}
+
+$jobProductSummary = $jobItems
+    ? jcvProductItemsSummary($jobItems)
+    : ($job ? jcvResolvedProductName($conn, $job) : 'Cards');
 
 $totalSteps = $trackingRows ? count($trackingRows) : ($job ? (int)($job['total_steps'] ?? 0) : 0);
 $completedSteps = 0;
@@ -2607,6 +2765,73 @@ if ($message !== '' && $toastTitle === 'Info') {
         font-weight: 900;
         word-break: break-word;
         white-space: pre-wrap;
+    }
+
+    .job-items-card {
+        border: 1px solid var(--border-soft);
+        border-radius: 18px;
+        overflow: hidden;
+        background: var(--card-bg);
+    }
+
+    .job-items-head {
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--border-soft);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        flex-wrap: wrap;
+    }
+
+    .job-items-table-wrap {
+        overflow-x: auto;
+    }
+
+    .job-items-table {
+        width: 100%;
+        min-width: 760px;
+        border-collapse: collapse;
+    }
+
+    .job-items-table th,
+    .job-items-table td {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border-soft);
+        vertical-align: middle;
+    }
+
+    .job-items-table th {
+        font-size: 10.5px;
+        font-weight: 900;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: .02em;
+        background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg));
+    }
+
+    .job-items-table td {
+        font-size: 12px;
+        color: var(--text-main);
+    }
+
+    .job-items-table tbody tr:last-child td {
+        border-bottom: 0;
+    }
+
+    .job-items-summary {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    .job-items-summary span {
+        border: 1px solid var(--border-soft);
+        border-radius: 999px;
+        padding: 5px 10px;
+        font-size: 11px;
+        font-weight: 900;
+        color: var(--text-muted);
     }
 
     .order-badge {
@@ -3282,8 +3507,11 @@ if ($message !== '' && $toastTitle === 'Info') {
 
                         <div class="col-md-4">
                             <div class="info-card">
-                                <small>Product Name</small>
-                                <strong><?= e(jcvResolvedProductName($conn, $job)) ?></strong>
+                                <small>Products</small>
+                                <strong><?= e($jobProductSummary) ?></strong>
+                                <span class="text-muted-custom small mt-1">
+                                    <?= number_format($jobItemCount) ?> product<?= $jobItemCount === 1 ? '' : 's' ?>
+                                </span>
                             </div>
                         </div>
 
@@ -3342,6 +3570,58 @@ if ($message !== '' && $toastTitle === 'Info') {
                                 <strong><?= e($job['created_by_name'] ?? '-') ?></strong>
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <div class="card-ui module-card mb-3">
+                    <div class="job-items-card">
+                        <div class="job-items-head">
+                            <div>
+                                <h2 class="module-title mb-1">Products in this Job Card</h2>
+                                <p class="text-muted-custom mb-0">
+                                    All products created under the same Job Card ID. Workflow/status remains common for the complete Job Card.
+                                </p>
+                            </div>
+
+                            <div class="job-items-summary">
+                                <span><?= number_format($jobItemCount) ?> Product<?= $jobItemCount === 1 ? '' : 's' ?></span>
+                                <span>Total Qty: <?= number_format($jobItemTotalQty, 2) ?></span>
+                                <span>Product Total: <?= e(jcvMoney($jobItemProductTotal)) ?></span>
+                            </div>
+                        </div>
+
+                        <?php if (!$jobItems): ?>
+                        <div class="alert alert-warning rounded-4 fw-bold m-3 mb-3">
+                            No product items found for this Job Card.
+                        </div>
+                        <?php else: ?>
+                        <div class="job-items-table-wrap">
+                            <table class="job-items-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width:60px;">#</th>
+                                        <th>Product</th>
+                                        <th class="text-end">Qty</th>
+                                        <th class="text-end">Rate / Unit</th>
+                                        <th class="text-end">Product Total</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($jobItems as $itemIndex => $jobItem): ?>
+                                    <tr>
+                                        <td><?= (int)$itemIndex + 1 ?></td>
+                                        <td>
+                                            <strong><?= e($jobItem['item_name'] ?? 'Cards') ?></strong>
+                                        </td>
+                                        <td class="text-end"><?= number_format((float)($jobItem['qty'] ?? 0), 2) ?></td>
+                                        <td class="text-end"><?= e(jcvMoney($jobItem['rate'] ?? 0)) ?></td>
+                                        <td class="text-end fw-bold"><?= e(jcvMoney($jobItem['amount'] ?? 0)) ?></td>
+                                    </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                        <?php endif; ?>
                     </div>
                 </div>
 
@@ -3848,7 +4128,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                         <div class="photo-help-text">
                                                             Photo upload is required only when this stage is marked
                                                             Completed. Pending / In Progress / Delayed updates do not
-                                                            require photos. Allowed: JPG, PNG, WEBP, GIF. Max 5 MB each.
+                                                            require photos. Allowed: JPG, PNG, WEBP, GIF.
                                                         </div>
                                                     </div>
                                                 </div>

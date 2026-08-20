@@ -143,6 +143,11 @@ try {
          | Strict role-based sidebar.
          | No Admin bypass: Admin also follows role_sidebar_permissions.can_show.
          | If show_in_sidebar exists, hidden items are excluded here.
+         |
+         | Sorting:
+         | - Main menus follow sidebar_items.sort_order.
+         | - Submenus remain grouped under their parent.
+         | - Submenus follow their own sort_order.
          */
         $sql = "
             SELECT DISTINCT
@@ -159,12 +164,14 @@ try {
                 ON rsp.sidebar_item_id = si.id
                AND rsp.role_id = ?
                AND rsp.can_show = 1
+            LEFT JOIN sidebar_items parent_si
+                ON parent_si.id = si.parent_id
             WHERE si.is_active = 1{$sidebarVisibilitySql}
             ORDER BY
-                COALESCE(si.parent_id, si.id),
-                CASE WHEN si.parent_id IS NULL THEN 0 ELSE 1 END,
-                si.sort_order,
-                si.id
+                COALESCE(parent_si.sort_order, si.sort_order) ASC,
+                CASE WHEN si.parent_id IS NULL THEN 0 ELSE 1 END ASC,
+                CASE WHEN si.parent_id IS NULL THEN si.sort_order ELSE si.sort_order END ASC,
+                si.id ASC
         ";
 
         $stmt = $conn->prepare($sql);
