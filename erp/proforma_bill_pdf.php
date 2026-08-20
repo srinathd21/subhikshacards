@@ -22,6 +22,7 @@ if (!$publicAccess) {
     if (!$allowed) {
         foreach (['can_view', 'can_create', 'can_update', 'can_edit'] as $fn) {
             if (!function_exists($fn)) continue;
+
             try {
                 if ((bool)$fn($conn, 'proforma_bills.php')) {
                     $allowed = true;
@@ -53,7 +54,7 @@ if (!$publicAccess) {
 
 if (isset($_GET['layout_check']) && (string)$_GET['layout_check'] === '1') {
     header('Content-Type: text/plain; charset=utf-8');
-    echo 'Subhiksha Proforma Layout: closer-title-value-v10';
+    echo 'Subhiksha Proforma Layout: detail-separator-lines-v25';
     exit;
 }
 

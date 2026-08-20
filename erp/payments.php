@@ -286,11 +286,14 @@ $bankAmount = 0;
 $jobContext = null;
 $canCancel = payCanCancel($conn);
 
-if (!payTableExists($conn, 'payments')) {
-    $error = 'payments table is missing.';
+$hasProformaPayments = payTableExists($conn, 'payments');
+$hasQuickSalePayments = payTableExists($conn, 'quick_sale_payments') && payTableExists($conn, 'quick_sales');
+
+if (!$hasProformaPayments && !$hasQuickSalePayments) {
+    $error = 'No payment history table is available.';
 }
 
-if ($error === '') {
+if ($error === '' && $hasProformaPayments) {
     try {
         $hasCancel = payColExists($conn, 'payments', 'is_cancelled');
         $hasCancelledAt = payColExists($conn, 'payments', 'cancelled_at');
@@ -400,6 +403,7 @@ if ($error === '') {
         $stmt->execute();
         $res = $stmt->get_result();
         while ($row = $res->fetch_assoc()) {
+            $row['payment_source'] = 'proforma';
             $rows[] = $row;
         }
         $stmt->close();
@@ -476,6 +480,162 @@ if ($error === '') {
     }
 }
 
+
+/*
+ * QUICK SALE PAYMENTS
+ * -------------------
+ * Quick Sale Cash / UPI rows are part of the same Payment History page.
+ * They have no Proforma or Job Card, so when a Proforma/Job Card context filter
+ * is active they are intentionally excluded.
+ */
+if (
+    $error === '' &&
+    $hasQuickSalePayments &&
+    $view === 'paid' &&
+    $jobCardId <= 0 &&
+    $proformaId <= 0
+) {
+    try {
+        $qsWhere = [];
+        $qsParams = [];
+        $qsTypes = '';
+
+        if ($dateFrom !== '') {
+            $qsWhere[] = 'qsp.payment_date >= ?';
+            $qsParams[] = $dateFrom;
+            $qsTypes .= 's';
+        }
+
+        if ($dateTo !== '') {
+            $qsWhere[] = 'qsp.payment_date <= ?';
+            $qsParams[] = $dateTo;
+            $qsTypes .= 's';
+        }
+
+        if ($q !== '') {
+            $like = '%' . $q . '%';
+            $qsWhere[] = '(
+                qsp.payment_no LIKE ?
+                OR qs.sale_no LIKE ?
+                OR qsp.reference_no LIKE ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM quick_sale_items qsi_search
+                    WHERE qsi_search.quick_sale_id = qs.id
+                      AND qsi_search.product_name LIKE ?
+                )
+            )';
+            for ($i = 0; $i < 4; $i++) {
+                $qsParams[] = $like;
+                $qsTypes .= 's';
+            }
+        }
+
+        $qsWhereSql = $qsWhere ? 'WHERE ' . implode(' AND ', $qsWhere) : '';
+        $hasQsReceivedBy = payColExists($conn, 'quick_sale_payments', 'received_by');
+        $qsReceivedSelect = $hasQsReceivedBy
+            ? "COALESCE(qsu.username, '-') AS received_by_name"
+            : "'-' AS received_by_name";
+        $qsReceivedJoin = $hasQsReceivedBy
+            ? 'LEFT JOIN users qsu ON qsu.id = qsp.received_by'
+            : '';
+
+        $qsSql = "
+            SELECT
+                qsp.id,
+                qsp.payment_no,
+                'Quick Sale' AS payment_type,
+                qsp.payment_mode,
+                qsp.amount,
+                qsp.payment_date,
+                qsp.reference_no,
+                qsp.remarks,
+                qsp.created_at,
+                COALESCE(qsp.tendered_amount, qsp.amount) AS tendered_amount,
+                COALESCE(qsp.return_amount, 0) AS return_amount,
+                0 AS is_cancelled,
+                NULL AS cancelled_at,
+                NULL AS cancelled_by,
+                NULL AS cancel_reason,
+                {$qsReceivedSelect},
+                '-' AS cancelled_by_name,
+                NULL AS bill_id,
+                qs.sale_no AS proforma_no,
+                'Quick Sale' AS customer_name,
+                '-' AS mobile,
+                'quick_sale' AS order_type,
+                qs.total_amount AS final_amount,
+                qs.total_amount AS advance_amount,
+                0 AS balance_amount,
+                NULL AS delivery_date,
+                'Quick Sale' AS function_name,
+                'Paid' AS proforma_status_name,
+                NULL AS job_card_id,
+                NULL AS job_card_no,
+                NULL AS job_status_name,
+                qs.id AS quick_sale_id,
+                COALESCE((
+                    SELECT GROUP_CONCAT(qsi.product_name ORDER BY qsi.id SEPARATOR ', ')
+                    FROM quick_sale_items qsi
+                    WHERE qsi.quick_sale_id = qs.id
+                ), '') AS quick_sale_products
+            FROM quick_sale_payments qsp
+            INNER JOIN quick_sales qs ON qs.id = qsp.quick_sale_id
+            {$qsReceivedJoin}
+            {$qsWhereSql}
+            ORDER BY qsp.id DESC
+            LIMIT 300
+        ";
+
+        $stmt = $conn->prepare($qsSql);
+        if ($qsParams) {
+            $stmt->bind_param($qsTypes, ...$qsParams);
+        }
+        $stmt->execute();
+        $res = $stmt->get_result();
+        while ($row = $res->fetch_assoc()) {
+            $row['payment_source'] = 'quick_sale';
+            $rows[] = $row;
+        }
+        $stmt->close();
+
+        $qsSummarySql = "
+            SELECT
+                COUNT(*) AS paid_count,
+                COALESCE(SUM(qsp.amount), 0) AS paid_amount,
+                COALESCE(SUM(CASE WHEN LOWER(qsp.payment_mode) = 'cash' THEN qsp.amount ELSE 0 END), 0) AS cash_amount,
+                COALESCE(SUM(CASE WHEN LOWER(qsp.payment_mode) = 'upi' THEN qsp.amount ELSE 0 END), 0) AS upi_amount
+            FROM quick_sale_payments qsp
+            INNER JOIN quick_sales qs ON qs.id = qsp.quick_sale_id
+            {$qsWhereSql}
+        ";
+
+        $stmt = $conn->prepare($qsSummarySql);
+        if ($qsParams) {
+            $stmt->bind_param($qsTypes, ...$qsParams);
+        }
+        $stmt->execute();
+        $qsSummary = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        $paidCount += (int)($qsSummary['paid_count'] ?? 0);
+        $paidAmount += (float)($qsSummary['paid_amount'] ?? 0);
+        $cashAmount += (float)($qsSummary['cash_amount'] ?? 0);
+        $upiAmount += (float)($qsSummary['upi_amount'] ?? 0);
+
+        usort($rows, static function (array $a, array $b): int {
+            $aTime = strtotime((string)($a['created_at'] ?? $a['payment_date'] ?? '')) ?: 0;
+            $bTime = strtotime((string)($b['created_at'] ?? $b['payment_date'] ?? '')) ?: 0;
+            if ($aTime === $bTime) {
+                return ((int)($b['id'] ?? 0)) <=> ((int)($a['id'] ?? 0));
+            }
+            return $bTime <=> $aTime;
+        });
+    } catch (Throwable $e) {
+        $error = 'Unable to load Quick Sale payments: ' . $e->getMessage();
+    }
+}
+
 if ($jobCardId > 0 && $error === '') {
     try {
         $stmt = $conn->prepare('
@@ -520,6 +680,7 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
 ?>
 <!doctype html>
 <html lang="en">
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -527,191 +688,632 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
     <?php include __DIR__ . '/includes/links.php'; ?>
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
     <style>
-    .module-page .page-head{padding:24px 28px;margin-bottom:18px}.module-page .page-head h1{font-size:30px;font-weight:900;color:var(--text-main)}.module-card{padding:24px}.module-title{font-size:18px;font-weight:900;color:var(--text-main);margin:0}.stat-card{padding:18px;min-height:112px;display:flex;align-items:center;gap:14px}.stat-icon{width:52px;height:52px;border-radius:16px;display:grid;place-items:center;color:#fff;flex:0 0 auto}.stat-card span{display:block;font-size:12px;color:var(--text-muted);font-weight:900;text-transform:uppercase}.stat-card strong{font-size:24px;font-weight:900;color:var(--text-main)}.status-pill{font-size:11px;font-weight:900;border-radius:999px;padding:5px 9px;background:color-mix(in srgb,var(--info-color) 14%,transparent);color:var(--info-color);display:inline-flex;align-items:center;white-space:nowrap}.status-pill.ok{color:#166534;background:#dcfce7}.status-pill.cancelled{color:#991b1b;background:#fee2e2}.status-pill.job{color:#1d4ed8;background:#dbeafe}.form-control,.form-select{border-radius:14px;min-height:46px}.payment-tabs{display:flex;gap:10px;flex-wrap:wrap}.payment-tabs .btn{border-radius:999px;font-weight:900}.filter-card{border:1px solid var(--border-soft);border-radius:18px;padding:16px;background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg))}.table-ui th{font-size:12px}.paid-amount{color:#166534;font-weight:900}.cancelled-amount{color:#991b1b;font-weight:900;text-decoration:line-through}.cancel-inline{display:grid;grid-template-columns:minmax(130px,1fr) auto;gap:6px;align-items:center}.job-context{border:1px solid #bfdbfe;background:#eff6ff;color:#1e3a8a;border-radius:18px;padding:16px}.mobile-cards{display:none}.mobile-card{border:1px solid var(--border-soft);background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg));border-radius:18px;padding:16px;margin-bottom:12px}.mobile-card-title{font-size:16px;font-weight:900;color:var(--text-main)}.mobile-card-subtitle{display:block;color:var(--text-muted);font-size:12px;font-weight:700;margin-top:4px;word-break:break-word}.mobile-card-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.toast-ui{border:0;border-radius:18px;box-shadow:0 18px 45px rgba(15,23,42,.18);overflow:hidden;min-width:320px;max-width:420px}.toast-ui.success{background:#dcfce7;color:#14532d}.toast-ui.danger{background:#fee2e2;color:#7f1d1d}.toast-title{font-size:14px;font-weight:900}.toast-message{font-size:13px;font-weight:800;line-height:1.45}.btn-action-icon{width:36px!important;height:36px!important;min-width:36px!important;max-width:36px!important;padding:0!important;border-radius:50%!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;line-height:1!important}.btn-action-icon svg{width:16px!important;height:16px!important;stroke-width:2.5!important}@media(max-width:767.98px){.module-page .page-head{padding:18px;border-radius:18px}.module-page .page-head h1{font-size:24px}.module-card{padding:16px;border-radius:18px}.desktop-table{display:none!important}.mobile-cards{display:block}.cancel-inline{grid-template-columns:1fr}.mobile-card-actions .btn,.mobile-card-actions form{flex:1 1 auto}.mobile-card-actions .btn{width:100%}.btn-action-icon{width:42px!important;height:42px!important;min-width:42px!important;max-width:42px!important}}
-    @media print{#sidebar,#mobileOverlay,#settingsOverlay,nav,.app-shell>aside,.no-print,.filter-card,.payment-tabs,.toast-container{display:none!important}main{margin:0!important}.page-section{padding:0!important}.card-ui,.module-card,.page-head{box-shadow:none!important;border:1px solid #ddd!important}.desktop-table{display:block!important}.mobile-cards{display:none!important}body{background:#fff!important}.table-ui{width:100%!important;font-size:11px}.table-ui th,.table-ui td{padding:7px!important}}
+    .module-page .page-head {
+        padding: 24px 28px;
+        margin-bottom: 18px
+    }
+
+    .module-page .page-head h1 {
+        font-size: 30px;
+        font-weight: 900;
+        color: var(--text-main)
+    }
+
+    .module-card {
+        padding: 24px
+    }
+
+    .module-title {
+        font-size: 18px;
+        font-weight: 900;
+        color: var(--text-main);
+        margin: 0
+    }
+
+    .stat-card {
+        padding: 18px;
+        min-height: 112px;
+        display: flex;
+        align-items: center;
+        gap: 14px
+    }
+
+    .stat-icon {
+        width: 52px;
+        height: 52px;
+        border-radius: 16px;
+        display: grid;
+        place-items: center;
+        color: #fff;
+        flex: 0 0 auto
+    }
+
+    .stat-card span {
+        display: block;
+        font-size: 12px;
+        color: var(--text-muted);
+        font-weight: 900;
+        text-transform: uppercase
+    }
+
+    .stat-card strong {
+        font-size: 24px;
+        font-weight: 900;
+        color: var(--text-main)
+    }
+
+    .status-pill {
+        font-size: 11px;
+        font-weight: 900;
+        border-radius: 999px;
+        padding: 5px 9px;
+        background: color-mix(in srgb, var(--info-color) 14%, transparent);
+        color: var(--info-color);
+        display: inline-flex;
+        align-items: center;
+        white-space: nowrap
+    }
+
+    .status-pill.ok {
+        color: #166534;
+        background: #dcfce7
+    }
+
+    .status-pill.cancelled {
+        color: #991b1b;
+        background: #fee2e2
+    }
+
+    .status-pill.job {
+        color: #1d4ed8;
+        background: #dbeafe
+    }
+
+    .form-control,
+    .form-select {
+        border-radius: 14px;
+        min-height: 46px
+    }
+
+    .payment-tabs {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap
+    }
+
+    .payment-tabs .btn {
+        border-radius: 999px;
+        font-weight: 900
+    }
+
+    .filter-card {
+        border: 1px solid var(--border-soft);
+        border-radius: 18px;
+        padding: 16px;
+        background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg))
+    }
+
+    .table-ui th {
+        font-size: 12px
+    }
+
+    .paid-amount {
+        color: #166534;
+        font-weight: 900
+    }
+
+    .cancelled-amount {
+        color: #991b1b;
+        font-weight: 900;
+        text-decoration: line-through
+    }
+
+    .cancel-inline {
+        display: grid;
+        grid-template-columns: minmax(130px, 1fr) auto;
+        gap: 6px;
+        align-items: center
+    }
+
+    .job-context {
+        border: 1px solid #bfdbfe;
+        background: #eff6ff;
+        color: #1e3a8a;
+        border-radius: 18px;
+        padding: 16px
+    }
+
+    .mobile-cards {
+        display: none
+    }
+
+    .mobile-card {
+        border: 1px solid var(--border-soft);
+        background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg));
+        border-radius: 18px;
+        padding: 16px;
+        margin-bottom: 12px
+    }
+
+    .mobile-card-title {
+        font-size: 16px;
+        font-weight: 900;
+        color: var(--text-main)
+    }
+
+    .mobile-card-subtitle {
+        display: block;
+        color: var(--text-muted);
+        font-size: 12px;
+        font-weight: 700;
+        margin-top: 4px;
+        word-break: break-word
+    }
+
+    .mobile-card-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px
+    }
+
+    .toast-ui {
+        border: 0;
+        border-radius: 18px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
+        overflow: hidden;
+        min-width: 320px;
+        max-width: 420px
+    }
+
+    .toast-ui.success {
+        background: #dcfce7;
+        color: #14532d
+    }
+
+    .toast-ui.danger {
+        background: #fee2e2;
+        color: #7f1d1d
+    }
+
+    .toast-title {
+        font-size: 14px;
+        font-weight: 900
+    }
+
+    .toast-message {
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.45
+    }
+
+    .btn-action-icon {
+        width: 36px !important;
+        height: 36px !important;
+        min-width: 36px !important;
+        max-width: 36px !important;
+        padding: 0 !important;
+        border-radius: 50% !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        line-height: 1 !important
+    }
+
+    .btn-action-icon svg {
+        width: 16px !important;
+        height: 16px !important;
+        stroke-width: 2.5 !important
+    }
+
+    @media(max-width:767.98px) {
+        .module-page .page-head {
+            padding: 18px;
+            border-radius: 18px
+        }
+
+        .module-page .page-head h1 {
+            font-size: 24px
+        }
+
+        .module-card {
+            padding: 16px;
+            border-radius: 18px
+        }
+
+        .desktop-table {
+            display: none !important
+        }
+
+        .mobile-cards {
+            display: block
+        }
+
+        .cancel-inline {
+            grid-template-columns: 1fr
+        }
+
+        .mobile-card-actions .btn,
+        .mobile-card-actions form {
+            flex: 1 1 auto
+        }
+
+        .mobile-card-actions .btn {
+            width: 100%
+        }
+
+        .btn-action-icon {
+            width: 42px !important;
+            height: 42px !important;
+            min-width: 42px !important;
+            max-width: 42px !important
+        }
+    }
+
+    @media print {
+
+        #sidebar,
+        #mobileOverlay,
+        #settingsOverlay,
+        nav,
+        .app-shell>aside,
+        .no-print,
+        .filter-card,
+        .payment-tabs,
+        .toast-container {
+            display: none !important
+        }
+
+        main {
+            margin: 0 !important
+        }
+
+        .page-section {
+            padding: 0 !important
+        }
+
+        .card-ui,
+        .module-card,
+        .page-head {
+            box-shadow: none !important;
+            border: 1px solid #ddd !important
+        }
+
+        .desktop-table {
+            display: block !important
+        }
+
+        .mobile-cards {
+            display: none !important
+        }
+
+        body {
+            background: #fff !important
+        }
+
+        .table-ui {
+            width: 100% !important;
+            font-size: 11px
+        }
+
+        .table-ui th,
+        .table-ui td {
+            padding: 7px !important
+        }
+    }
     </style>
 </head>
+
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
-<div id="mobileOverlay"></div>
-<div class="app-shell">
-    <?php include __DIR__ . '/includes/sidebar.php'; ?>
-    <main id="main">
-        <?php include __DIR__ . '/includes/nav.php'; ?>
+    <div id="mobileOverlay"></div>
+    <div class="app-shell">
+        <?php include __DIR__ . '/includes/sidebar.php'; ?>
+        <main id="main">
+            <?php include __DIR__ . '/includes/nav.php'; ?>
 
-        <section class="page-section module-page">
-            <div class="card-ui page-head">
-                <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
-                    <div>
-                        <h1 class="mb-1">Payment History</h1>
-                        <p class="text-muted-custom mb-0">
-                            <?= $jobContext ? 'Payment history for job card ' . e($jobContext['job_card_no'] ?? '-') : 'Paid payment history and cancelled payment details.' ?>
-                        </p>
-                    </div>
-                    <div class="d-flex flex-column flex-sm-row gap-2 no-print">
-                        <a href="proforma_bills.php" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Proforma List</a>
-                        <a href="<?= e($exportUrl) ?>" class="btn btn-primary rounded-pill px-4 fw-bold">
-                            <i data-lucide="file-down"></i> Export PDF
-                        </a>
-                    </div>
-                </div>
-            </div>
-
-            <?php if ($message !== ''): ?>
-            <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:12000">
-                <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="4200">
-                    <div class="d-flex">
-                        <div class="toast-body"><div class="toast-title"><?= e($toastTitle) ?></div><div class="toast-message"><?= e($message) ?></div></div>
-                        <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
-                    </div>
-                </div>
-            </div>
-            <?php endif; ?>
-
-            <?php if ($error !== ''): ?>
-            <div class="card-ui module-card"><div class="alert alert-danger rounded-4 fw-bold mb-0"><?= e($error) ?></div></div>
-            <?php else: ?>
-
-            <?php if ($jobContext): ?>
-            <div class="job-context mb-3">
-                <div class="row g-3 align-items-center">
-                    <div class="col-md-3"><strong>Job Card</strong><br><?= e($jobContext['job_card_no'] ?? '-') ?></div>
-                    <div class="col-md-3"><strong>Proforma</strong><br><?= e($jobContext['proforma_no'] ?? '-') ?></div>
-                    <div class="col-md-3"><strong>Customer</strong><br><?= e($jobContext['customer_name'] ?? '-') ?> · <?= e($jobContext['mobile'] ?? '') ?></div>
-                    <div class="col-md-3"><strong>Balance</strong><br><?= e(payMoney($jobContext['balance_amount'] ?? 0)) ?></div>
-                </div>
-            </div>
-            <?php endif; ?>
-
-            <div class="row g-3 mb-3">
-                <div class="col-12 col-md-3"><div class="card-ui stat-card h-100"><div class="stat-icon" style="background:linear-gradient(135deg,#16a34a,#22c55e)"><i data-lucide="indian-rupee"></i></div><div><span>Paid Amount</span><strong><?= e(payMoney($paidAmount)) ?></strong></div></div></div>
-                <div class="col-12 col-md-3"><div class="card-ui stat-card h-100"><div class="stat-icon" style="background:linear-gradient(135deg,#2563eb,#0ea5e9)"><i data-lucide="receipt"></i></div><div><span>Paid Entries</span><strong><?= number_format($paidCount) ?></strong></div></div></div>
-                <div class="col-12 col-md-3"><div class="card-ui stat-card h-100"><div class="stat-icon" style="background:linear-gradient(135deg,#dc2626,#ef4444)"><i data-lucide="x-circle"></i></div><div><span>Cancelled</span><strong><?= number_format($cancelledCount) ?></strong></div></div></div>
-                <div class="col-12 col-md-3"><div class="card-ui stat-card h-100"><div class="stat-icon" style="background:linear-gradient(135deg,#7c3aed,#9333ea)"><i data-lucide="credit-card"></i></div><div><span>UPI + Bank</span><strong><?= e(payMoney($upiAmount + $bankAmount)) ?></strong></div></div></div>
-            </div>
-
-            <div class="card-ui module-card">
-                <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
-                    <div>
-                        <h2 class="module-title"><?= $view === 'cancelled' ? 'Cancelled Payment Details' : 'Paid Payment History' ?></h2>
-                        <p class="text-muted-custom mb-0"><?= $view === 'cancelled' ? 'Cancelled entries are shown here with cancel reason and user.' : 'Only active paid payment entries are shown here.' ?></p>
-                    </div>
-                    <div class="payment-tabs no-print">
-                        <?php $paidUrl = 'payments.php?' . http_build_query(array_filter(['view' => 'paid', 'job_card_id' => $jobCardId ?: null, 'proforma_id' => $proformaId ?: null, 'q' => $q ?: null, 'date_from' => $dateFrom ?: null, 'date_to' => $dateTo ?: null])); ?>
-                        <?php $cancelUrl = 'payments.php?' . http_build_query(array_filter(['view' => 'cancelled', 'job_card_id' => $jobCardId ?: null, 'proforma_id' => $proformaId ?: null, 'q' => $q ?: null, 'date_from' => $dateFrom ?: null, 'date_to' => $dateTo ?: null])); ?>
-                        <a class="btn <?= $view === 'paid' ? 'btn-success' : 'btn-outline-success' ?> px-4" href="<?= e($paidUrl) ?>">Paid</a>
-                        <a class="btn <?= $view === 'cancelled' ? 'btn-danger' : 'btn-outline-danger' ?> px-4" href="<?= e($cancelUrl) ?>">Cancelled</a>
+            <section class="page-section module-page">
+                <div class="card-ui page-head">
+                    <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
+                        <div>
+                            <h1 class="mb-1">Payment History</h1>
+                            <p class="text-muted-custom mb-0">
+                                <?= $jobContext ? 'Payment history for job card ' . e($jobContext['job_card_no'] ?? '-') : 'Proforma and Quick Sale payment history with cancelled Proforma payment details.' ?>
+                            </p>
+                        </div>
+                        <div class="d-flex flex-column flex-sm-row gap-2 no-print">
+                            <a href="proforma_bills.php"
+                                class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Proforma List</a>
+                            <a href="<?= e($exportUrl) ?>" class="btn btn-primary rounded-pill px-4 fw-bold">
+                                <i data-lucide="file-down"></i> Export PDF
+                            </a>
+                        </div>
                     </div>
                 </div>
 
-                <form method="get" class="filter-card mb-3 no-print">
-                    <input type="hidden" name="view" value="<?= e($view) ?>">
-                    <input type="hidden" name="job_card_id" value="<?= $jobCardId > 0 ? (int)$jobCardId : '' ?>">
-                    <input type="hidden" name="proforma_id" value="<?= $proformaId > 0 ? (int)$proformaId : '' ?>">
-                    <div class="row g-3 align-items-end">
-                        <div class="col-md-4"><label class="form-label fw-bold">Search</label><input type="search" name="q" class="form-control" value="<?= e($q) ?>" placeholder="Payment no / customer / job card / reference"></div>
-                        <div class="col-md-2"><label class="form-label fw-bold">From</label><input type="date" name="date_from" class="form-control" value="<?= e($dateFrom) ?>"></div>
-                        <div class="col-md-2"><label class="form-label fw-bold">To</label><input type="date" name="date_to" class="form-control" value="<?= e($dateTo) ?>"></div>
-                        <div class="col-md-4"><button type="submit" class="btn btn-primary rounded-pill px-4 fw-bold">Filter</button> <a href="payments.php" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Reset</a></div>
+                <?php if ($message !== ''): ?>
+                <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:12000">
+                    <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive"
+                        aria-atomic="true" data-bs-delay="4200">
+                        <div class="d-flex">
+                            <div class="toast-body">
+                                <div class="toast-title"><?= e($toastTitle) ?></div>
+                                <div class="toast-message"><?= e($message) ?></div>
+                            </div>
+                            <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
+                                aria-label="Close"></button>
+                        </div>
                     </div>
-                </form>
+                </div>
+                <?php endif; ?>
 
-                <div class="table-responsive desktop-table">
-                    <table class="table-ui" id="paymentsTable">
-                        <thead>
-                            <tr>
-                                <th>Payment No</th>
-                                <th>Customer</th>
-                                <th>Proforma</th>
-                                <th>Job Card</th>
-                                <th>Mode</th>
-                                <th>Amount</th>
-                                <th>Date / Ref</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody>
+                <?php if ($error !== ''): ?>
+                <div class="card-ui module-card">
+                    <div class="alert alert-danger rounded-4 fw-bold mb-0"><?= e($error) ?></div>
+                </div>
+                <?php else: ?>
+
+                <?php if ($jobContext): ?>
+                <div class="job-context mb-3">
+                    <div class="row g-3 align-items-center">
+                        <div class="col-md-3"><strong>Job Card</strong><br><?= e($jobContext['job_card_no'] ?? '-') ?>
+                        </div>
+                        <div class="col-md-3"><strong>Proforma</strong><br><?= e($jobContext['proforma_no'] ?? '-') ?>
+                        </div>
+                        <div class="col-md-3"><strong>Customer</strong><br><?= e($jobContext['customer_name'] ?? '-') ?>
+                            · <?= e($jobContext['mobile'] ?? '') ?></div>
+                        <div class="col-md-3">
+                            <strong>Balance</strong><br><?= e(payMoney($jobContext['balance_amount'] ?? 0)) ?></div>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <div class="row g-3 mb-3">
+                    <div class="col-12 col-md-3">
+                        <div class="card-ui stat-card h-100">
+                            <div class="stat-icon" style="background:linear-gradient(135deg,#16a34a,#22c55e)"><i
+                                    data-lucide="indian-rupee"></i></div>
+                            <div><span>Paid Amount</span><strong><?= e(payMoney($paidAmount)) ?></strong></div>
+                        </div>
+                    </div>
+                    <div class="col-12 col-md-3">
+                        <div class="card-ui stat-card h-100">
+                            <div class="stat-icon" style="background:linear-gradient(135deg,#2563eb,#0ea5e9)"><i
+                                    data-lucide="receipt"></i></div>
+                            <div><span>Paid Entries</span><strong><?= number_format($paidCount) ?></strong></div>
+                        </div>
+                    </div>
+                    <div class="col-12 col-md-3">
+                        <div class="card-ui stat-card h-100">
+                            <div class="stat-icon" style="background:linear-gradient(135deg,#dc2626,#ef4444)"><i
+                                    data-lucide="x-circle"></i></div>
+                            <div><span>Cancelled</span><strong><?= number_format($cancelledCount) ?></strong></div>
+                        </div>
+                    </div>
+                    <div class="col-12 col-md-3">
+                        <div class="card-ui stat-card h-100">
+                            <div class="stat-icon" style="background:linear-gradient(135deg,#7c3aed,#9333ea)"><i
+                                    data-lucide="credit-card"></i></div>
+                            <div><span>UPI + Bank</span><strong><?= e(payMoney($upiAmount + $bankAmount)) ?></strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card-ui module-card">
+                    <div
+                        class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
+                        <div>
+                            <h2 class="module-title">
+                                <?= $view === 'cancelled' ? 'Cancelled Payment Details' : 'Paid Payment History' ?></h2>
+                            <p class="text-muted-custom mb-0">
+                                <?= $view === 'cancelled' ? 'Cancelled entries are shown here with cancel reason and user.' : 'Only active paid payment entries are shown here.' ?>
+                            </p>
+                        </div>
+                        <div class="payment-tabs no-print">
+                            <?php $paidUrl = 'payments.php?' . http_build_query(array_filter(['view' => 'paid', 'job_card_id' => $jobCardId ?: null, 'proforma_id' => $proformaId ?: null, 'q' => $q ?: null, 'date_from' => $dateFrom ?: null, 'date_to' => $dateTo ?: null])); ?>
+                            <?php $cancelUrl = 'payments.php?' . http_build_query(array_filter(['view' => 'cancelled', 'job_card_id' => $jobCardId ?: null, 'proforma_id' => $proformaId ?: null, 'q' => $q ?: null, 'date_from' => $dateFrom ?: null, 'date_to' => $dateTo ?: null])); ?>
+                            <a class="btn <?= $view === 'paid' ? 'btn-success' : 'btn-outline-success' ?> px-4"
+                                href="<?= e($paidUrl) ?>">Paid</a>
+                            <a class="btn <?= $view === 'cancelled' ? 'btn-danger' : 'btn-outline-danger' ?> px-4"
+                                href="<?= e($cancelUrl) ?>">Cancelled</a>
+                        </div>
+                    </div>
+
+                    <form method="get" class="filter-card mb-3 no-print">
+                        <input type="hidden" name="view" value="<?= e($view) ?>">
+                        <input type="hidden" name="job_card_id" value="<?= $jobCardId > 0 ? (int)$jobCardId : '' ?>">
+                        <input type="hidden" name="proforma_id" value="<?= $proformaId > 0 ? (int)$proformaId : '' ?>">
+                        <div class="row g-3 align-items-end">
+                            <div class="col-md-4"><label class="form-label fw-bold">Search</label><input type="search"
+                                    name="q" class="form-control" value="<?= e($q) ?>"
+                                    placeholder="Payment no / proforma / quick sale / product / reference"></div>
+                            <div class="col-md-2"><label class="form-label fw-bold">From</label><input type="date"
+                                    name="date_from" class="form-control" value="<?= e($dateFrom) ?>"></div>
+                            <div class="col-md-2"><label class="form-label fw-bold">To</label><input type="date"
+                                    name="date_to" class="form-control" value="<?= e($dateTo) ?>"></div>
+                            <div class="col-md-4"><button type="submit"
+                                    class="btn btn-primary rounded-pill px-4 fw-bold">Filter</button> <a
+                                    href="payments.php"
+                                    class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Reset</a></div>
+                        </div>
+                    </form>
+
+                    <div class="table-responsive desktop-table">
+                        <table class="table-ui" id="paymentsTable">
+                            <thead>
+                                <tr>
+                                    <th>Payment No</th>
+                                    <th>Customer</th>
+                                    <th>Proforma</th>
+                                    <th>Job Card</th>
+                                    <th>Mode</th>
+                                    <th>Amount</th>
+                                    <th>Date / Ref</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (!$rows): ?>
+                                <tr>
+                                    <td colspan="8" class="text-center text-muted-custom py-4">No
+                                        <?= $view === 'cancelled' ? 'cancelled' : 'paid' ?> payment details found.</td>
+                                </tr>
+                                <?php endif; ?>
+
+                                <?php foreach ($rows as $row): ?>
+                                <?php
+                                $isCancelled = (int)($row['is_cancelled'] ?? 0) === 1;
+                                $isQuickSale = (string)($row['payment_source'] ?? 'proforma') === 'quick_sale';
+                            ?>
+                                <tr>
+                                    <td>
+                                        <strong><?= e($row['payment_no'] ?? '-') ?></strong>
+                                        <small
+                                            class="d-block text-muted-custom"><?= $isQuickSale ? 'Quick Sale Payment' : 'ID: ' . (int)($row['id'] ?? 0) ?></small>
+                                    </td>
+                                    <td>
+                                        <?= e($isQuickSale ? 'Counter Sale' : ($row['customer_name'] ?? '-')) ?>
+                                        <small
+                                            class="d-block text-muted-custom"><?= e($isQuickSale ? ($row['quick_sale_products'] ?? '-') : ($row['mobile'] ?? '-')) ?></small>
+                                    </td>
+                                    <td>
+                                        <?php if ($isQuickSale): ?>
+                                        <a href="quick-sales.php?q=<?= urlencode((string)($row['proforma_no'] ?? '')) ?>"
+                                            class="fw-bold text-decoration-none"><?= e($row['proforma_no'] ?? '-') ?></a>
+                                        <small class="d-block text-muted-custom">Quick Sale</small>
+                                        <?php else: ?>
+                                        <a href="proforma_bill_view.php?id=<?= (int)($row['bill_id'] ?? 0) ?>"
+                                            class="fw-bold text-decoration-none"><?= e($row['proforma_no'] ?? '-') ?></a>
+                                        <small
+                                            class="d-block text-muted-custom"><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></small>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <?php if ($isQuickSale): ?>
+                                        <span class="status-pill">Not Applicable</span>
+                                        <?php elseif (!empty($row['job_card_id'])): ?>
+                                        <a href="payments.php?view=<?= e($view) ?>&job_card_id=<?= (int)$row['job_card_id'] ?>"
+                                            class="status-pill job text-decoration-none"><?= e($row['job_card_no'] ?? '-') ?></a>
+                                        <small
+                                            class="d-block text-muted-custom mt-1"><?= e($row['job_status_name'] ?? '-') ?></small>
+                                        <?php else: ?>
+                                        <span class="text-muted-custom fw-bold">Not Created</span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td><?= e(ucfirst((string)($row['payment_type'] ?? '-'))) ?><small
+                                            class="d-block text-muted-custom"><?= e(strtoupper((string)($row['payment_mode'] ?? '-'))) ?></small>
+                                    </td>
+                                    <td>
+                                        <span
+                                            class="<?= $isCancelled ? 'cancelled-amount' : 'paid-amount' ?>"><?= e(payMoney($row['amount'] ?? 0)) ?></span>
+                                        <?php if ($isQuickSale && strtolower((string)($row['payment_mode'] ?? '')) === 'cash' && (float)($row['return_amount'] ?? 0) > 0): ?>
+                                        <small class="d-block text-muted-custom">Received:
+                                            <?= e(payMoney($row['tendered_amount'] ?? 0)) ?> · Return:
+                                            <?= e(payMoney($row['return_amount'] ?? 0)) ?></small>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td><?= e(payDate($row['payment_date'] ?? null)) ?><small
+                                            class="d-block text-muted-custom">Ref:
+                                            <?= e($row['reference_no'] ?? '-') ?></small></td>
+                                    <td>
+                                        <?php if ($isCancelled): ?>
+                                        <span class="status-pill cancelled">Cancelled</span>
+                                        <small class="d-block text-muted-custom mt-1">At:
+                                            <?= e(payDateTime($row['cancelled_at'] ?? null)) ?></small>
+                                        <small class="d-block text-muted-custom">By:
+                                            <?= e($row['cancelled_by_name'] ?? '-') ?></small>
+                                        <small class="d-block text-danger fw-bold mt-1">Reason:
+                                            <?= e($row['cancel_reason'] ?? '-') ?></small>
+                                        <?php else: ?>
+                                        <span class="status-pill ok">Paid</span>
+                                        <?php if ($isQuickSale): ?><small class="d-block text-muted-custom mt-1">Source:
+                                            Quick Sale</small><?php endif; ?>
+                                        <small class="d-block text-muted-custom mt-1">By:
+                                            <?= e($row['received_by_name'] ?? '-') ?></small>
+                                        <?php endif; ?>
+                                    </td>
+
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="mobile-cards" id="mobileCards">
                         <?php if (!$rows): ?>
-                            <tr><td colspan="8" class="text-center text-muted-custom py-4">No <?= $view === 'cancelled' ? 'cancelled' : 'paid' ?> payment details found.</td></tr>
+                        <div class="mobile-card text-center text-muted-custom">No
+                            <?= $view === 'cancelled' ? 'cancelled' : 'paid' ?> payment details found.</div>
                         <?php endif; ?>
 
                         <?php foreach ($rows as $row): ?>
-                            <?php $isCancelled = (int)($row['is_cancelled'] ?? 0) === 1; ?>
-                            <tr>
-                                <td><strong><?= e($row['payment_no'] ?? '-') ?></strong><small class="d-block text-muted-custom">ID: <?= (int)($row['id'] ?? 0) ?></small></td>
-                                <td><?= e($row['customer_name'] ?? '-') ?><small class="d-block text-muted-custom"><?= e($row['mobile'] ?? '-') ?></small></td>
-                                <td><a href="proforma_bill_view.php?id=<?= (int)($row['bill_id'] ?? 0) ?>" class="fw-bold text-decoration-none"><?= e($row['proforma_no'] ?? '-') ?></a><small class="d-block text-muted-custom"><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></small></td>
-                                <td><?php if (!empty($row['job_card_id'])): ?><a href="payments.php?view=<?= e($view) ?>&job_card_id=<?= (int)$row['job_card_id'] ?>" class="status-pill job text-decoration-none"><?= e($row['job_card_no'] ?? '-') ?></a><small class="d-block text-muted-custom mt-1"><?= e($row['job_status_name'] ?? '-') ?></small><?php else: ?><span class="text-muted-custom fw-bold">Not Created</span><?php endif; ?></td>
-                                <td><?= e(ucfirst((string)($row['payment_type'] ?? '-'))) ?><small class="d-block text-muted-custom"><?= e(strtoupper((string)($row['payment_mode'] ?? '-'))) ?></small></td>
-                                <td><span class="<?= $isCancelled ? 'cancelled-amount' : 'paid-amount' ?>"><?= e(payMoney($row['amount'] ?? 0)) ?></span></td>
-                                <td><?= e(payDate($row['payment_date'] ?? null)) ?><small class="d-block text-muted-custom">Ref: <?= e($row['reference_no'] ?? '-') ?></small></td>
-                                <td>
+                        <?php
+                        $isCancelled = (int)($row['is_cancelled'] ?? 0) === 1;
+                        $isQuickSale = (string)($row['payment_source'] ?? 'proforma') === 'quick_sale';
+                    ?>
+                        <div class="mobile-card">
+                            <div class="d-flex justify-content-between gap-2">
+                                <div>
+                                    <div class="mobile-card-title"><?= e($row['payment_no'] ?? '-') ?></div>
+                                    <span
+                                        class="mobile-card-subtitle"><?= e($isQuickSale ? 'Counter Sale' : ($row['customer_name'] ?? '-')) ?><?= $isQuickSale ? '' : ' · ' . e($row['mobile'] ?? '-') ?></span>
+                                    <span class="mobile-card-subtitle"><?= $isQuickSale ? 'Quick Sale' : 'Proforma' ?>:
+                                        <?= e($row['proforma_no'] ?? '-') ?></span>
+                                    <span class="mobile-card-subtitle">Job Card:
+                                        <?= e($isQuickSale ? 'Not Applicable' : ($row['job_card_no'] ?? 'Not Created')) ?></span>
+                                    <?php if ($isQuickSale && !empty($row['quick_sale_products'])): ?><span
+                                        class="mobile-card-subtitle">Products:
+                                        <?= e($row['quick_sale_products']) ?></span><?php endif; ?>
+                                    <span class="mobile-card-subtitle">Amount: <?= e(payMoney($row['amount'] ?? 0)) ?> ·
+                                        <?= e(strtoupper((string)($row['payment_mode'] ?? '-'))) ?></span>
+                                    <?php if ($isQuickSale && strtolower((string)($row['payment_mode'] ?? '')) === 'cash' && (float)($row['return_amount'] ?? 0) > 0): ?><span
+                                        class="mobile-card-subtitle">Received:
+                                        <?= e(payMoney($row['tendered_amount'] ?? 0)) ?> · Return:
+                                        <?= e(payMoney($row['return_amount'] ?? 0)) ?></span><?php endif; ?>
+                                    <?php if ($isQuickSale && !empty($row['reference_no'])): ?><span
+                                        class="mobile-card-subtitle">UPI Ref:
+                                        <?= e($row['reference_no']) ?></span><?php endif; ?>
+                                    <span class="mobile-card-subtitle">Date:
+                                        <?= e(payDate($row['payment_date'] ?? null)) ?></span>
                                     <?php if ($isCancelled): ?>
-                                    <span class="status-pill cancelled">Cancelled</span>
-                                    <small class="d-block text-muted-custom mt-1">At: <?= e(payDateTime($row['cancelled_at'] ?? null)) ?></small>
-                                    <small class="d-block text-muted-custom">By: <?= e($row['cancelled_by_name'] ?? '-') ?></small>
-                                    <small class="d-block text-danger fw-bold mt-1">Reason: <?= e($row['cancel_reason'] ?? '-') ?></small>
-                                    <?php else: ?>
-                                    <span class="status-pill ok">Paid</span>
-                                    <small class="d-block text-muted-custom mt-1">By: <?= e($row['received_by_name'] ?? '-') ?></small>
+                                    <span class="mobile-card-subtitle text-danger fw-bold">Cancelled:
+                                        <?= e(payDateTime($row['cancelled_at'] ?? null)) ?> ·
+                                        <?= e($row['cancel_reason'] ?? '-') ?></span>
                                     <?php endif; ?>
-                                </td>
-
-                            </tr>
-                        <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-
-                <div class="mobile-cards" id="mobileCards">
-                    <?php if (!$rows): ?>
-                    <div class="mobile-card text-center text-muted-custom">No <?= $view === 'cancelled' ? 'cancelled' : 'paid' ?> payment details found.</div>
-                    <?php endif; ?>
-
-                    <?php foreach ($rows as $row): ?>
-                    <?php $isCancelled = (int)($row['is_cancelled'] ?? 0) === 1; ?>
-                    <div class="mobile-card">
-                        <div class="d-flex justify-content-between gap-2">
-                            <div>
-                                <div class="mobile-card-title"><?= e($row['payment_no'] ?? '-') ?></div>
-                                <span class="mobile-card-subtitle"><?= e($row['customer_name'] ?? '-') ?> · <?= e($row['mobile'] ?? '-') ?></span>
-                                <span class="mobile-card-subtitle">Proforma: <?= e($row['proforma_no'] ?? '-') ?></span>
-                                <span class="mobile-card-subtitle">Job Card: <?= e($row['job_card_no'] ?? 'Not Created') ?></span>
-                                <span class="mobile-card-subtitle">Amount: <?= e(payMoney($row['amount'] ?? 0)) ?> · <?= e(strtoupper((string)($row['payment_mode'] ?? '-'))) ?></span>
-                                <span class="mobile-card-subtitle">Date: <?= e(payDate($row['payment_date'] ?? null)) ?></span>
-                                <?php if ($isCancelled): ?>
-                                <span class="mobile-card-subtitle text-danger fw-bold">Cancelled: <?= e(payDateTime($row['cancelled_at'] ?? null)) ?> · <?= e($row['cancel_reason'] ?? '-') ?></span>
-                                <?php endif; ?>
+                                </div>
+                                <span
+                                    class="status-pill <?= $isCancelled ? 'cancelled' : 'ok' ?>"><?= $isCancelled ? 'Cancelled' : 'Paid' ?></span>
                             </div>
-                            <span class="status-pill <?= $isCancelled ? 'cancelled' : 'ok' ?>"><?= $isCancelled ? 'Cancelled' : 'Paid' ?></span>
+
                         </div>
-
+                        <?php endforeach; ?>
                     </div>
-                    <?php endforeach; ?>
                 </div>
-            </div>
 
-            <?php endif; ?>
-        </section>
-    </main>
-    <div id="settingsOverlay"></div>
-    <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
-</div>
-<?php include __DIR__ . '/includes/script.php'; ?>
-<script>
-(function(){
-    const pageToastEl = document.getElementById('pageToast');
-    if (pageToastEl && window.bootstrap && bootstrap.Toast) {
-        bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
-    }
-    if (window.lucide && typeof window.lucide.createIcons === 'function') {
-        window.lucide.createIcons();
-    }
-    <?php if ($exportPdf): ?>
-    window.addEventListener('load', function(){
-        setTimeout(function(){ window.print(); }, 400);
-    });
-    <?php endif; ?>
-})();
-</script>
+                <?php endif; ?>
+            </section>
+        </main>
+        <div id="settingsOverlay"></div>
+        <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
+    </div>
+    <?php include __DIR__ . '/includes/script.php'; ?>
+    <script>
+    (function() {
+        const pageToastEl = document.getElementById('pageToast');
+        if (pageToastEl && window.bootstrap && bootstrap.Toast) {
+            bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
+        }
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+            window.lucide.createIcons();
+        }
+        <?php if ($exportPdf): ?>
+        window.addEventListener('load', function() {
+            setTimeout(function() {
+                window.print();
+            }, 400);
+        });
+        <?php endif; ?>
+    })();
+    </script>
 </body>
+
 </html>

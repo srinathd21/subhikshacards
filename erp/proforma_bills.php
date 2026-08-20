@@ -86,6 +86,19 @@ function pb_fast_tracking_url(mysqli $conn, array $row): string
     return pb_fast_base_url($conn) . '/customer_tracking.php?token=' . rawurlencode($token);
 }
 
+function pb_fast_page_url(int $page, string $search = ''): string
+{
+    $params = [];
+    if ($search !== '') {
+        $params['q'] = $search;
+    }
+    if ($page > 1) {
+        $params['page'] = $page;
+    }
+
+    return 'proforma_bills.php' . ($params ? '?' . http_build_query($params) : '');
+}
+
 
 function pb_fast_col_exists(mysqli $conn, string $table, string $col): bool
 {
@@ -151,8 +164,97 @@ if ($msg === 'payment_collected') {
     $toastTitle = 'Failed';
 }
 
+$search = trim((string)($_GET['q'] ?? ''));
+$page = max(1, (int)($_GET['page'] ?? 1));
+$perPage = 10;
+$filteredRows = 0;
+$totalPages = 1;
 $rows = [];
+
+/* Global summary cards must represent the full Proforma table, not one page. */
+$totalRows = 0;
+$pendingRows = 0;
+$paidRows = 0;
+$jobCardRows = 0;
+$totalBalanceAmount = 0.0;
+
 try {
+    $statRes = $conn->query("
+        SELECT
+            COUNT(*) AS total_rows,
+            SUM(CASE WHEN COALESCE(balance_amount, 0) <= 0 THEN 1 ELSE 0 END) AS paid_rows,
+            SUM(CASE WHEN COALESCE(balance_amount, 0) > 0 THEN 1 ELSE 0 END) AS pending_rows,
+            SUM(GREATEST(COALESCE(balance_amount, 0), 0)) AS total_balance
+        FROM proforma_bills
+    ");
+    if ($statRes) {
+        $stats = $statRes->fetch_assoc() ?: [];
+        $totalRows = (int)($stats['total_rows'] ?? 0);
+        $paidRows = (int)($stats['paid_rows'] ?? 0);
+        $pendingRows = (int)($stats['pending_rows'] ?? 0);
+        $totalBalanceAmount = (float)($stats['total_balance'] ?? 0);
+        $statRes->free();
+    }
+
+    if (pb_fast_table_exists($conn, 'job_cards')) {
+        $jobRes = $conn->query("
+            SELECT COUNT(DISTINCT proforma_bill_id) AS total
+            FROM job_cards
+            WHERE proforma_bill_id IS NOT NULL
+        ");
+        if ($jobRes) {
+            $jobCardRows = (int)(($jobRes->fetch_assoc()['total'] ?? 0));
+            $jobRes->free();
+        }
+    }
+} catch (Throwable $e) {
+    /* Keep page usable even when a summary query fails. */
+}
+
+try {
+    $baseFrom = "
+        FROM proforma_bills pb
+        LEFT JOIN function_types ft ON ft.id = pb.function_type_id
+        LEFT JOIN (
+            SELECT proforma_bill_id, MIN(id) AS first_item_id
+            FROM proforma_bill_items
+            GROUP BY proforma_bill_id
+        ) first_pbi ON first_pbi.proforma_bill_id = pb.id
+        LEFT JOIN proforma_bill_items pbi ON pbi.id = first_pbi.first_item_id
+        LEFT JOIN (
+            SELECT proforma_bill_id, MAX(job_card_no) AS job_card_no, MAX(tracking_token) AS tracking_token
+            FROM job_cards
+            GROUP BY proforma_bill_id
+        ) jc ON jc.proforma_bill_id = pb.id
+    ";
+
+    $where = '';
+    if ($search !== '') {
+        $escaped = $conn->real_escape_string($search);
+        $like = "%{$escaped}%";
+        $where = "
+            WHERE
+                pb.proforma_no LIKE '{$like}'
+                OR pb.customer_name LIKE '{$like}'
+                OR pb.mobile LIKE '{$like}'
+                OR pb.order_type LIKE '{$like}'
+                OR COALESCE(ft.function_name, '') LIKE '{$like}'
+                OR COALESCE(pbi.item_name, '') LIKE '{$like}'
+                OR COALESCE(jc.job_card_no, '') LIKE '{$like}'
+        ";
+    }
+
+    $countSql = "SELECT COUNT(*) AS total {$baseFrom} {$where}";
+    $countRes = $conn->query($countSql);
+    if ($countRes) {
+        $filteredRows = (int)(($countRes->fetch_assoc()['total'] ?? 0));
+        $countRes->free();
+    }
+
+    $totalPages = max(1, (int)ceil($filteredRows / $perPage));
+    $page = min($page, $totalPages);
+    $offset = ($page - 1) * $perPage;
+
     $sql = "
         SELECT
             pb.id,
@@ -168,22 +270,12 @@ try {
             pbi.item_name,
             jc.job_card_no,
             jc.tracking_token
-        FROM proforma_bills pb
-        LEFT JOIN function_types ft ON ft.id = pb.function_type_id
-        LEFT JOIN (
-            SELECT proforma_bill_id, MIN(id) AS first_item_id
-            FROM proforma_bill_items
-            GROUP BY proforma_bill_id
-        ) first_pbi ON first_pbi.proforma_bill_id = pb.id
-        LEFT JOIN proforma_bill_items pbi ON pbi.id = first_pbi.first_item_id
-        LEFT JOIN (
-            SELECT proforma_bill_id, MAX(job_card_no) AS job_card_no, MAX(tracking_token) AS tracking_token
-            FROM job_cards
-            GROUP BY proforma_bill_id
-        ) jc ON jc.proforma_bill_id = pb.id
+        {$baseFrom}
+        {$where}
         ORDER BY pb.id DESC
-        LIMIT 150
+        LIMIT {$perPage} OFFSET {$offset}
     ";
+
     $res = $conn->query($sql);
     while ($row = $res->fetch_assoc()) {
         $rows[] = $row;
@@ -195,27 +287,8 @@ try {
     $toastTitle = 'Failed';
 }
 
-
-$totalRows = count($rows);
-$pendingRows = 0;
-$paidRows = 0;
-$jobCardRows = 0;
-$totalBalanceAmount = 0.0;
-
-foreach ($rows as $statRow) {
-    $balanceAmount = (float)($statRow['balance_amount'] ?? 0);
-    $totalBalanceAmount += max(0, $balanceAmount);
-
-    if ($balanceAmount <= 0) {
-        $paidRows++;
-    } else {
-        $pendingRows++;
-    }
-
-    if (!empty($statRow['job_card_no'])) {
-        $jobCardRows++;
-    }
-}
+$showingFrom = $filteredRows > 0 ? (($page - 1) * $perPage) + 1 : 0;
+$showingTo = $filteredRows > 0 ? min($filteredRows, $page * $perPage) : 0;
 ?>
 <!doctype html>
 <html lang="en">
@@ -609,7 +682,7 @@ foreach ($rows as $statRow) {
                         </div>
 
                         <div style="max-width:340px;width:100%">
-                            <input type="search" id="tableSearch" class="form-control" placeholder="Search...">
+                            <input type="search" id="tableSearch" class="form-control" placeholder="Search..." value="<?= e($search) ?>" autocomplete="off">
                         </div>
                     </div>
 
@@ -621,6 +694,7 @@ foreach ($rows as $statRow) {
                                     <th>Customer</th>
                                     <th>Function</th>
                                     <th>Order Type</th>
+                                    <th>Total Amount</th>
                                     <th>Balance</th>
                                     <th>Status</th>
                                     <th class="text-end">Action</th>
@@ -629,7 +703,7 @@ foreach ($rows as $statRow) {
                             <tbody>
                                 <?php if (!$rows): ?>
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted-custom py-4">No proforma bills found.
+                                    <td colspan="8" class="text-center text-muted-custom py-4">No proforma bills found.
                                     </td>
                                 </tr>
                                 <?php endif; ?>
@@ -648,6 +722,7 @@ foreach ($rows as $statRow) {
                                     </td>
                                     <td><?= e($row['function_name'] ?? '-') ?></td>
                                     <td><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></td>
+                                    <td><strong><?= e(pb_fast_money($row['final_amount'] ?? 0)) ?></strong></td>
                                     <td><span
                                             class="balance-text <?= e($paidClass) ?>"><?= e(pb_fast_money($balance)) ?></span>
                                     </td>
@@ -750,6 +825,8 @@ foreach ($rows as $statRow) {
                                         <?= e($row['function_name'] ?? '-') ?></span>
                                     <span class="mobile-card-subtitle">Order Type:
                                         <?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></span>
+                                    <span class="mobile-card-subtitle"><strong>Total Amount:
+                                        <?= e(pb_fast_money($row['final_amount'] ?? 0)) ?></strong></span>
                                     <span class="mobile-card-subtitle balance-text <?= e($paidClass) ?>">Balance:
                                         <?= e(pb_fast_money($balance)) ?></span>
                                 </div>
@@ -817,6 +894,52 @@ foreach ($rows as $statRow) {
                         </div>
                         <?php endforeach; ?>
                     </div>
+
+                    <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mt-4">
+                        <div class="text-muted-custom small fw-bold">
+                            Showing <?= number_format($showingFrom) ?>–<?= number_format($showingTo) ?>
+                            of <?= number_format($filteredRows) ?> record<?= $filteredRows === 1 ? '' : 's' ?>
+                            <?= $search !== '' ? ' for “' . e($search) . '”' : '' ?>
+                        </div>
+
+                        <?php if ($totalPages > 1): ?>
+                        <nav aria-label="Proforma pagination">
+                            <ul class="pagination pagination-sm mb-0 flex-wrap justify-content-center">
+                                <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                                    <a class="page-link" href="<?= e(pb_fast_page_url(max(1, $page - 1), $search)) ?>" aria-label="Previous">Previous</a>
+                                </li>
+
+                                <?php
+                                $startPage = max(1, $page - 2);
+                                $endPage = min($totalPages, $page + 2);
+                                if ($startPage > 1):
+                                ?>
+                                <li class="page-item"><a class="page-link" href="<?= e(pb_fast_page_url(1, $search)) ?>">1</a></li>
+                                <?php if ($startPage > 2): ?>
+                                <li class="page-item disabled"><span class="page-link">…</span></li>
+                                <?php endif; ?>
+                                <?php endif; ?>
+
+                                <?php for ($p = $startPage; $p <= $endPage; $p++): ?>
+                                <li class="page-item <?= $p === $page ? 'active' : '' ?>">
+                                    <a class="page-link" href="<?= e(pb_fast_page_url($p, $search)) ?>"><?= $p ?></a>
+                                </li>
+                                <?php endfor; ?>
+
+                                <?php if ($endPage < $totalPages): ?>
+                                <?php if ($endPage < $totalPages - 1): ?>
+                                <li class="page-item disabled"><span class="page-link">…</span></li>
+                                <?php endif; ?>
+                                <li class="page-item"><a class="page-link" href="<?= e(pb_fast_page_url($totalPages, $search)) ?>"><?= $totalPages ?></a></li>
+                                <?php endif; ?>
+
+                                <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
+                                    <a class="page-link" href="<?= e(pb_fast_page_url(min($totalPages, $page + 1), $search)) ?>" aria-label="Next">Next</a>
+                                </li>
+                            </ul>
+                        </nav>
+                        <?php endif; ?>
+                    </div>
                 </div>
             </section>
         </main>
@@ -873,16 +996,21 @@ foreach ($rows as $statRow) {
             window.lucide.createIcons();
         }
 
+        let proformaSearchTimer = null;
         document.getElementById('tableSearch')?.addEventListener('input', function() {
-            const value = this.value.toLowerCase().trim();
+            const value = this.value.trim();
+            clearTimeout(proformaSearchTimer);
 
-            document.querySelectorAll('#dataTable tbody tr').forEach(function(row) {
-                row.style.display = row.textContent.toLowerCase().includes(value) ? '' : 'none';
-            });
-
-            document.querySelectorAll('#mobileCards .mobile-card').forEach(function(card) {
-                card.style.display = card.textContent.toLowerCase().includes(value) ? '' : 'none';
-            });
+            proformaSearchTimer = setTimeout(() => {
+                const url = new URL(window.location.href);
+                if (value !== '') {
+                    url.searchParams.set('q', value);
+                } else {
+                    url.searchParams.delete('q');
+                }
+                url.searchParams.delete('page');
+                window.location.href = url.toString();
+            }, 450);
         });
 
         document.querySelectorAll('.js-proforma-whatsapp-link').forEach(function(link) {

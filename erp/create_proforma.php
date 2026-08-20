@@ -1,7 +1,22 @@
 <?php
 
-require_once __DIR__ . '/includes/db.php';
-require_once __DIR__ . '/includes/auth.php';
+/*
+ * This UI file belongs in /erp/create_proforma.php.
+ * Its includes folder is /erp/includes.
+ * Do not replace this file with /erp/api/create_proforma.php.
+ */
+$dbFile = __DIR__ . '/includes/db.php';
+$authFile = __DIR__ . '/includes/auth.php';
+
+if (!is_file($dbFile)) {
+    throw new RuntimeException('Database include not found: ' . $dbFile);
+}
+if (!is_file($authFile)) {
+    throw new RuntimeException('Auth include not found: ' . $authFile);
+}
+
+require_once $dbFile;
+require_once $authFile;
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -11,17 +26,6 @@ $currentPage = 'proforma_bills.php';
 $editId = (int)filter_var($_GET['id'] ?? 0, FILTER_SANITIZE_NUMBER_INT);
 $isEditMode = $editId > 0 && (isset($_GET['mode']) && (string)$_GET['mode'] === 'edit');
 
-/*
- |--------------------------------------------------------------------------
- | Permission Fix for Create Proforma Page
- |--------------------------------------------------------------------------
- | Earlier this page required only can_create for create mode.
- | In your ERP, some users open Create Proforma from Proforma Bills using
- | view/update/edit access, so the page showed "Access Denied".
- |
- | This page is now allowed when the logged-in user has ANY Proforma Bills
- | permission: create, view, update, or edit. Edit mode still prefers edit/update.
- */
 if (!function_exists('cpCheckPagePermission')) {
     function cpCheckPagePermission(mysqli $conn, string $page, array $permissionFunctions): bool
     {
@@ -342,6 +346,217 @@ function cpFetchProformaForEdit(mysqli $conn, int $id): ?array
 }
 
 
+function cpFetchProformaItemsForEdit(mysqli $conn, int $proformaId): array
+{
+    if ($proformaId <= 0 || !cpTableExists($conn, 'proforma_bill_items')) {
+        return [];
+    }
+
+    $rows = [];
+
+    try {
+        $hasProductStock = cpTableExists($conn, 'product_stock');
+        $hasReservations = cpTableExists($conn, 'product_stock_reservations');
+        $hasItemPlannedDates = cpColumnExists($conn, 'proforma_bill_items', 'planned_dates_json');
+
+        $plannedDatesSelect = $hasItemPlannedDates
+            ? "pbi.planned_dates_json"
+            : "NULL AS planned_dates_json";
+
+        $stockSelect = $hasProductStock
+            ? "
+                COALESCE(ps.on_hand_stock, 0) AS on_hand_stock,
+                COALESCE(ps.reserved_stock, 0) AS reserved_stock,
+                (COALESCE(ps.on_hand_stock, 0) - COALESCE(ps.reserved_stock, 0)) AS current_available_stock
+              "
+            : "
+                0 AS on_hand_stock,
+                0 AS reserved_stock,
+                0 AS current_available_stock
+              ";
+
+        $reservationSelect = $hasReservations
+            ? "COALESCE(CASE WHEN psr.status = 'active' THEN psr.quantity ELSE 0 END, 0) AS current_proforma_reserved"
+            : "0 AS current_proforma_reserved";
+
+        $stockJoin = $hasProductStock
+            ? "LEFT JOIN product_stock ps ON ps.product_id = pbi.product_id"
+            : "";
+
+        $reservationJoin = $hasReservations
+            ? "
+                LEFT JOIN product_stock_reservations psr
+                    ON psr.product_id = pbi.product_id
+                   AND psr.reference_type = 'proforma'
+                   AND psr.reference_id = pbi.proforma_bill_id
+              "
+            : "";
+
+        $sql = "
+            SELECT
+                pbi.id,
+                pbi.product_id,
+                pbi.item_name,
+                pbi.description,
+                pbi.qty,
+                pbi.rate,
+                pbi.amount,
+                pbi.printing_type_id,
+                pbi.printing_sub_type_id,
+                pbi.finishing_required,
+                pbi.size_text,
+                pbi.gsm_thickness,
+                pbi.lamination_required,
+                pbi.lamination_type,
+                pbi.printing_side,
+                pbi.screening_type,
+                pbi.printing_price_master_id,
+                pbi.price_slab_text,
+                pbi.plate_charge,
+                pbi.item_printing_charge,
+                pbi.item_package_charge,
+                pbi.item_additional_charge,
+                pbi.is_gst_inclusive,
+                pbi.sort_order,
+                {$plannedDatesSelect},
+                {$stockSelect},
+                {$reservationSelect}
+            FROM proforma_bill_items pbi
+            {$stockJoin}
+            {$reservationJoin}
+            WHERE pbi.proforma_bill_id = ?
+            ORDER BY pbi.sort_order ASC, pbi.id ASC
+        ";
+
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param('i', $proformaId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        while ($row = $res->fetch_assoc()) {
+            $currentAvailable = (float)($row['current_available_stock'] ?? 0);
+            $ownReservation = (float)($row['current_proforma_reserved'] ?? 0);
+
+            /*
+             * While editing, the existing reservation belonging to THIS Proforma
+             * must be temporarily added back. Otherwise the UI would subtract the
+             * same quantity twice when displaying "Available After".
+             */
+            $availableForEdit = $currentAvailable + $ownReservation;
+            $qty = (float)($row['qty'] ?? 0);
+
+            $storedPlannedDates = [];
+            if (!empty($row['planned_dates_json'])) {
+                $decodedPlannedDates = json_decode((string)$row['planned_dates_json'], true);
+                if (is_array($decodedPlannedDates)) {
+                    $storedPlannedDates = $decodedPlannedDates;
+                }
+            }
+
+            $rows[] = [
+                'proforma_item_id' => (int)($row['id'] ?? 0),
+                'product_id' => !empty($row['product_id']) ? (string)(int)$row['product_id'] : '',
+                'product_name' => (string)($row['item_name'] ?? ''),
+                'description' => (string)($row['description'] ?? ''),
+                'qty' => $qty,
+                'rate' => (float)($row['rate'] ?? 0),
+                'amount' => (float)($row['amount'] ?? 0),
+                'printing_type_id' => !empty($row['printing_type_id']) ? (string)(int)$row['printing_type_id'] : '',
+                'printing_sub_type_id' => !empty($row['printing_sub_type_id']) ? (string)(int)$row['printing_sub_type_id'] : '',
+                'finishing_required' => (int)($row['finishing_required'] ?? 0),
+                'size_text' => (string)($row['size_text'] ?? ''),
+                'gsm_thickness' => (string)($row['gsm_thickness'] ?? ''),
+                'lamination_required' => (int)($row['lamination_required'] ?? 0),
+                'lamination_type' => (string)($row['lamination_type'] ?? ''),
+                'printing_side' => (string)($row['printing_side'] ?? ''),
+                'screening_type' => (string)($row['screening_type'] ?? ''),
+                'printing_price_master_id' => !empty($row['printing_price_master_id']) ? (string)(int)$row['printing_price_master_id'] : '',
+                'price_slab_text' => (string)($row['price_slab_text'] ?? ''),
+                'plate_charge' => (float)($row['plate_charge'] ?? 0),
+                'item_printing_charge' => (float)($row['item_printing_charge'] ?? 0),
+                'item_package_charge' => (float)($row['item_package_charge'] ?? 0),
+                'item_additional_charge' => (float)($row['item_additional_charge'] ?? 0),
+                'is_gst_inclusive' => (int)($row['is_gst_inclusive'] ?? 1),
+                'on_hand_stock' => (float)($row['on_hand_stock'] ?? 0),
+                'reserved_stock' => max(0, (float)($row['reserved_stock'] ?? 0) - $ownReservation),
+                'available_stock' => $availableForEdit,
+                'projected_available_stock' => $availableForEdit - $qty,
+                'current_proforma_reserved' => $ownReservation,
+                'planned_dates' => $storedPlannedDates,
+            ];
+        }
+
+        $stmt->close();
+
+        /*
+         * Existing Customized Job Cards have independent job_tracking.
+         * During Edit Proforma, read each Job Card's own planned dates.
+         * This does not modify workflow/status logic.
+         */
+        if (
+            $rows &&
+            cpTableExists($conn, 'job_cards') &&
+            cpColumnExists($conn, 'job_cards', 'proforma_bill_item_id') &&
+            cpTableExists($conn, 'job_tracking')
+        ) {
+            $trackingByItem = [];
+
+            $stmt = $conn->prepare("
+                SELECT
+                    jc.proforma_bill_item_id,
+                    jt.workflow_step_id,
+                    jt.planned_start_date,
+                    jt.planned_completion_date
+                FROM job_cards jc
+                INNER JOIN job_tracking jt ON jt.job_card_id = jc.id
+                WHERE jc.proforma_bill_id = ?
+                  AND jc.proforma_bill_item_id IS NOT NULL
+                ORDER BY jc.id ASC, jt.workflow_step_id ASC
+            ");
+            $stmt->bind_param('i', $proformaId);
+            $stmt->execute();
+            $res = $stmt->get_result();
+
+            while ($trackingRow = $res->fetch_assoc()) {
+                $itemId = (int)($trackingRow['proforma_bill_item_id'] ?? 0);
+                $stepId = (int)($trackingRow['workflow_step_id'] ?? 0);
+
+                if ($itemId <= 0 || $stepId <= 0) {
+                    continue;
+                }
+
+                if (!isset($trackingByItem[$itemId])) {
+                    $trackingByItem[$itemId] = [];
+                }
+
+                $trackingByItem[$itemId][(string)$stepId] = [
+                    'start' => !empty($trackingRow['planned_start_date'])
+                        ? substr((string)$trackingRow['planned_start_date'], 0, 10)
+                        : '',
+                    'completion' => !empty($trackingRow['planned_completion_date'])
+                        ? substr((string)$trackingRow['planned_completion_date'], 0, 10)
+                        : '',
+                ];
+            }
+
+            $stmt->close();
+
+            foreach ($rows as &$editItemRow) {
+                $itemId = (int)($editItemRow['proforma_item_id'] ?? 0);
+                if ($itemId > 0 && !empty($trackingByItem[$itemId])) {
+                    $editItemRow['planned_dates'] = $trackingByItem[$itemId];
+                }
+            }
+            unset($editItemRow);
+        }
+    } catch (Throwable $e) {
+        return [];
+    }
+
+    return $rows;
+}
+
+
 function cpFetchPlannedDatesForEdit(mysqli $conn, int $proformaId): array
 {
     $plannedDates = [];
@@ -427,6 +642,15 @@ if ($isEditMode) {
 }
 
 $plannedDates = ($isEditMode && $editId > 0) ? cpFetchPlannedDatesForEdit($conn, $editId) : [];
+$editItems = ($isEditMode && $editId > 0) ? cpFetchProformaItemsForEdit($conn, $editId) : [];
+
+$editReservationMap = [];
+foreach ($editItems as $editItemRow) {
+    $pid = (string)($editItemRow['product_id'] ?? '');
+    if ($pid !== '') {
+        $editReservationMap[$pid] = (float)($editItemRow['current_proforma_reserved'] ?? 0);
+    }
+}
 
 $editQuotationId = $editData && !empty($editData['quotation_id']) ? (int)$editData['quotation_id'] : 0;
 $quotationWhere = 'pb.id IS NULL';
@@ -448,7 +672,99 @@ if ($defaultProformaStatusId <= 0 && $proformaStatuses) {
     $defaultProformaStatusId = (int)($proformaStatuses[0]['id'] ?? 0);
 }
 $selectedProformaStatusId = ($isEditMode && $editData && !empty($editData['proforma_status_id'])) ? (int)$editData['proforma_status_id'] : $defaultProformaStatusId;
-$products = cpFetchAll($conn, "SELECT id, product_name, default_order_type, default_price FROM products WHERE is_active = 1 ORDER BY product_name ASC");
+/*
+ * Product Master + Stock for Proforma product selector.
+ * Available = On Hand - Reserved.
+ * Stock is informational here: Proforma is still allowed to reserve more than
+ * available stock, so this page does NOT block quantity based on stock.
+ */
+$productRemovedWhere = cpColumnExists($conn, 'products', 'is_removed')
+    ? " AND COALESCE(p.is_removed, 0) = 0"
+    : "";
+
+if (cpTableExists($conn, 'product_stock')) {
+    $products = cpFetchAll($conn, "
+        SELECT
+            p.id,
+            p.product_name,
+            p.default_order_type,
+            p.default_price,
+            COALESCE(ps.on_hand_stock, 0) AS on_hand_stock,
+            COALESCE(ps.reserved_stock, 0) AS reserved_stock,
+            (COALESCE(ps.on_hand_stock, 0) - COALESCE(ps.reserved_stock, 0)) AS available_stock
+        FROM products p
+        LEFT JOIN product_stock ps ON ps.product_id = p.id
+        WHERE p.is_active = 1{$productRemovedWhere}
+        ORDER BY
+            CASE
+                WHEN (COALESCE(ps.on_hand_stock, 0) - COALESCE(ps.reserved_stock, 0)) > 0 THEN 0
+                ELSE 1
+            END ASC,
+            (COALESCE(ps.on_hand_stock, 0) - COALESCE(ps.reserved_stock, 0)) DESC,
+            p.product_name ASC
+    ");
+} else {
+    $products = cpFetchAll($conn, "
+        SELECT
+            p.id,
+            p.product_name,
+            p.default_order_type,
+            p.default_price,
+            0 AS on_hand_stock,
+            0 AS reserved_stock,
+            0 AS available_stock
+        FROM products p
+        WHERE p.is_active = 1{$productRemovedWhere}
+        ORDER BY p.product_name ASC
+    ");
+}
+
+/*
+ * Edit mode must keep every existing Proforma item selectable.
+ * If an old product is inactive/removed/missing from the normal active Product
+ * Master query, append a temporary option for editing only.
+ */
+if ($isEditMode && $editItems) {
+    foreach ($editItems as $editItemRow) {
+        $editPid = (int)($editItemRow['product_id'] ?? 0);
+        $editName = trim((string)($editItemRow['product_name'] ?? ''));
+
+        if ($editPid <= 0 && $editName === '') {
+            continue;
+        }
+
+        $exists = false;
+        foreach ($products as $productRow) {
+            if ($editPid > 0 && (int)($productRow['id'] ?? 0) === $editPid) {
+                $exists = true;
+                break;
+            }
+            if ($editPid <= 0 && $editName !== '' &&
+                strcasecmp(trim((string)($productRow['product_name'] ?? '')), $editName) === 0) {
+                $exists = true;
+                break;
+            }
+        }
+
+        if (!$exists && $editPid > 0) {
+            $products[] = [
+                'id' => $editPid,
+                'product_name' => $editName !== '' ? $editName : ('Product #' . $editPid),
+                'default_order_type' => (string)($editData['order_type'] ?? 'readymade'),
+                'default_price' => (float)($editItemRow['rate'] ?? 0),
+                'on_hand_stock' => (float)($editItemRow['on_hand_stock'] ?? 0),
+                /*
+                 * Store RAW reserved/current-available values in the option.
+                 * JavaScript adds this Proforma's own reservation back in edit mode.
+                 */
+                'reserved_stock' => (float)($editItemRow['reserved_stock'] ?? 0)
+                    + (float)($editItemRow['current_proforma_reserved'] ?? 0),
+                'available_stock' => (float)($editItemRow['available_stock'] ?? 0)
+                    - (float)($editItemRow['current_proforma_reserved'] ?? 0),
+            ];
+        }
+    }
+}
 
 /*
  | Edit Mode Product Fix
@@ -493,6 +809,8 @@ $printingTypeJson = json_encode($printingTypes, JSON_HEX_TAG | JSON_HEX_APOS | J
 $stepsJson = json_encode(['readymade' => $readymadeSteps, 'customized' => $customizedSteps], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $plannedDatesJson = json_encode($plannedDates ?: new stdClass(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+$editItemsJson = json_encode($editItems ?: [], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+$editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 ?>
 <!doctype html>
 <html lang="en">
@@ -645,6 +963,18 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         line-height: 1.45;
     }
 
+    .return-amount-field .input-group-text,
+    .return-amount-field .form-control {
+        border-color: color-mix(in srgb, var(--warning-color, #f59e0b) 55%, var(--border-soft));
+        background: color-mix(in srgb, var(--warning-color, #f59e0b) 8%, var(--card-bg));
+    }
+
+    .return-amount-field .form-control {
+        color: #9a3412;
+        font-size: 18px;
+        font-weight: 900;
+    }
+
     .amount-summary-note {
         margin-top: 10px;
         color: var(--text-muted);
@@ -698,6 +1028,147 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         font-size: 20px;
         font-weight: 950;
         line-height: 1;
+    }
+
+    .product-add-line-wrap {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .product-select2-result {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+    }
+
+    .product-select2-result-name {
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 800;
+    }
+
+    .product-select2-result-stock {
+        flex: 0 0 auto;
+        white-space: nowrap;
+        font-size: 11px;
+        font-weight: 900;
+        color: var(--text-muted);
+        border: 1px solid var(--border-soft);
+        border-radius: 999px;
+        padding: 3px 8px;
+        background: color-mix(in srgb, var(--card-bg) 94%, var(--body-bg));
+    }
+
+    .product-select2-result-stock.negative {
+        color: #b91c1c;
+        border-color: #fca5a5;
+        background: #fee2e2;
+        font-weight: 950;
+    }
+
+    .product-add-line-btn {
+        min-height: 46px;
+        border-radius: 14px;
+        padding: 0 22px;
+        font-weight: 900;
+    }
+
+    .proforma-items-panel {
+        border: 1px solid var(--border-soft);
+        border-radius: 18px;
+        overflow: hidden;
+        background: var(--card-bg);
+    }
+
+    .proforma-items-head {
+        padding: 13px 15px;
+        border-bottom: 1px solid var(--border-soft);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        background: color-mix(in srgb, var(--card-bg) 95%, var(--body-bg));
+    }
+
+    .proforma-items-table-wrap {
+        overflow-x: auto;
+    }
+
+    .proforma-items-table {
+        width: 100%;
+        min-width: 900px;
+        border-collapse: collapse;
+    }
+
+    .proforma-items-table th,
+    .proforma-items-table td {
+        padding: 11px 12px;
+        border-bottom: 1px solid var(--border-soft);
+        vertical-align: middle;
+        font-size: 12px;
+    }
+
+    .proforma-items-table th {
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: .02em;
+        color: var(--text-muted);
+        font-weight: 900;
+        background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg));
+    }
+
+    .proforma-items-table tbody tr:last-child td {
+        border-bottom: 0;
+    }
+
+    .product-stock-badge {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--border-soft);
+        border-radius: 999px;
+        padding: 3px 8px;
+        font-size: 10px;
+        font-weight: 900;
+        color: var(--text-muted);
+        margin-top: 4px;
+    }
+
+    .product-stock-badge.negative {
+        color: #b91c1c;
+        border-color: #fca5a5;
+        background: #fee2e2;
+        font-weight: 950;
+    }
+
+    .proforma-item-actions {
+        display: flex;
+        gap: 6px;
+        justify-content: flex-end;
+    }
+
+    .proforma-item-actions .btn {
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 10px;
+    }
+
+    .proforma-items-empty {
+        padding: 18px;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 12px;
+        font-weight: 800;
     }
 
     .custom-only-field.hide-field,
@@ -1401,19 +1872,26 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                         <div class="product-select-wrap">
                                             <select name="product_id" id="product_id"
                                                 class="form-select select2-autotype product-master-select"
-                                                data-placeholder="Select or type product/card name" data-tags="true"
-                                                required>
-                                                <option value="">Select or type product/card name</option>
+                                                data-placeholder="Search Product Master" data-tags="false">
+                                                <option value="">Search Product Master</option>
                                                 <?php if ($isEditMode && $editProductSelectValue !== '' && !$editProductExistsInProducts): ?>
                                                 <option value="<?= e($editProductSelectValue) ?>"
                                                     data-name="<?= e($editProductSelectName) ?>"
                                                     data-price="<?= e($editData['item_rate'] ?? 0) ?>"
                                                     data-order-type="<?= e($editData['order_type'] ?? 'readymade') ?>"
                                                     selected><?= e($editProductSelectName) ?>
-                                                </option><?php endif; ?><?php foreach ($products as $p): ?><option
-                                                    value="<?= e($p['id']) ?>" data-name="<?= e($p['product_name']) ?>"
+                                                </option><?php endif; ?><?php foreach ($products as $p):
+                                                    $availableStock = (float)($p['available_stock'] ?? 0);
+                                                    $onHandStock = (float)($p['on_hand_stock'] ?? 0);
+                                                    $reservedStock = (float)($p['reserved_stock'] ?? 0);
+                                                    $availableLabel = rtrim(rtrim(number_format($availableStock, 2, '.', ''), '0'), '.');
+                                                ?><option value="<?= e($p['id']) ?>"
+                                                    data-name="<?= e($p['product_name']) ?>"
                                                     data-price="<?= e($p['default_price']) ?>"
                                                     data-order-type="<?= e($p['default_order_type']) ?>"
+                                                    data-available="<?= e($availableStock) ?>"
+                                                    data-on-hand="<?= e($onHandStock) ?>"
+                                                    data-reserved="<?= e($reservedStock) ?>"
                                                     <?= ($isEditMode && $editProductSelectValue !== '' && (string)$editProductSelectValue === (string)$p['id']) ? 'selected' : '' ?>>
                                                     <?= e($p['product_name']) ?>
                                                 </option><?php endforeach; ?>
@@ -1424,52 +1902,47 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                                 aria-label="Clear selected product">&times;</button>
                                         </div>
                                         <input type="hidden" name="product_name" id="product_name" value="">
-                                        <small class="text-muted-custom fw-bold">Select existing product or type a new
-                                            product. New product will be saved to Product Master automatically.</small>
+                                        <input type="hidden" name="items_json" id="items_json" value="[]">
+                                        <div id="selectedProductStockInfo" class="mt-2 small fw-bold text-muted-custom">
+                                            Select a product to view On Hand, Reserved and Available stock.</div>
                                     </div>
 
                                     <div class="col-md-4">
-                                        <label class="form-label fw-bold">Printing Type *</label>
-                                        <select name="printing_type_id" id="printing_type_id" class="form-select"
-                                            required>
-                                            <option value="">Select Printing Type</option>
-                                            <?php foreach ($printingTypes as $pt): ?>
-                                            <option value="<?= e($pt['id']) ?>"
-                                                data-readymade="<?= e($pt['is_for_readymade']) ?>"
-                                                data-customized="<?= e($pt['is_for_customized']) ?>"
-                                                data-role-key="<?= e($pt['role_key']) ?>"><?= e($pt['printing_name']) ?>
-                                            </option>
-                                            <?php endforeach; ?>
-                                        </select>
+                                        <label class="form-label fw-bold">Quantity *</label>
+                                        <input type="number" step="1" min="1" name="qty" id="qty" class="form-control"
+                                            value="1" required>
                                     </div>
-                                    <div class="col-md-4 screen-subtype-field hide-field" id="screenSubTypeWrap">
-                                        <label class="form-label fw-bold" id="printingSubTypeLabel">Screen Print
-                                            Sub-Type</label>
-                                        <select name="printing_sub_type_id" id="printing_sub_type_id"
-                                            class="form-select">
-                                            <option value="">Not Applicable</option>
-                                        </select>
-                                    </div>
-                                    <div class="col-md-4 readymade-field d-flex align-items-end">
-                                        <div class="form-check form-switch mb-2">
-                                            <input class="form-check-input" type="checkbox" name="finishing_required"
-                                                id="finishing_required" value="1">
-                                            <label class="form-check-label fw-bold" for="finishing_required">With
-                                                Finishing</label>
+                                    <div class="col-md-4">
+                                        <label class="form-label fw-bold">Rate / Unit</label>
+                                        <div class="input-group">
+                                            <span class="input-group-text">₹</span>
+                                            <input type="number" step="0.01" min="0" name="rate" id="rate"
+                                                class="form-control" value="0">
+                                            <span class="input-group-text">/ Unit</span>
                                         </div>
+                                        <small class="text-muted-custom fw-bold">Editable rate for this selected
+                                            product.</small>
                                     </div>
-
                                     <div class="col-md-4">
-                                        <label class="form-label fw-bold">Delivery Date *</label>
-                                        <input type="date" name="delivery_date" id="delivery_date" class="form-control">
+                                        <label class="form-label fw-bold">Product Total</label>
+                                        <div class="input-group">
+                                            <span class="input-group-text">₹</span>
+                                            <input type="text" id="product_total_display" class="form-control fw-bold"
+                                                value="0.00" readonly>
+                                        </div>
+                                        <small class="text-muted-custom fw-bold">Quantity × Rate for this
+                                            product.</small>
                                     </div>
 
-                                    <div class="col-12">
+                                    <div class="col-12 customized-field hide-field mt-2">
                                         <div class="pricing-requirement-title">
-                                            <span><i class="fa fa-sliders-h me-2"></i>Requirement Details & Predefined
-                                                Printing Charge</span>
-                                            <small class="text-muted-custom fw-bold">Printing charge is auto-filled from
-                                                predefined quantity slabs and remains editable.</small>
+                                            <span><i data-lucide="settings" class="me-2"></i>Customized Product
+                                                Production
+                                                Details</span>
+                                            <small class="text-muted-custom fw-bold">
+                                                These details belong only to this product. Each added Customized product
+                                                creates its own Job Card and its own workflow/tracking.
+                                            </small>
                                         </div>
                                     </div>
 
@@ -1519,25 +1992,156 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                     </div>
 
 
-                                    <div class="col-md-3">
-                                        <label class="form-label fw-bold">Quantity *</label>
-                                        <input type="number" step="1" min="1" name="qty" id="qty" class="form-control"
-                                            value="1" required>
+                                    <div class="col-12 customized-field hide-field">
+                                        <label class="form-label fw-bold">Product Requirement / Description</label>
+                                        <textarea id="custom_item_description" class="form-control" rows="2"
+                                            placeholder="Enter this product's customized production requirement"></textarea>
                                     </div>
-                                    <div class="col-md-3">
-                                        <label class="form-label fw-bold">Item Rate</label>
+
+                                    <div class="col-md-3 customized-field hide-field">
+                                        <label class="form-label fw-bold">Plate / Additional Charge</label>
+                                        <input type="number" step="0.01" min="0" id="custom_item_plate_charge"
+                                            class="form-control" value="0" placeholder="This product only">
+                                    </div>
+                                    <div class="col-md-3 customized-field hide-field">
+                                        <label class="form-label fw-bold">Printing Charge</label>
+                                        <input type="number" step="0.01" min="0" id="custom_item_printing_charge"
+                                            class="form-control" value="0" placeholder="This product only">
+                                    </div>
+                                    <div class="col-md-3 customized-field hide-field">
+                                        <label class="form-label fw-bold">Package Charge</label>
+                                        <input type="number" step="0.01" min="0" id="custom_item_package_charge"
+                                            class="form-control" value="0" placeholder="This product only">
+                                    </div>
+                                    <div class="col-md-3 customized-field hide-field">
+                                        <label class="form-label fw-bold">Customized Line Total</label>
                                         <div class="input-group">
                                             <span class="input-group-text">₹</span>
-                                            <input type="number" step="0.01" min="0" name="rate" id="rate"
-                                                class="form-control" value="0">
-                                            <span class="input-group-text">/ Unit</span>
+                                            <input type="text" id="custom_item_line_total_display"
+                                                class="form-control fw-bold" value="0.00" readonly>
                                         </div>
-                                        <small class="text-muted-custom fw-bold">Optional. If entered, item amount =
-                                            Quantity × Rate. Printing slab fills Printing Charge separately.</small>
+                                    </div>
+
+                                    <div class="col-12 customized-field hide-field">
+                                        <div class="soft-panel">
+                                            <div
+                                                class="d-flex justify-content-between align-items-center gap-2 mb-2 flex-wrap">
+                                                <div>
+                                                    <strong>Tracking Planned Dates for This Product</strong>
+                                                    <div class="small text-muted-custom fw-bold">
+                                                        These dates belong only to this product's separate Job Card.
+                                                    </div>
+                                                </div>
+                                                <span class="badge text-bg-light">Independent Tracking</span>
+                                            </div>
+                                            <div id="customWorkflowSteps" class="workflow-grid"></div>
+                                        </div>
+                                    </div>
+
+                                    <div class="col-12 product-add-line-wrap">
+                                        <button type="button" id="addProductBtn"
+                                            class="btn btn-primary product-add-line-btn">
+                                            <i data-lucide="plus" class="me-1"></i> Add Product
+                                        </button>
                                     </div>
 
                                     <div class="col-12">
-                                        <label class="form-label fw-bold">Item Description</label>
+                                        <div class="proforma-items-panel">
+                                            <div class="proforma-items-head">
+                                                <div>
+                                                    <strong>Added Products</strong>
+                                                    <div class="small text-muted-custom fw-bold">Add one product, then
+                                                        select the next product and repeat.</div>
+                                                </div>
+                                                <span class="badge text-bg-light" id="proformaItemsCount">0
+                                                    Products</span>
+                                            </div>
+                                            <div id="proformaItemsEmpty" class="proforma-items-empty">No products added
+                                                yet.</div>
+                                            <div id="proformaItemsTableWrap" class="proforma-items-table-wrap d-none">
+                                                <table class="proforma-items-table">
+                                                    <thead>
+                                                        <tr>
+                                                            <th>#</th>
+                                                            <th>Product</th>
+                                                            <th class="text-end">Qty</th>
+                                                            <th class="text-end">Rate / Unit</th>
+                                                            <th class="text-end">Product Total</th>
+                                                            <th class="text-end customized-column hide-field">Item
+                                                                Charges</th>
+                                                            <th class="text-end customized-column hide-field">Line Total
+                                                            </th>
+                                                            <th class="customized-column hide-field">Production /
+                                                                Workflow</th>
+                                                            <th class="text-end">Action</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody id="proformaItemsBody"></tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </div>
+
+
+                                    <div class="col-12 mt-2 readymade-field">
+                                        <div class="pricing-requirement-title">
+                                            <span><i data-lucide="printer" class="me-2"></i>Common Printing
+                                                Details</span>
+                                            <small class="text-muted-custom fw-bold">
+                                                Applies to all Readymade products added in this Proforma.
+                                            </small>
+                                        </div>
+                                    </div>
+
+                                    <div class="col-md-4 readymade-field">
+                                        <label class="form-label fw-bold">Printing Type <span
+                                                class="text-danger">*</span></label>
+                                        <select name="printing_type_id" id="printing_type_id" class="form-select">
+                                            <option value="">Select Printing Type</option>
+                                            <?php foreach ($printingTypes as $pt): ?>
+                                            <option value="<?= e($pt['id']) ?>"
+                                                data-readymade="<?= e($pt['is_for_readymade']) ?>"
+                                                data-customized="<?= e($pt['is_for_customized']) ?>"
+                                                data-role-key="<?= e($pt['role_key']) ?>"><?= e($pt['printing_name']) ?>
+                                            </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4 screen-subtype-field hide-field" id="screenSubTypeWrap">
+                                        <label class="form-label fw-bold" id="printingSubTypeLabel">Screen Print
+                                            Sub-Type</label>
+                                        <select name="printing_sub_type_id" id="printing_sub_type_id"
+                                            class="form-select">
+                                            <option value="">Not Applicable</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4 readymade-field d-flex align-items-end">
+                                        <div class="form-check form-switch mb-2">
+                                            <input class="form-check-input" type="checkbox" name="finishing_required"
+                                                id="finishing_required" value="1">
+                                            <label class="form-check-label fw-bold" for="finishing_required">With
+                                                Finishing</label>
+                                        </div>
+                                    </div>
+
+
+                                    <div class="col-md-4">
+                                        <label class="form-label fw-bold">Delivery Date *</label>
+                                        <input type="date" name="delivery_date" id="delivery_date" class="form-control">
+                                    </div>
+
+                                    <div class="col-12 readymade-field">
+                                        <div class="pricing-requirement-title">
+                                            <span><i data-lucide="sliders-horizontal" class="me-2"></i>Requirement
+                                                Details & Predefined
+                                                Printing Charge</span>
+                                            <small class="text-muted-custom fw-bold">Printing charge is auto-filled from
+                                                predefined quantity slabs and remains editable.</small>
+                                        </div>
+                                    </div>
+
+                                    <div class="col-12 readymade-field">
+                                        <label class="form-label fw-bold">Common Item Description</label>
                                         <textarea name="description" id="description" class="form-control"
                                             rows="2"></textarea>
                                     </div>
@@ -1560,7 +2164,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                     <?php endif; ?>
 
 
-                                    <div class="col-12">
+                                    <div class="col-12 readymade-field">
                                         <div id="pricingSummaryCard" class="pricing-summary-card no-price">
                                             <div class="pricing-summary-head">
                                                 <strong>Pricing Summary</strong>
@@ -1605,6 +2209,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
 
                         <div class="col-12 mt-3">
                             <div class="section-title">4. Amount / Payment</div>
+                            <div id="chargeModeHelp" class="small text-muted-custom fw-bold mb-2">
+                                Readymade charges are common once for the full Proforma.
+                            </div>
                             <div class="col-12">
                                 <div class="charge-input-row">
                                     <div class="charge-input-card">
@@ -1674,8 +2281,12 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                         <input type="hidden" name="payment_reference" id="payment_reference" value="">
 
                         <div class="col-12">
-                            <label class="form-label fw-bold">Split Payment Method</label>
-                            <div class="payment-mode-checks">
+                            <label class="form-label fw-bold">Advance Payment Method <span
+                                    class="text-danger">*</span></label>
+                            <div class="small text-muted-custom fw-bold mb-2">
+                                Advance payment is required to create a new Proforma Bill. Select Cash, UPI, or both.
+                            </div>
+                            <div class="payment-mode-checks" id="advancePaymentMethodSection">
                                 <label class="payment-check-card" for="pay_cash" data-payment-card="cash">
                                     <input type="checkbox" id="pay_cash" class="payment-mode-check" data-mode="cash">
                                     <strong>Cash</strong>
@@ -1715,6 +2326,16 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                 placeholder="Enter UPI transaction ID">
                         </div>
 
+                        <div class="col-md-4 return-amount-field">
+                            <label class="form-label fw-bold">Return Amount</label>
+                            <div class="input-group">
+                                <span class="input-group-text">₹</span>
+                                <input type="text" id="return_amount_display" class="form-control" value="0.00" readonly
+                                    aria-label="Amount to return to customer">
+                            </div>
+                            <small class="text-muted-custom fw-bold">Give this amount back to the customer.</small>
+                        </div>
+
                         <div class="col-12">
                             <div id="returnPaymentNotice" class="return-payment-notice d-none" role="status"
                                 aria-live="polite"></div>
@@ -1731,7 +2352,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                     value="<?= $isEditMode ? '0' : '1' ?>"><input class="form-check-input"
                                     type="checkbox" id="auto_create_job_card" value="1"
                                     <?= $isEditMode ? 'disabled' : 'checked disabled' ?>><label
-                                    class="form-check-label fw-bold" for="auto_create_job_card">Create Job Card
+                                    id="autoCreateJobCardLabel" class="form-check-label fw-bold"
+                                    for="auto_create_job_card">Create Job Card
                                     Automatically</label></div>
                         </div>
                         <div class="col-md-4">
@@ -1740,10 +2362,12 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                                     <?= $isEditMode ? 'disabled' : 'checked' ?>><label class="form-check-label fw-bold"
                                     for="create_tracking_link">Create Customer Tracking Link</label></div>
                         </div>
-                        <div class="col-12">
+                        <div class="col-12 readymade-field">
                             <div class="soft-panel">
-                                <div class="d-flex justify-content-between align-items-center mb-2"><strong>Planned
-                                        Dates for Tracking Steps</strong><small class="text-muted-custom">Optional,
+                                <div class="d-flex justify-content-between align-items-center mb-2"><strong>Common
+                                        Planned
+                                        Dates for Readymade Job Card</strong><small id="trackingDatesHelp"
+                                        class="text-muted-custom">Optional,
                                         Sales can fill now or later</small></div>
                                 <div id="workflowSteps" class="workflow-grid"></div>
                             </div>
@@ -1926,6 +2550,14 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     const workflowData = <?= $stepsJson ?: '{"readymade":[],"customized":[]}' ?>;
     const plannedStepData = <?= $plannedDatesJson ?: '{}' ?>;
     const editData = <?= $editJson ?: 'null' ?>;
+    const editItems = <?= $editItemsJson ?: '[]' ?>;
+    const editReservationByProduct = <?= $editReservationJson ?: '{}' ?>;
+
+    function refreshProformaIcons() {
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+            window.lucide.createIcons();
+        }
+    }
 
     function rupee(value) {
         return '₹' + Number(value || 0).toLocaleString('en-IN', {
@@ -2081,16 +2713,35 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             width: '100%',
             allowClear: true,
             closeOnSelect: true,
-            tags: true,
-            placeholder: $product.data('placeholder') || 'Select or type product/card name',
-            createTag: function(params) {
-                const term = $.trim(params.term);
-                if (term === '') return null;
-                return {
-                    id: term,
-                    text: term,
-                    newTag: true
-                };
+            tags: false,
+            placeholder: $product.data('placeholder') || 'Search Product Master',
+            templateResult: function(data) {
+                if (!data.id) return data.text;
+
+                const option = data.element;
+                const productName = String(option?.dataset?.name || data.text || '').trim();
+                const rawAvailable = parseFloat(option?.dataset?.available || 0) || 0;
+                const ownReservation = isEditPage ?
+                    (parseFloat(editReservationByProduct[String(data.id)] || 0) || 0) :
+                    0;
+                const available = rawAvailable + ownReservation;
+
+                const $row = $('<div class="product-select2-result"></div>');
+                $('<span class="product-select2-result-name"></span>').text(productName).appendTo($row);
+
+                const $stock = $('<span class="product-select2-result-stock"></span>')
+                    .text('Available: ' + available.toLocaleString('en-IN', {
+                        maximumFractionDigits: 2
+                    }))
+                    .appendTo($row);
+
+                if (available < 0) $stock.addClass('negative');
+                return $row;
+            },
+            templateSelection: function(data) {
+                if (!data.id) return data.text;
+                const option = data.element;
+                return String(option?.dataset?.name || data.text || '').trim();
             }
         });
     }
@@ -2104,18 +2755,73 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     function calculate() {
         const qty = parseFloat(getValue('qty')) || 0;
         const rate = parseFloat(getValue('rate')) || 0;
+        const productTotal = Math.max(0, qty * rate);
+        const productTotalDisplay = document.getElementById('product_total_display');
+        if (productTotalDisplay) {
+            productTotalDisplay.value = productTotal.toLocaleString('en-IN', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+        }
         const discount = parseFloat(getValue('discount_amount')) || 0;
-        const extraCardCharge = parseFloat(getValue('extra_card_charge')) || 0;
-        const packingCharge = parseFloat(getValue('packing_charge')) || 0;
-        const printingCharge = parseFloat(getValue('printing_charge')) || 0;
+        const orderType = getValue('order_type') || 'readymade';
+        const isCustomizedOrder = orderType === 'customized';
+        let extraCardCharge = parseFloat(getValue('extra_card_charge')) || 0;
+        let packingCharge = parseFloat(getValue('packing_charge')) || 0;
+        let printingCharge = parseFloat(getValue('printing_charge')) || 0;
         const gstPercent = Math.max(0, parseFloat(getValue('gst_percent')) || 0);
         const cashChecked = document.getElementById('pay_cash')?.checked === true;
         const upiChecked = document.getElementById('pay_upi')?.checked === true;
         const cashAmount = cashChecked ? (parseFloat(getValue('cash_amount')) || 0) : 0;
         const upiAmount = upiChecked ? (parseFloat(getValue('upi_amount')) || 0) : 0;
 
-        const sub = Math.max(0, qty * rate);
-        const chargeTotal = Math.max(0, extraCardCharge + packingCharge + printingCharge);
+        const currentProductAmount = Math.max(0, qty * rate);
+        const hasAddedProducts = (typeof proformaItems !== 'undefined' && Array.isArray(proformaItems) && proformaItems
+            .length > 0);
+        const addedProductsAmount = hasAddedProducts ?
+            proformaItems.reduce((sum, item) => sum + (parseFloat(item.amount || 0) || 0), 0) :
+            0;
+
+        const sub = Math.max(0, hasAddedProducts ? addedProductsAmount : currentProductAmount);
+
+        let chargeTotal = 0;
+
+        if (isCustomizedOrder) {
+            if (hasAddedProducts) {
+                extraCardCharge = proformaItems.reduce((sum, item) =>
+                    sum + (parseFloat(item.plate_charge || 0) || 0) +
+                    (parseFloat(item.item_additional_charge || 0) || 0), 0);
+                printingCharge = proformaItems.reduce((sum, item) =>
+                    sum + (parseFloat(item.item_printing_charge || 0) || 0), 0);
+                packingCharge = proformaItems.reduce((sum, item) =>
+                    sum + (parseFloat(item.item_package_charge || 0) || 0), 0);
+            } else {
+                extraCardCharge = parseFloat(getValue('custom_item_plate_charge')) || 0;
+                printingCharge = parseFloat(getValue('custom_item_printing_charge')) || 0;
+                packingCharge = parseFloat(getValue('custom_item_package_charge')) || 0;
+            }
+
+            setValue('extra_card_charge', extraCardCharge.toFixed(2));
+            setValue('printing_charge', printingCharge.toFixed(2));
+            setValue('packing_charge', packingCharge.toFixed(2));
+
+            chargeTotal = Math.max(0, extraCardCharge + packingCharge + printingCharge);
+        } else {
+            // Readymade common charges apply exactly once for the complete Proforma.
+            chargeTotal = Math.max(0, extraCardCharge + packingCharge + printingCharge);
+        }
+
+        const customLineTotalDisplay = document.getElementById('custom_item_line_total_display');
+        if (customLineTotalDisplay) {
+            const currentCustomCharges =
+                (parseFloat(getValue('custom_item_plate_charge')) || 0) +
+                (parseFloat(getValue('custom_item_printing_charge')) || 0) +
+                (parseFloat(getValue('custom_item_package_charge')) || 0);
+            customLineTotalDisplay.value = (currentProductAmount + currentCustomCharges).toLocaleString('en-IN', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            });
+        }
         const final = Math.round(Math.max(0, sub - discount + chargeTotal) * 100) / 100;
         const taxable = gstPercent > 0 ? (final / (1 + (gstPercent / 100))) : final;
         const gstAmount = Math.max(0, final - taxable);
@@ -2163,6 +2869,11 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             rupee(advance));
         document.getElementById('returnAmountText') && (document.getElementById('returnAmountText').textContent =
             rupee(returnAmount));
+        const returnAmountDisplay = document.getElementById('return_amount_display');
+        if (returnAmountDisplay) returnAmountDisplay.value = returnAmount.toLocaleString('en-IN', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
         document.getElementById('finalAmountText').textContent = rupee(final);
         document.getElementById('balanceAmountText').textContent = rupee(balance);
 
@@ -2262,16 +2973,49 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             'readymade'));
         document.querySelectorAll('.customized-field').forEach(el => el.classList.toggle('hide-field', !isCustomized));
         document.querySelectorAll('.custom-only-field').forEach(el => el.classList.toggle('hide-field', !isCustomized));
+        document.querySelectorAll('.customized-column').forEach(el => el.classList.toggle('hide-field', !isCustomized));
         document.getElementById('delivery_date').required = true;
-        ['size_text', 'gsm_thickness', 'printing_side', 'screening_type'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.required = isCustomized;
-        });
+        syncCurrentProductRequiredState();
         updatePrintingTypeOptions();
         applyCustomizedDefaults(forceDefaults);
         updateScreenSubTypeVisibility();
         toggleLamination();
+
+        ['extra_card_charge', 'packing_charge', 'printing_charge'].forEach(id => {
+            const field = document.getElementById(id);
+            if (field) {
+                field.readOnly = isCustomized;
+                field.title = isCustomized ?
+                    'Automatically calculated from all Customized product rows.' :
+                    '';
+            }
+        });
+
+        const chargeHelp = document.getElementById('chargeModeHelp');
+        if (chargeHelp) {
+            chargeHelp.textContent = isCustomized ?
+                'Customized charges are added product-wise. These values are automatic totals from all added Customized products.' :
+                'Readymade charges are common once for the full Proforma.';
+        }
+
+        const autoLabel = document.getElementById('autoCreateJobCardLabel');
+        if (autoLabel) {
+            autoLabel.textContent = isCustomized ?
+                'Create Separate Job Card for Every Customized Product Automatically' :
+                'Create Job Card Automatically';
+        }
+
+        const trackingHelp = document.getElementById('trackingDatesHelp');
+        if (trackingHelp) {
+            trackingHelp.textContent = 'Optional. These dates belong to the single Readymade Job Card.';
+        }
+
+        if (isCustomized) {
+            renderCustomizedProductWorkflow(null, true);
+        }
+
         renderWorkflowSteps();
+        renderProformaItems();
         calculate();
     }
 
@@ -2350,6 +3094,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             setValue('lamination_type', 'none');
             refreshSelect('lamination_type');
         }
+        syncCurrentProductRequiredState();
         syncProductNameFromMaster();
         schedulePriceLookup();
     }
@@ -2419,6 +3164,100 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             if (!input.value) input.value = today;
         });
         syncFinalTrackingDate(false);
+    }
+
+    function collectPlannedDatesFromBox(boxId, stepAttribute = 'plannedStepId') {
+        const out = {};
+        const box = document.getElementById(boxId);
+        if (!box) return out;
+
+        box.querySelectorAll('[data-planned-kind]').forEach(input => {
+            const stepId = String(input.dataset[stepAttribute] || '');
+            const kind = String(input.dataset.plannedKind || '');
+
+            if (!stepId || !kind) return;
+            if (!out[stepId]) out[stepId] = {};
+
+            out[stepId][kind] = normalizeDateValue(input.value || '');
+        });
+
+        return out;
+    }
+
+    function renderCustomizedProductWorkflow(savedDates = null, preserveCurrent = true) {
+        const box = document.getElementById('customWorkflowSteps');
+        if (!box) return;
+
+        let values = {};
+
+        if (preserveCurrent) {
+            values = collectPlannedDatesFromBox(
+                'customWorkflowSteps',
+                'customPlannedStepId'
+            );
+        }
+
+        if (savedDates && typeof savedDates === 'object') {
+            values = savedDates;
+        }
+
+        box.innerHTML = '';
+
+        (workflowData.customized || []).forEach(step => {
+            const stepId = String(step.id || '');
+            const saved = values[stepId] || {};
+
+            const startValue =
+                normalizeDateValue(saved.start || saved.planned_start_date || '') ||
+                defaultPlannedDateForStep(step, 'start');
+
+            const completionValue =
+                normalizeDateValue(saved.completion || saved.planned_completion_date || '') ||
+                defaultPlannedDateForStep(step, 'completion');
+
+            const div = document.createElement('div');
+            div.className = 'workflow-step';
+
+            const title = document.createElement('strong');
+            title.textContent = (step.sort_order || '') + '. ' + (step.step_name || 'Step');
+            div.appendChild(title);
+
+            const row = document.createElement('div');
+            row.className = 'workflow-date-grid';
+
+            const startCol = document.createElement('div');
+            startCol.className = 'workflow-date-field';
+            startCol.innerHTML = '<small>Start</small>';
+
+            const startInput = document.createElement('input');
+            startInput.type = 'date';
+            startInput.className = 'form-control';
+            startInput.value = startValue;
+            startInput.dataset.customPlannedStepId = stepId;
+            startInput.dataset.plannedKind = 'start';
+            startInput.dataset.plannedStepKey = String(step.step_key || '').toLowerCase();
+            if (isFinalReviewStep(step)) startInput.dataset.plannedFinal = '1';
+            startCol.appendChild(startInput);
+
+            const completionCol = document.createElement('div');
+            completionCol.className = 'workflow-date-field';
+            completionCol.innerHTML = '<small>Complete</small>';
+
+            const completionInput = document.createElement('input');
+            completionInput.type = 'date';
+            completionInput.className = 'form-control';
+            completionInput.value = completionValue;
+            completionInput.dataset.customPlannedStepId = stepId;
+            completionInput.dataset.plannedKind = 'completion';
+            completionInput.dataset.plannedStepKey = String(step.step_key || '').toLowerCase();
+            if (isFinalReviewStep(step)) completionInput.dataset.plannedFinal = '1';
+            completionCol.appendChild(completionInput);
+
+            row.appendChild(startCol);
+            row.appendChild(completionCol);
+            div.appendChild(row);
+            box.appendChild(div);
+        });
     }
 
     function renderWorkflowSteps() {
@@ -2514,12 +3353,24 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         setValue('venue', editData.venue || '');
         setValue('function_date', editData.function_date || '');
         setValue('function_time', editData.function_time || '');
-        // In older proforma rows product_id may be empty; keep saved item_name selectable for edit.
-        setValue('product_id', editData.item_product_id || editData.item_name || '');
-        setValue('product_name', editData.item_name || '');
+        /*
+         * Existing items are loaded into the Added Products table.
+         * Keep the current Product entry blank so Update Proforma does not
+         * accidentally duplicate the first saved item.
+         */
+        if (Array.isArray(editItems) && editItems.length) {
+            setValue('product_id', '');
+            setValue('product_name', '');
+            setValue('qty', '1');
+            setValue('rate', '0');
+        } else {
+            // Backward-compatible fallback for very old single-item records.
+            setValue('product_id', editData.item_product_id || editData.item_name || '');
+            setValue('product_name', editData.item_name || '');
+            setValue('qty', editData.item_qty || editData.total_qty || '');
+            setValue('rate', editData.item_rate || '');
+        }
         setValue('description', editData.item_description || '');
-        setValue('qty', editData.item_qty || editData.total_qty || '');
-        setValue('rate', editData.item_rate || '');
         setValue('discount_amount', editData.discount_amount || 0);
         setValue('extra_card_charge', editData.card_extra_charge || 0);
         setValue('packing_charge', editData.packing_charge || 0);
@@ -2604,6 +3455,12 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         setValue('pricing_additional_charge', '0');
         setValue('pricing_is_gst_inclusive', '1');
 
+        if ((getValue('order_type') || 'readymade') === 'customized') {
+            setValue('custom_item_plate_charge', '0');
+            setValue('custom_item_printing_charge', '0');
+            setValue('custom_item_package_charge', '0');
+        }
+
         const card = document.getElementById('pricingSummaryCard');
         const badge = document.getElementById('priceStatusBadge');
         const matched = document.getElementById('priceMatchedBox');
@@ -2620,21 +3477,34 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     }
 
     function syncPricingHiddenFromEditableFields() {
-        // Store the actual edited values with the item for audit.
-        setValue('pricing_plate_charge', (parseFloat(getValue('extra_card_charge')) || 0).toFixed(2));
-        setValue('pricing_printing_charge', (parseFloat(getValue('printing_charge')) || 0).toFixed(2));
-        setValue('pricing_package_charge', (parseFloat(getValue('packing_charge')) || 0).toFixed(2));
+        // Store the actual edited values with the current item for audit.
+        const customized = (getValue('order_type') || 'readymade') === 'customized';
+
+        setValue('pricing_plate_charge', (
+            parseFloat(getValue(customized ? 'custom_item_plate_charge' : 'extra_card_charge')) || 0
+        ).toFixed(2));
+        setValue('pricing_printing_charge', (
+            parseFloat(getValue(customized ? 'custom_item_printing_charge' : 'printing_charge')) || 0
+        ).toFixed(2));
+        setValue('pricing_package_charge', (
+            parseFloat(getValue(customized ? 'custom_item_package_charge' : 'packing_charge')) || 0
+        ).toFixed(2));
         setValue('pricing_additional_charge', '0.00');
     }
 
     function updatePricingSummaryValues(amounts = null) {
         syncPricingHiddenFromEditableFields();
-        const rate = parseFloat(getValue('rate')) || 0;
-        const qty = parseFloat(getValue('qty')) || 0;
+        const currentRate = parseFloat(getValue('rate')) || 0;
+        const hasAddedProducts = Array.isArray(proformaItems) && proformaItems.length > 0;
+        const qty = hasAddedProducts ?
+            proformaItems.reduce((sum, item) => sum + (parseFloat(item.qty || 0) || 0), 0) :
+            (parseFloat(getValue('qty')) || 0);
         const plate = parseFloat(getValue('extra_card_charge')) || 0;
         const printing = parseFloat(getValue('printing_charge')) || 0;
         const packing = parseFloat(getValue('packing_charge')) || 0;
-        const itemAmount = qty * rate;
+        const itemAmount = hasAddedProducts ?
+            proformaItems.reduce((sum, item) => sum + (parseFloat(item.amount || 0) || 0), 0) :
+            qty * currentRate;
         const final = amounts && typeof amounts.final === 'number' ?
             amounts.final :
             (itemAmount + plate + printing + packing - (parseFloat(getValue('discount_amount')) || 0));
@@ -2642,7 +3512,7 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             const el = document.getElementById(id);
             if (el) el.textContent = text;
         };
-        setText('priceRateText', rupee(rate));
+        setText('priceRateText', hasAddedProducts && proformaItems.length > 1 ? 'Multiple Rates' : rupee(currentRate));
         setText('priceQtyText', (qty || 0).toLocaleString('en-IN') + ' Nos');
         setText('pricePlateText', rupee(plate));
         setText('pricePrintingText', rupee(printing));
@@ -2677,12 +3547,20 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             setValue('rate', (masterRate > 0 ? masterRate : ratePerCard).toFixed(2));
         }
 
-        if (autoTarget === 'printing_charge' || autoTarget === 'both' || autoTarget === '') {
-            setValue('printing_charge', printing.toFixed(2));
+        const customizedPricing = (getValue('order_type') || 'readymade') === 'customized';
+
+        if (customizedPricing) {
+            setValue('custom_item_printing_charge', printing.toFixed(2));
+            setValue('custom_item_plate_charge', (plate + additional).toFixed(2));
+            setValue('custom_item_package_charge', packing.toFixed(2));
+        } else {
+            if (autoTarget === 'printing_charge' || autoTarget === 'both' || autoTarget === '') {
+                setValue('printing_charge', printing.toFixed(2));
+            }
+            setValue('extra_card_charge', (plate + additional).toFixed(2));
+            setValue('packing_charge', packing.toFixed(2));
         }
 
-        setValue('extra_card_charge', (plate + additional).toFixed(2));
-        setValue('packing_charge', packing.toFixed(2));
         syncPricingHiddenFromEditableFields();
 
         if (row.gst_percent !== undefined && row.gst_percent !== null) {
@@ -2713,9 +3591,26 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     function currentPricingPayload() {
         const isCustomized = (getValue('order_type') || 'readymade') === 'customized';
         const laminationRequired = isCustomized && document.getElementById('lamination_required')?.checked === true;
+
+        let productId = getValue('product_id');
+        let productName = getValue('product_name');
+        let qty = getValue('qty') || '0';
+
+        if (!isCustomized && Array.isArray(proformaItems) && proformaItems.length > 0) {
+            qty = String(proformaItems.reduce((sum, item) => sum + (parseFloat(item.qty || 0) || 0), 0));
+
+            if (proformaItems.length === 1) {
+                productId = proformaItems[0].product_id || '';
+                productName = proformaItems[0].product_name || '';
+            } else {
+                productId = '';
+                productName = '';
+            }
+        }
+
         return {
-            product_id: getValue('product_id'),
-            product_name: getValue('product_name'),
+            product_id: productId,
+            product_name: productName,
             printing_type_id: getValue('printing_type_id'),
             printing_sub_type_id: getValue('printing_sub_type_id'),
             size_text: getValue('size_text'),
@@ -2723,20 +3618,35 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
             printing_side: getValue('printing_side'),
             lamination_type: laminationRequired ? (getValue('lamination_type') || 'none') : 'none',
             print_type: 'first_print',
-            qty: getValue('qty') || '0'
+            qty: qty
         };
     }
 
     function canLookupPricing(payload) {
         const qty = parseFloat(payload.qty || 0) || 0;
-        return qty > 0 && (String(payload.product_id || '').trim() !== '' || String(payload.product_name || '')
-            .trim() !== '') && String(payload.printing_type_id || '').trim() !== '';
+
+        if ((getValue('order_type') || 'readymade') === 'readymade' &&
+            Array.isArray(proformaItems) && proformaItems.length > 1) {
+            return false;
+        }
+
+        return qty > 0 &&
+            (String(payload.product_id || '').trim() !== '' || String(payload.product_name || '').trim() !== '') &&
+            String(payload.printing_type_id || '').trim() !== '';
     }
 
     function fetchPricing() {
         const payload = currentPricingPayload();
         if (!canLookupPricing(payload)) {
-            clearPricingSelection('Select product, printing type and quantity to fetch automatic pricing.');
+            if ((getValue('order_type') || 'readymade') === 'readymade' &&
+                Array.isArray(proformaItems) && proformaItems.length > 1 &&
+                String(getValue('printing_type_id') || '').trim() !== '') {
+                clearPricingSelection(
+                    'Multiple Readymade products use one common Printing Type. Product-specific slab pricing is not auto-applied; enter the common Printing Charge manually.'
+                );
+            } else {
+                clearPricingSelection('Select product, printing type and quantity to fetch automatic pricing.');
+            }
             return;
         }
 
@@ -2807,6 +3717,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         opt.dataset.name = name || id;
         opt.dataset.orderType = product.default_order_type || getValue('order_type') || 'readymade';
         opt.dataset.price = product.default_price || '0';
+        opt.dataset.onHand = product.on_hand_stock || '0';
+        opt.dataset.reserved = product.reserved_stock || '0';
+        opt.dataset.available = product.available_stock || '0';
         select.value = id;
         refreshSelect('product_id');
         setValue('product_name', name || id);
@@ -2867,17 +3780,518 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         }
     }
 
+    function updateSelectedProductStockInfo() {
+        const info = document.getElementById('selectedProductStockInfo');
+        const select = document.getElementById('product_id');
+        const opt = select?.selectedOptions[0];
+
+        if (!info) return;
+
+        if (!select?.value || !opt) {
+            info.textContent = 'Select a product to view On Hand, Reserved and Available stock.';
+            return;
+        }
+
+        const stock = currentSelectedStock();
+        const onHand = stock.on_hand_stock;
+        const reserved = stock.reserved_stock;
+        const available = stock.available_stock;
+        const fmt = value => Number(value || 0).toLocaleString('en-IN', {
+            maximumFractionDigits: 2
+        });
+
+        info.textContent = 'On Hand: ' + fmt(onHand) + ' | Reserved: ' + fmt(reserved) + ' | Available: ' + fmt(
+            available);
+        info.classList.toggle('text-danger', available < 0);
+    }
+
+
+    let proformaItems = Array.isArray(editItems) ?
+        editItems.map(item => ({
+            proforma_item_id: parseInt(item.proforma_item_id || 0, 10) || 0,
+            product_id: String(item.product_id || ''),
+            product_name: String(item.product_name || '').trim(),
+            description: String(item.description || ''),
+            qty: parseFloat(item.qty || 0) || 0,
+            rate: parseFloat(item.rate || 0) || 0,
+            amount: parseFloat(item.amount || 0) || 0,
+            printing_type_id: String(item.printing_type_id || ''),
+            printing_sub_type_id: String(item.printing_sub_type_id || ''),
+            finishing_required: parseInt(item.finishing_required || 0, 10) || 0,
+            size_text: String(item.size_text || ''),
+            gsm_thickness: String(item.gsm_thickness || ''),
+            lamination_required: parseInt(item.lamination_required || 0, 10) || 0,
+            lamination_type: String(item.lamination_type || ''),
+            printing_side: String(item.printing_side || ''),
+            screening_type: String(item.screening_type || ''),
+            printing_price_master_id: String(item.printing_price_master_id || ''),
+            price_slab_text: String(item.price_slab_text || ''),
+            plate_charge: parseFloat(item.plate_charge || 0) || 0,
+            item_printing_charge: parseFloat(item.item_printing_charge || 0) || 0,
+            item_package_charge: parseFloat(item.item_package_charge || 0) || 0,
+            item_additional_charge: parseFloat(item.item_additional_charge || 0) || 0,
+            is_gst_inclusive: parseInt(item.is_gst_inclusive ?? 1, 10) === 1 ? 1 : 0,
+            on_hand_stock: parseFloat(item.on_hand_stock || 0) || 0,
+            reserved_stock: parseFloat(item.reserved_stock || 0) || 0,
+            available_stock: parseFloat(item.available_stock || 0) || 0,
+            projected_available_stock: parseFloat(item.projected_available_stock || 0) || 0,
+            planned_dates: (item.planned_dates && typeof item.planned_dates === 'object') ?
+                item.planned_dates : {}
+        })) : [];
+    let editingProductIndex = -1;
+
+    function syncItemsJson() {
+        const input = document.getElementById('items_json');
+        if (input) input.value = JSON.stringify(proformaItems);
+    }
+
+    function syncCurrentProductRequiredState() {
+        const hasSavedItems = Array.isArray(proformaItems) && proformaItems.length > 0;
+        const hasCurrentProduct = String(getValue('product_id') || '').trim() !== '';
+        const isCustomized = (getValue('order_type') || 'readymade') === 'customized';
+
+        /*
+         * Once at least one product has been added, the blank Product Entry area
+         * is only for adding the NEXT product. It must not remain browser-required.
+         *
+         * This prevents Create Proforma from jumping back to Product Master /
+         * Printing Side / Scoring Type after a valid product is already in
+         * "Added Products".
+         */
+        const currentLineRequired = !hasSavedItems || hasCurrentProduct || editingProductIndex >= 0;
+
+        const product = document.getElementById('product_id');
+        const qty = document.getElementById('qty');
+
+        if (product) product.required = currentLineRequired;
+        if (qty) qty.required = currentLineRequired;
+
+        ['size_text', 'gsm_thickness', 'printing_side', 'screening_type'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.required = isCustomized && currentLineRequired;
+            }
+        });
+
+        const laminationCheckbox = document.getElementById('lamination_required');
+        const laminationType = document.getElementById('lamination_type');
+        if (laminationType) {
+            laminationType.required =
+                isCustomized &&
+                currentLineRequired &&
+                laminationCheckbox?.checked === true;
+        }
+    }
+
+    function escapeItemText(value) {
+        return String(value ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#039;');
+    }
+
+    function currentSelectedStock() {
+        const select = document.getElementById('product_id');
+        const opt = select?.selectedOptions[0];
+
+        const onHand = parseFloat(opt?.dataset?.onHand || 0) || 0;
+        const rawReserved = parseFloat(opt?.dataset?.reserved || 0) || 0;
+        const rawAvailable = parseFloat(opt?.dataset?.available || 0) || 0;
+        const productId = String(select?.value || '');
+
+        /*
+         * Edit mode: release this Proforma's OLD reservation only for UI
+         * calculation. The API later resynchronizes the actual reservation when
+         * Update Proforma is saved.
+         */
+        const ownReservation = isEditPage ?
+            (parseFloat(editReservationByProduct[productId] || 0) || 0) :
+            0;
+
+        return {
+            on_hand_stock: onHand,
+            reserved_stock: Math.max(0, rawReserved - ownReservation),
+            available_stock: rawAvailable + ownReservation
+        };
+    }
+
+    function currentProductItem() {
+        const productId = String(getValue('product_id') || '').trim();
+        const productName = String(getValue('product_name') || selectedProductName() || '').trim();
+        const qty = parseFloat(getValue('qty')) || 0;
+        const rate = parseFloat(getValue('rate')) || 0;
+        const stock = currentSelectedStock();
+        const orderType = getValue('order_type') || 'readymade';
+
+        const item = {
+            proforma_item_id: editingProductIndex >= 0 ?
+                (parseInt(proformaItems[editingProductIndex]?.proforma_item_id || 0, 10) || 0) : 0,
+            product_id: productId,
+            product_name: productName,
+            qty: qty,
+            rate: rate,
+            amount: Math.round(qty * rate * 100) / 100,
+            on_hand_stock: stock.on_hand_stock,
+            reserved_stock: stock.reserved_stock,
+            available_stock: stock.available_stock,
+            projected_available_stock: stock.available_stock - qty
+        };
+
+        if (orderType === 'customized') {
+            const multiId = findMulticolorOffsetPrintingTypeId();
+
+            item.description = String(getValue('custom_item_description') || '').trim();
+            item.printing_type_id = String(multiId || getValue('printing_type_id') || '');
+            item.printing_sub_type_id = '';
+            item.finishing_required = 0;
+            item.size_text = String(getValue('size_text') || '').trim();
+            item.gsm_thickness = String(getValue('gsm_thickness') || '').trim();
+            item.lamination_required = document.getElementById('lamination_required')?.checked ? 1 : 0;
+            item.lamination_type = item.lamination_required ? String(getValue('lamination_type') || '').trim() : '';
+            item.printing_side = String(getValue('printing_side') || '').trim();
+            item.screening_type = String(getValue('screening_type') || '').trim();
+            item.printing_price_master_id = String(getValue('printing_price_master_id') || '');
+            item.price_slab_text = String(getValue('price_slab_text_input') || '');
+            item.plate_charge = parseFloat(getValue('custom_item_plate_charge')) || 0;
+            item.item_printing_charge = parseFloat(getValue('custom_item_printing_charge')) || 0;
+            item.item_package_charge = parseFloat(getValue('custom_item_package_charge')) || 0;
+            item.item_additional_charge = 0;
+            item.is_gst_inclusive = parseInt(getValue('pricing_is_gst_inclusive') || '1', 10) === 1 ? 1 : 0;
+            item.planned_dates = collectPlannedDatesFromBox(
+                'customWorkflowSteps',
+                'customPlannedStepId'
+            );
+        }
+
+        return item;
+    }
+
+    function validateCurrentProductForAdd() {
+        const item = currentProductItem();
+        if (!item.product_id || !item.product_name) {
+            return 'Please select a product from Product Master.';
+        }
+        if (item.qty <= 0) {
+            return 'Quantity must be greater than zero.';
+        }
+        if (item.rate < 0) {
+            return 'Rate cannot be negative.';
+        }
+
+        if ((getValue('order_type') || 'readymade') === 'customized') {
+            if (!item.printing_type_id) {
+                return 'Multicolour Offset Print is missing in Printing Type master.';
+            }
+            if (!item.size_text) {
+                return 'Please enter Card Size for this Customized product.';
+            }
+            if (!item.gsm_thickness) {
+                return 'Please enter GSM / Thickness for this Customized product.';
+            }
+            if (!item.printing_side) {
+                return 'Please select Printing Side for this Customized product.';
+            }
+            if (!item.screening_type) {
+                return 'Please select Scoring Type for this Customized product.';
+            }
+            if (item.lamination_required && !item.lamination_type) {
+                return 'Please select Lamination Type for this Customized product.';
+            }
+        }
+
+        return '';
+    }
+
+    function resetProductEntryAfterAdd() {
+        editingProductIndex = -1;
+        setValue('product_id', '');
+        setValue('product_name', '');
+        setValue('qty', '1');
+        setValue('rate', '0');
+
+        if ((getValue('order_type') || 'readymade') === 'customized') {
+            setValue('custom_item_description', '');
+            setValue('size_text', '');
+            setValue('gsm_thickness', '');
+            setValue('printing_side', '');
+            setValue('screening_type', '');
+
+            if (document.getElementById('lamination_required')) {
+                document.getElementById('lamination_required').checked = false;
+            }
+            setValue('lamination_type', 'none');
+
+            setValue('custom_item_plate_charge', '0');
+            setValue('custom_item_printing_charge', '0');
+            setValue('custom_item_package_charge', '0');
+
+            setValue('printing_price_master_id', '');
+            setValue('price_slab_text_input', '');
+            setValue('pricing_plate_charge', '0');
+            setValue('pricing_printing_charge', '0');
+            setValue('pricing_package_charge', '0');
+            setValue('pricing_additional_charge', '0');
+
+            applyCustomizedDefaults(false);
+            toggleLamination();
+            renderCustomizedProductWorkflow({}, false);
+        }
+
+        refreshSelect('product_id');
+        updateSelectedProductStockInfo();
+        syncCurrentProductRequiredState();
+
+        const btn = document.getElementById('addProductBtn');
+        if (btn) {
+            btn.innerHTML = '<i data-lucide="plus" class="me-1"></i> Add Product';
+            refreshProformaIcons();
+        }
+
+        calculate();
+    }
+
+    function renderProformaItems() {
+        syncItemsJson();
+        syncCurrentProductRequiredState();
+
+        const body = document.getElementById('proformaItemsBody');
+        const empty = document.getElementById('proformaItemsEmpty');
+        const wrap = document.getElementById('proformaItemsTableWrap');
+        const count = document.getElementById('proformaItemsCount');
+
+        if (count) count.textContent = proformaItems.length + (proformaItems.length === 1 ? ' Product' : ' Products');
+        if (!body || !empty || !wrap) return;
+
+        if (!proformaItems.length) {
+            body.innerHTML = '';
+            empty.classList.remove('d-none');
+            wrap.classList.add('d-none');
+            calculate();
+            return;
+        }
+
+        empty.classList.add('d-none');
+        wrap.classList.remove('d-none');
+
+        body.innerHTML = proformaItems.map((item, index) => {
+            const baseAvailable = parseFloat(item.available_stock || 0) || 0;
+            const qty = parseFloat(item.qty || 0) || 0;
+            const projectedAvailable = Number.isFinite(parseFloat(item.projected_available_stock)) ?
+                parseFloat(item.projected_available_stock) :
+                (baseAvailable - qty);
+            const availableText = Number(projectedAvailable).toLocaleString('en-IN', {
+                maximumFractionDigits: 2
+            });
+            const stockClass = projectedAvailable < 0 ? ' negative' : '';
+
+            const customized = (getValue('order_type') || 'readymade') === 'customized';
+            const itemCharges = customized ?
+                (parseFloat(item.plate_charge || 0) || 0) +
+                (parseFloat(item.item_printing_charge || 0) || 0) +
+                (parseFloat(item.item_package_charge || 0) || 0) +
+                (parseFloat(item.item_additional_charge || 0) || 0) :
+                0;
+            const lineTotal = (parseFloat(item.amount || 0) || 0) + itemCharges;
+            const productionDetails = customized ? [
+                    item.size_text ? 'Size: ' + item.size_text : '',
+                    item.gsm_thickness ? 'GSM: ' + item.gsm_thickness : '',
+                    item.printing_side ? (item.printing_side === 'double' ? 'Double Side' : 'Single Side') : '',
+                    item.screening_type ? (item.screening_type === 'special' ? 'Special Scoring' :
+                        'Regular Scoring') : '',
+                    item.lamination_required ?
+                    'Lamination: ' + (item.lamination_type || '-') :
+                    'No Lamination'
+                ].filter(Boolean).join(' • ') :
+                '';
+
+            const plannedDates = customized && item.planned_dates && typeof item.planned_dates === 'object' ?
+                item.planned_dates : {};
+            const plannedRows = Object.values(plannedDates).filter(row => row && typeof row === 'object');
+            const plannedStarts = plannedRows
+                .map(row => normalizeDateValue(row.start || ''))
+                .filter(Boolean)
+                .sort();
+            const plannedCompletions = plannedRows
+                .map(row => normalizeDateValue(row.completion || ''))
+                .filter(Boolean)
+                .sort();
+            const trackingSummary = customized ?
+                (
+                    plannedRows.length ?
+                    'Tracking: ' + plannedRows.length + ' stages' +
+                    (plannedStarts.length ? ' • Start ' + plannedStarts[0] : '') +
+                    (plannedCompletions.length ? ' • End ' + plannedCompletions[plannedCompletions.length - 1] :
+                        '') :
+                    'Tracking dates: Not planned'
+                ) :
+                '';
+
+            return `<tr>
+                <td>${index + 1}</td>
+                <td>
+                    <strong>${escapeItemText(item.product_name)}</strong>
+                    <div class="product-stock-badge${stockClass}">Available After: ${escapeItemText(availableText)}</div>
+                </td>
+                <td class="text-end">${Number(item.qty || 0).toLocaleString('en-IN')}</td>
+                <td class="text-end">${rupee(item.rate || 0)}</td>
+                <td class="text-end fw-bold">${rupee(item.amount || 0)}</td>
+                <td class="text-end customized-column${customized ? '' : ' hide-field'}">${rupee(itemCharges)}</td>
+                <td class="text-end fw-bold customized-column${customized ? '' : ' hide-field'}">${rupee(lineTotal)}</td>
+                <td class="customized-column${customized ? '' : ' hide-field'}">
+                    <strong>Separate Job Card / Independent Workflow</strong>
+                    <div class="small text-muted-custom">${escapeItemText(productionDetails)}</div>
+                    <div class="small text-muted-custom mt-1">${escapeItemText(trackingSummary)}</div>
+                </td>
+                <td>
+                    <div class="proforma-item-actions">
+                       <button type="button" class="btn btn-outline-primary" data-edit-product="${index}" title="Edit product">
+    <i data-lucide="pencil"></i>
+</button>
+
+<button type="button" class="btn btn-outline-danger" data-remove-product="${index}" title="Remove product">
+    <i data-lucide="trash-2"></i>
+</button>
+                    </div>
+                </td>
+            </tr>`;
+        }).join('');
+
+        // Product rows are generated dynamically, so Lucide must be refreshed
+        // after every render or the Edit/Delete buttons appear as empty boxes.
+        refreshProformaIcons();
+
+        calculate();
+        schedulePriceLookup();
+    }
+
+    function addOrUpdateCurrentProduct() {
+        const message = validateCurrentProductForAdd();
+        if (message) {
+            showActionToast(message, 'danger', 'Product Check');
+            return;
+        }
+
+        const item = currentProductItem();
+
+        if ((getValue('order_type') || 'readymade') === 'readymade') {
+            const duplicateIndex = proformaItems.findIndex((row, index) =>
+                index !== editingProductIndex &&
+                String(row.product_id || '') === String(item.product_id || '')
+            );
+
+            if (duplicateIndex >= 0) {
+                showActionToast(
+                    'This Readymade product is already added. Edit the existing product row instead.',
+                    'warning',
+                    'Duplicate Product'
+                );
+                return;
+            }
+        }
+
+        if (editingProductIndex >= 0) {
+            proformaItems[editingProductIndex] = item;
+            showActionToast(item.product_name + ' updated in Proforma.', 'success', 'Product Updated');
+        } else {
+            proformaItems.push(item);
+            showActionToast(item.product_name + ' added to Proforma.', 'success', 'Product Added');
+        }
+
+        renderProformaItems();
+        resetProductEntryAfterAdd();
+    }
+
+    function editProductLine(index) {
+        const item = proformaItems[index];
+        if (!item) return;
+
+        editingProductIndex = index;
+        setValue('product_id', item.product_id || '');
+        setValue('product_name', item.product_name || '');
+        setValue('qty', item.qty || 1);
+        setValue('rate', item.rate || 0);
+
+        if ((getValue('order_type') || 'readymade') === 'customized') {
+            setValue('custom_item_description', item.description || '');
+            setValue('size_text', item.size_text || '');
+            setValue('gsm_thickness', item.gsm_thickness || '');
+            setValue('printing_side', item.printing_side || '');
+            setValue('screening_type', item.screening_type || '');
+
+            const laminationRequired = parseInt(item.lamination_required || 0, 10) === 1;
+            if (document.getElementById('lamination_required')) {
+                document.getElementById('lamination_required').checked = laminationRequired;
+            }
+            setValue('lamination_type', laminationRequired ? (item.lamination_type || 'matte') : 'none');
+
+            setValue('custom_item_plate_charge', item.plate_charge || 0);
+            setValue('custom_item_printing_charge', item.item_printing_charge || 0);
+            setValue('custom_item_package_charge', item.item_package_charge || 0);
+            setValue('printing_price_master_id', item.printing_price_master_id || '');
+            setValue('price_slab_text_input', item.price_slab_text || '');
+
+            toggleLamination();
+            renderCustomizedProductWorkflow(item.planned_dates || {}, false);
+        }
+
+        refreshSelect('product_id');
+        updateSelectedProductStockInfo();
+        syncCurrentProductRequiredState();
+
+        const btn = document.getElementById('addProductBtn');
+        if (btn) {
+            btn.innerHTML = '<i data-lucide="check" class="me-1"></i> Update Product';
+            refreshProformaIcons();
+        }
+
+        calculate();
+        document.getElementById('product_id')?.scrollIntoView({
+            behavior: 'smooth',
+            block: 'center'
+        });
+    }
+
+    function removeProductLine(index) {
+        const item = proformaItems[index];
+        if (!item) return;
+        proformaItems.splice(index, 1);
+        if (editingProductIndex === index) {
+            resetProductEntryAfterAdd();
+        } else if (editingProductIndex > index) {
+            editingProductIndex--;
+        }
+        renderProformaItems();
+        showActionToast(item.product_name + ' removed from Proforma.', 'success', 'Product Removed');
+    }
+
     function productChangedCore() {
         syncProductNameFromMaster();
         const select = document.getElementById('product_id');
         const opt = select?.selectedOptions[0];
         const ot = opt?.dataset?.orderType || '';
+
         if (ot === 'readymade' || ot === 'customized') {
             setValue('order_type', ot);
             toggleOrderType(true);
         } else {
             toggleOrderType(false);
         }
+
+        /*
+         * Product Master price is only the starting rate.
+         * User can edit Rate / Unit for this Proforma without changing Product Master.
+         */
+        if (select?.value && getValue('order_type') === 'readymade') {
+            const defaultRate = parseFloat(opt?.dataset?.price || 0);
+            setValue('rate', (Number.isFinite(defaultRate) && defaultRate >= 0 ? defaultRate : 0).toFixed(2));
+        } else if (!select?.value) {
+            setValue('rate', '0');
+        }
+
+        updateSelectedProductStockInfo();
+        syncCurrentProductRequiredState();
         schedulePriceLookup();
         calculate();
     }
@@ -2886,7 +4300,8 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         ensureSelectedProductSaved();
     }
     ['discount_amount', 'extra_card_charge', 'packing_charge', 'printing_charge', 'gst_percent', 'cash_amount',
-        'upi_amount', 'rate'
+        'upi_amount', 'rate', 'qty', 'custom_item_plate_charge', 'custom_item_printing_charge',
+        'custom_item_package_charge'
     ].forEach(id => document.getElementById(id)?.addEventListener(
         'input', calculate));
     ['qty', 'size_text', 'gsm_thickness'].forEach(id => document.getElementById(id)?.addEventListener('input',
@@ -2912,6 +4327,18 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         schedulePriceLookup();
     });
     document.getElementById('product_id')?.addEventListener('change', productChanged);
+    document.getElementById('addProductBtn')?.addEventListener('click', addOrUpdateCurrentProduct);
+    document.getElementById('proformaItemsBody')?.addEventListener('click', function(event) {
+        const editBtn = event.target.closest('[data-edit-product]');
+        if (editBtn) {
+            editProductLine(parseInt(editBtn.dataset.editProduct || '-1', 10));
+            return;
+        }
+        const removeBtn = event.target.closest('[data-remove-product]');
+        if (removeBtn) {
+            removeProductLine(parseInt(removeBtn.dataset.removeProduct || '-1', 10));
+        }
+    });
     document.getElementById('clearProductBtn')?.addEventListener('click', function() {
         setValue('product_id', '');
         setValue('product_name', '');
@@ -2942,7 +4369,9 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
     initSelect2(document);
     initProductMasterSelect();
     applyEditData();
-    restoreFormDraft();
+    if (!editData) {
+        restoreFormDraft();
+    }
     toggleFunctionFields();
     toggleOrderType(false);
     if (editData) {
@@ -2950,11 +4379,15 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         refreshSelect('printing_sub_type_id');
     }
     toggleLamination();
+    updateSelectedProductStockInfo();
+    renderProformaItems();
     calculate();
     schedulePriceLookup();
     showToastOnLoad();
-    document.getElementById('proformaForm')?.addEventListener('input', saveFormDraft);
-    document.getElementById('proformaForm')?.addEventListener('change', saveFormDraft);
+    if (!editData) {
+        document.getElementById('proformaForm')?.addEventListener('input', saveFormDraft);
+        document.getElementById('proformaForm')?.addEventListener('change', saveFormDraft);
+    }
     let advancePaymentConfirmed = false;
     let submittingToApi = false;
 
@@ -3186,6 +4619,98 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         event.preventDefault();
 
         const form = this;
+
+        /*
+         * Multiple-product safety:
+         * If the user filled the current product fields but forgot to press Add Product,
+         * add/update that product automatically before submitting.
+         */
+        syncCurrentProductRequiredState();
+
+        const currentProductIdForSubmit = String(getValue('product_id') || '').trim();
+        if (currentProductIdForSubmit) {
+            const productError = validateCurrentProductForAdd();
+            if (productError) {
+                showActionToast(productError, 'danger', 'Product Check');
+                return;
+            }
+            const currentItem = currentProductItem();
+            if (editingProductIndex >= 0) {
+                proformaItems[editingProductIndex] = currentItem;
+                editingProductIndex = -1;
+            } else {
+                if ((getValue('order_type') || 'readymade') === 'customized') {
+                    proformaItems.push(currentItem);
+                } else {
+                    const existingIndex = proformaItems.findIndex(row =>
+                        String(row.product_id || '') === String(currentItem.product_id || '')
+                    );
+                    if (existingIndex >= 0) {
+                        proformaItems[existingIndex] = currentItem;
+                    } else {
+                        proformaItems.push(currentItem);
+                    }
+                }
+            }
+            renderProformaItems();
+        }
+
+        if (!proformaItems.length) {
+            showActionToast('Please add at least one product before creating the Proforma.', 'danger',
+                'Product Check');
+            return;
+        }
+
+        /*
+         * Product rows are already validated when Add Product is clicked.
+         * After a row exists, do not force the empty next-product form.
+         */
+        syncCurrentProductRequiredState();
+
+        if (!String(getValue('delivery_date') || '').trim()) {
+            showActionToast('Please select the Delivery Date.', 'danger', 'Delivery Date');
+            const target = document.getElementById('delivery_date');
+            target?.scrollIntoView({
+                behavior: 'smooth',
+                block: 'center'
+            });
+            setTimeout(() => target?.focus(), 250);
+            return;
+        }
+
+        if ((getValue('order_type') || 'readymade') === 'readymade') {
+            if (!String(getValue('printing_type_id') || '').trim()) {
+                showActionToast(
+                    'Please select the common Printing Type. It applies to all added Readymade products.',
+                    'danger',
+                    'Printing Check'
+                );
+                const target = document.getElementById('printing_type_id');
+                target?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center'
+                });
+                setTimeout(() => target?.focus(), 250);
+                return;
+            }
+
+            if (isScreenPrintingSelected() && !String(getValue('printing_sub_type_id') || '').trim()) {
+                showActionToast(
+                    'Please select Screen Print Sub-Type. It applies to all added products.',
+                    'danger',
+                    'Printing Check'
+                );
+                const target = document.getElementById('printing_sub_type_id');
+                target?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center'
+                });
+                setTimeout(() => target?.focus(), 250);
+                return;
+            }
+        }
+
+        syncItemsJson();
         const btn = document.getElementById('createProformaBtn');
         const oldText = btn ? btn.textContent : '';
         const paymentAmounts = calculate();
@@ -3202,12 +4727,27 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
         // Payment denomination is mandatory only while creating a new proforma.
         // In edit mode, existing advance should not block updating customer/order details.
         if (!isEditSubmit && !['cash', 'upi', 'split'].includes(payMode)) {
-            showActionToast('Please select Cash or UPI payment mode.', 'danger', 'Payment Check');
+            showActionToast('Advance payment is compulsory. Please select Cash, UPI, or both.', 'danger',
+                'Advance Payment');
+            document.getElementById('advancePaymentMethodSection')?.scrollIntoView({
+                behavior: 'smooth',
+                block: 'center'
+            });
             return;
         }
 
         if (!isEditSubmit && advance <= 0) {
-            showActionToast('Please enter Cash amount or UPI amount.', 'danger', 'Payment Check');
+            showActionToast(
+                'Advance payment is compulsory. Enter a Cash or UPI advance amount greater than zero.',
+                'danger', 'Advance Payment');
+            const target = document.getElementById('pay_cash')?.checked ?
+                document.getElementById('cash_amount') :
+                document.getElementById('upi_amount');
+            target?.scrollIntoView({
+                behavior: 'smooth',
+                block: 'center'
+            });
+            setTimeout(() => target?.focus(), 250);
             return;
         }
 
@@ -3239,50 +4779,53 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                 body: new FormData(form),
                 credentials: 'same-origin'
             })
-            .then(response => response.json())
+            .then(async response => {
+                const raw = await response.text();
+                let data = null;
+
+                try {
+                    data = JSON.parse(raw);
+                } catch (parseError) {
+                    /*
+                     * Do not hide PHP/server errors behind a generic
+                     * "Request failed". Convert unexpected HTML/text into a
+                     * readable error so the actual issue can be fixed quickly.
+                     */
+                    const readable = String(raw || '')
+                        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                        .replace(/<[^>]+>/g, ' ')
+                        .replace(/&nbsp;/gi, ' ')
+                        .replace(/&quot;/gi, '"')
+                        .replace(/&#039;/gi, "'")
+                        .replace(/&lt;/gi, '<')
+                        .replace(/&gt;/gi, '>')
+                        .replace(/&amp;/gi, '&')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+
+                    throw new Error(
+                        readable ?
+                        readable.slice(0, 700) :
+                        ('Server returned an invalid response (HTTP ' + response.status + ').')
+                    );
+                }
+
+                if (!response.ok && !data?.status) {
+                    throw new Error(data?.message || ('Server error HTTP ' + response.status + '.'));
+                }
+
+                return data;
+            })
             .then(async data => {
                 if (data.status) {
                     const savedProformaId = parseInt(data.proforma_id || data.id || 0, 10);
 
                     /*
-                     * A successful new Proforma must send the approved
-                     * proforma_created Meta template. The save API may already
-                     * have sent it; the dedicated endpoint safely skips an
-                     * existing successful log and prevents a duplicate.
+                     * WhatsApp sending is handled ONLY by api/create_proforma.php
+                     * and ONLY for a newly created Proforma. Edit mode never sends
+                     * the proforma_created WhatsApp template.
                      */
-                    const approvedTemplateAlreadySent = data.whatsapp_sent === true &&
-                        data.whatsapp?.template_key === 'proforma_created';
-
-                    if (!isEditSubmit && savedProformaId > 0 && !approvedTemplateAlreadySent) {
-                        try {
-                            const whatsappBody = new FormData();
-                            const csrfInput = form.querySelector('[name="csrf_token"]');
-                            whatsappBody.append('csrf_token', csrfInput ? csrfInput.value : '');
-                            whatsappBody.append('action', 'send_proforma_whatsapp');
-                            whatsappBody.append('id', String(savedProformaId));
-
-                            const whatsappResponse = await fetch(
-                                'api/proforma_whatsapp_send.php', {
-                                    method: 'POST',
-                                    body: whatsappBody,
-                                    credentials: 'same-origin'
-                                }
-                            );
-                            const whatsappData = await whatsappResponse.json();
-
-                            data.whatsapp = whatsappData;
-                            data.whatsapp_sent = whatsappData.status === true || whatsappData
-                                .success === true;
-                            data.whatsapp_mode = data.whatsapp_sent ? 'api' : 'failed';
-                            data.whatsapp_error = data.whatsapp_sent ? '' :
-                                (whatsappData.message || 'WhatsApp template sending failed.');
-                        } catch (whatsappError) {
-                            data.whatsapp_sent = false;
-                            data.whatsapp_mode = 'failed';
-                            data.whatsapp_error =
-                                'WhatsApp request failed. Use Retry WhatsApp from the Proforma list.';
-                        }
-                    }
 
                     let toastMessage = data.message || (editData ?
                         'Proforma bill updated successfully.' :
@@ -3332,8 +4875,10 @@ $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_H
                     hidePageLoading();
                 }
             })
-            .catch(() => {
-                showActionToast('Request failed. Please try again.', 'danger', 'Failed');
+            .catch(error => {
+                const message = String(error?.message || 'Request failed. Please try again.');
+                showActionToast(message, 'danger', 'Failed');
+                console.error('Create/Edit Proforma request failed:', error);
                 if (btn) {
                     btn.disabled = false;
                     btn.textContent = oldText || (editData ? 'Update Proforma Bill' :

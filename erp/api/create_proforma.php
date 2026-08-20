@@ -7,6 +7,17 @@
 
 header('Content-Type: application/json; charset=utf-8');
 
+/*
+ * Keep API responses valid JSON.
+ * Local development often has display_errors enabled; a warning printed before
+ * json_encode() makes fetch(response.json()) fail and the UI only shows
+ * "Request failed". Capture such output and return the real API message instead.
+ */
+if (ob_get_level() === 0) {
+    ob_start();
+}
+@ini_set('display_errors', '0');
+
 require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/auth.php';
 require_permission($conn, 'can_view', 'proforma_bills.php');
@@ -41,6 +52,265 @@ function pb_table_exists(mysqli $conn, string $table): bool
         return $ok;
     } catch (Throwable $e) {
         return false;
+    }
+}
+
+
+/**
+ * Sync stock reservations for a Proforma.
+ *
+ * Available Stock = On Hand - Reserved.
+ * No availability check is used here. Reserved may exceed On Hand,
+ * therefore Available is intentionally allowed to become negative.
+ */
+function pb_sync_proforma_stock(mysqli $conn, int $proformaId, int $userId = 0): void
+{
+    if ($proformaId <= 0) {
+        return;
+    }
+
+    if (
+        !pb_table_exists($conn, 'product_stock') ||
+        !pb_table_exists($conn, 'product_stock_reservations') ||
+        !pb_table_exists($conn, 'proforma_bill_items')
+    ) {
+        return;
+    }
+
+    $actorId = $userId > 0 ? $userId : null;
+
+    $stmt = $conn->prepare("
+        SELECT
+            pb.proforma_no,
+            LOWER(COALESCE(ps.status_key, '')) AS status_key
+        FROM proforma_bills pb
+        LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
+        WHERE pb.id = ?
+        LIMIT 1
+    ");
+    $stmt->bind_param('i', $proformaId);
+    $stmt->execute();
+    $bill = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$bill) {
+        return;
+    }
+
+    $proformaNo = (string)($bill['proforma_no'] ?? '');
+    $isCancelled = ((string)($bill['status_key'] ?? '') === 'cancelled');
+
+    $desired = [];
+
+    if (!$isCancelled) {
+        $stmt = $conn->prepare("
+            SELECT product_id, SUM(qty) AS qty
+            FROM proforma_bill_items
+            WHERE proforma_bill_id = ?
+              AND product_id IS NOT NULL
+            GROUP BY product_id
+        ");
+        $stmt->bind_param('i', $proformaId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        while ($row = $res->fetch_assoc()) {
+            $productId = (int)($row['product_id'] ?? 0);
+            $qty = (float)($row['qty'] ?? 0);
+
+            if ($productId > 0 && $qty > 0) {
+                $desired[$productId] = $qty;
+            }
+        }
+
+        $stmt->close();
+    }
+
+    $existing = [];
+
+    $stmt = $conn->prepare("
+        SELECT product_id, quantity, status
+        FROM product_stock_reservations
+        WHERE reference_type = 'proforma'
+          AND reference_id = ?
+    ");
+    $stmt->bind_param('i', $proformaId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+
+    while ($row = $res->fetch_assoc()) {
+        $productId = (int)($row['product_id'] ?? 0);
+
+        if ($productId > 0) {
+            $existing[$productId] = [
+                'quantity' => (float)($row['quantity'] ?? 0),
+                'status' => (string)($row['status'] ?? ''),
+            ];
+        }
+    }
+
+    $stmt->close();
+
+    $productIds = array_values(array_unique(array_merge(
+        array_keys($desired),
+        array_keys($existing)
+    )));
+
+    foreach ($productIds as $productId) {
+        $wanted = max(0, (float)($desired[$productId] ?? 0));
+
+        $oldActive = (
+            isset($existing[$productId]) &&
+            ($existing[$productId]['status'] ?? '') === 'active'
+        ) ? max(0, (float)$existing[$productId]['quantity']) : 0.0;
+
+        $delta = round($wanted - $oldActive, 2);
+
+        // Ensure a product_stock row exists.
+        $stmt = $conn->prepare("
+            INSERT INTO product_stock
+                (product_id, on_hand_stock, reserved_stock, minimum_stock, low_stock_alert, created_at)
+            VALUES
+                (?, 0, 0, 0, 0, NOW())
+            ON DUPLICATE KEY UPDATE product_id = VALUES(product_id)
+        ");
+        $stmt->bind_param('i', $productId);
+        $stmt->execute();
+        $stmt->close();
+
+        // Lock the stock row during reservation adjustment.
+        $stmt = $conn->prepare("
+            SELECT on_hand_stock, reserved_stock
+            FROM product_stock
+            WHERE product_id = ?
+            FOR UPDATE
+        ");
+        $stmt->bind_param('i', $productId);
+        $stmt->execute();
+        $before = $stmt->get_result()->fetch_assoc() ?: [];
+        $stmt->close();
+
+        $onHand = (float)($before['on_hand_stock'] ?? 0);
+        $reservedBefore = (float)($before['reserved_stock'] ?? 0);
+        $reservedAfter = max(0, round($reservedBefore + $delta, 2));
+
+        if (abs($delta) > 0.000001) {
+            $stmt = $conn->prepare("
+                UPDATE product_stock
+                SET reserved_stock = ?, updated_at = NOW()
+                WHERE product_id = ?
+            ");
+            $stmt->bind_param('di', $reservedAfter, $productId);
+            $stmt->execute();
+            $stmt->close();
+        }
+
+        if ($wanted > 0) {
+            $description = 'Reserved from Proforma ' .
+                ($proformaNo !== '' ? $proformaNo : ('#' . $proformaId));
+
+            $stmt = $conn->prepare("
+                INSERT INTO product_stock_reservations
+                    (
+                        product_id,
+                        reference_type,
+                        reference_id,
+                        reference_no,
+                        quantity,
+                        status,
+                        description,
+                        created_by,
+                        updated_by,
+                        created_at,
+                        updated_at
+                    )
+                VALUES
+                    (?, 'proforma', ?, ?, ?, 'active', ?, ?, ?, NOW(), NOW())
+                ON DUPLICATE KEY UPDATE
+                    reference_no = VALUES(reference_no),
+                    quantity = VALUES(quantity),
+                    status = 'active',
+                    description = VALUES(description),
+                    updated_by = VALUES(updated_by),
+                    updated_at = NOW()
+            ");
+            $stmt->bind_param(
+                'iisdsii',
+                $productId,
+                $proformaId,
+                $proformaNo,
+                $wanted,
+                $description,
+                $actorId,
+                $actorId
+            );
+            $stmt->execute();
+            $stmt->close();
+        } elseif (isset($existing[$productId])) {
+            $description = 'Reservation released for Proforma ' .
+                ($proformaNo !== '' ? $proformaNo : ('#' . $proformaId));
+
+            $stmt = $conn->prepare("
+                UPDATE product_stock_reservations
+                SET status = 'released',
+                    description = ?,
+                    updated_by = ?,
+                    updated_at = NOW()
+                WHERE product_id = ?
+                  AND reference_type = 'proforma'
+                  AND reference_id = ?
+            ");
+            $stmt->bind_param('siii', $description, $actorId, $productId, $proformaId);
+            $stmt->execute();
+            $stmt->close();
+        }
+
+        if (abs($delta) > 0.000001 && pb_table_exists($conn, 'stock_transactions')) {
+            $transactionType = $delta > 0 ? 'proforma_reserve' : 'proforma_release';
+            $transactionQty = abs($delta);
+
+            $description = ($delta > 0
+                ? 'Stock reserved by '
+                : 'Stock reservation released by ')
+                . ($proformaNo !== '' ? $proformaNo : ('Proforma #' . $proformaId));
+
+            $stmt = $conn->prepare("
+                INSERT INTO stock_transactions
+                    (
+                        product_id,
+                        transaction_type,
+                        quantity,
+                        on_hand_before,
+                        on_hand_after,
+                        reserved_before,
+                        reserved_after,
+                        reference_type,
+                        reference_id,
+                        reference_no,
+                        description,
+                        created_by,
+                        created_at
+                    )
+                VALUES
+                    (?, ?, ?, ?, ?, ?, ?, 'proforma', ?, ?, ?, ?, NOW())
+            ");
+            $stmt->bind_param(
+                'isdddddissi',
+                $productId,
+                $transactionType,
+                $transactionQty,
+                $onHand,
+                $onHand,
+                $reservedBefore,
+                $reservedAfter,
+                $proformaId,
+                $proformaNo,
+                $description,
+                $actorId
+            );
+            $stmt->execute();
+            $stmt->close();
+        }
     }
 }
 
@@ -236,6 +506,31 @@ function pb_ensure_optional_create_proforma_columns(mysqli $conn): void
         if (!apiColumnExists($conn, 'proforma_bill_items', 'is_gst_inclusive')) {
             $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN is_gst_inclusive TINYINT(1) NOT NULL DEFAULT 1 AFTER item_additional_charge");
         }
+
+        /*
+         * Customized product-wise tracking dates.
+         * Older DB dumps do not contain this column, so add it automatically.
+         */
+        if (!apiColumnExists($conn, 'proforma_bill_items', 'planned_dates_json')) {
+            try {
+                $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN planned_dates_json LONGTEXT NULL AFTER is_gst_inclusive");
+            } catch (Throwable $e) {
+                // Readymade can still work without it. Customized validation below
+                // will give a clear migration message if the column is unavailable.
+            }
+        }
+    }
+
+    /*
+     * Customized one-Proforma-item -> one-Job-Card relationship.
+     * Add the link column automatically when possible.
+     */
+    if (pb_table_exists($conn, 'job_cards') && !apiColumnExists($conn, 'job_cards', 'proforma_bill_item_id')) {
+        try {
+            $conn->query("ALTER TABLE job_cards ADD COLUMN proforma_bill_item_id BIGINT(20) UNSIGNED DEFAULT NULL AFTER proforma_bill_id");
+        } catch (Throwable $e) {
+            // Customized Job Card creation will return an explicit migration error.
+        }
     }
 
     /*
@@ -387,6 +682,53 @@ function pb_posted_planned_dates(): array
     }
 
     return $out;
+}
+
+function pb_normalize_planned_dates_array($raw): array
+{
+    $out = [];
+
+    if (!is_array($raw)) {
+        return $out;
+    }
+
+    foreach ($raw as $stepId => $row) {
+        $id = (int)$stepId;
+
+        if ($id <= 0 || !is_array($row)) {
+            continue;
+        }
+
+        $out[$id] = [
+            'start' => pb_date_or_null_value($row['start'] ?? ''),
+            'completion' => pb_date_or_null_value($row['completion'] ?? ''),
+        ];
+    }
+
+    return $out;
+}
+
+function pb_planned_dates_from_item_row(array $item, array $fallback = []): array
+{
+    if (!empty($item['planned_dates']) && is_array($item['planned_dates'])) {
+        $dates = pb_normalize_planned_dates_array($item['planned_dates']);
+        if ($dates) {
+            return $dates;
+        }
+    }
+
+    if (!empty($item['planned_dates_json'])) {
+        $decoded = json_decode((string)$item['planned_dates_json'], true);
+
+        if (is_array($decoded)) {
+            $dates = pb_normalize_planned_dates_array($decoded);
+            if ($dates) {
+                return $dates;
+            }
+        }
+    }
+
+    return pb_normalize_planned_dates_array($fallback);
 }
 
 function pb_enquiry_completed_date(mysqli $conn, array $bill): string
@@ -966,6 +1308,439 @@ function pb_first_workflow_step(mysqli $conn, string $orderType): ?int
     }
 }
 
+
+/**
+ * Create ONE Customized Job Card for ONE proforma_bill_items row.
+ *
+ * The Proforma remains the commercial invoice. This Job Card is production
+ * tracking for only this Customized product.
+ */
+/**
+ * Insert one job_card_items row using the columns actually available in the DB.
+ *
+ * Important compatibility:
+ * Older/current Subhiksha dumps have Printing Type/Sub-Type on job_cards header,
+ * but not on job_card_items. Newer installations may have the two item columns.
+ * Edit Proforma must work in BOTH cases.
+ */
+function pb_insert_job_card_item_compatible(
+    mysqli $conn,
+    int $jobCardId,
+    array $item
+): void {
+    $productId = !empty($item['product_id']) ? (int)$item['product_id'] : null;
+    $itemName = (string)($item['item_name'] ?? '');
+    $description = (string)($item['description'] ?? '');
+    $qty = (float)($item['qty'] ?? 0);
+    $rate = (float)($item['rate'] ?? 0);
+    $amount = (float)($item['amount'] ?? 0);
+    $printingTypeId = !empty($item['printing_type_id']) ? (int)$item['printing_type_id'] : null;
+    $printingSubTypeId = !empty($item['printing_sub_type_id']) ? (int)$item['printing_sub_type_id'] : null;
+    $sizeText = (string)($item['size_text'] ?? '');
+    $gsm = (string)($item['gsm_thickness'] ?? '');
+    $laminationRequired = isset($item['lamination_required']) ? (int)$item['lamination_required'] : null;
+    $laminationType = $item['lamination_type'] ?? null;
+    $printingSide = $item['printing_side'] ?? null;
+    $screeningType = $item['screening_type'] ?? null;
+    $finishingRequired = isset($item['finishing_required']) ? (int)$item['finishing_required'] : null;
+
+    $hasPrintingType = apiColumnExists($conn, 'job_card_items', 'printing_type_id');
+    $hasPrintingSubType = apiColumnExists($conn, 'job_card_items', 'printing_sub_type_id');
+
+    if ($hasPrintingType && $hasPrintingSubType) {
+        $stmt = $conn->prepare("
+            INSERT INTO job_card_items
+                (
+                    job_card_id,
+                    product_id,
+                    item_name,
+                    description,
+                    qty,
+                    rate,
+                    amount,
+                    printing_type_id,
+                    printing_sub_type_id,
+                    size_text,
+                    gsm_thickness,
+                    lamination_required,
+                    lamination_type,
+                    printing_side,
+                    screening_type,
+                    finishing_required,
+                    created_at
+                )
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ");
+
+        $stmt->bind_param(
+            'iissdddiississsi',
+            $jobCardId,
+            $productId,
+            $itemName,
+            $description,
+            $qty,
+            $rate,
+            $amount,
+            $printingTypeId,
+            $printingSubTypeId,
+            $sizeText,
+            $gsm,
+            $laminationRequired,
+            $laminationType,
+            $printingSide,
+            $screeningType,
+            $finishingRequired
+        );
+    } else {
+        /*
+         * Current DB17-compatible path:
+         * Printing Type/Sub-Type stay on job_cards header.
+         */
+        $stmt = $conn->prepare("
+            INSERT INTO job_card_items
+                (
+                    job_card_id,
+                    product_id,
+                    item_name,
+                    description,
+                    qty,
+                    rate,
+                    amount,
+                    size_text,
+                    gsm_thickness,
+                    lamination_required,
+                    lamination_type,
+                    printing_side,
+                    screening_type,
+                    finishing_required,
+                    created_at
+                )
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ");
+
+        $stmt->bind_param(
+            'iissdddssisssi',
+            $jobCardId,
+            $productId,
+            $itemName,
+            $description,
+            $qty,
+            $rate,
+            $amount,
+            $sizeText,
+            $gsm,
+            $laminationRequired,
+            $laminationType,
+            $printingSide,
+            $screeningType,
+            $finishingRequired
+        );
+    }
+
+    $stmt->execute();
+    $stmt->close();
+}
+
+
+function pb_create_customized_job_card_for_item(
+    mysqli $conn,
+    array $bill,
+    array $item,
+    array $plannedDates = []
+): int {
+    $proformaId = (int)($bill['id'] ?? 0);
+    $proformaItemId = (int)($item['id'] ?? $item['proforma_item_id'] ?? 0);
+
+    /*
+     * Prefer this Customized product's own tracking plan.
+     * Global dates are only a fallback for older records.
+     */
+    $plannedDates = pb_planned_dates_from_item_row($item, $plannedDates);
+
+    if ($proformaId <= 0 || $proformaItemId <= 0) {
+        throw new RuntimeException('Invalid Customized Proforma item for Job Card creation.');
+    }
+
+    if (!apiColumnExists($conn, 'job_cards', 'proforma_bill_item_id')) {
+        throw new RuntimeException(
+            'Database update required: add job_cards.proforma_bill_item_id before creating multiple Customized Job Cards.'
+        );
+    }
+
+    $stmt = $conn->prepare("
+        SELECT id
+        FROM job_cards
+        WHERE proforma_bill_id = ?
+          AND proforma_bill_item_id = ?
+        LIMIT 1
+    ");
+    $stmt->bind_param('ii', $proformaId, $proformaItemId);
+    $stmt->execute();
+    $existing = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if ($existing) {
+        return (int)$existing['id'];
+    }
+
+    $orderType = 'customized';
+    $jobNo = pb_next_no($conn, 'job_cards', 'job_card_no', 'SC-JOB');
+    $trackingToken = bin2hex(random_bytes(24));
+    $currentStepId = pb_first_workflow_step($conn, $orderType);
+    $jobStatusId = pb_status_id($conn, 'job_card_statuses', 'status_key', 'in_progress');
+    $createdBy = (int)($_SESSION['user_id'] ?? 0);
+
+    $salesRoleId = pb_sales_role_id($conn);
+    $designingRoleId = pb_designing_role_id($conn);
+    $multicolorRoleId = pb_multicolor_role_id($conn);
+
+    $productName = (string)($item['item_name'] ?? 'Invitation Cards');
+    $productId = !empty($item['product_id']) ? (int)$item['product_id'] : null;
+    $printingTypeId = !empty($item['printing_type_id']) ? (int)$item['printing_type_id'] : null;
+    $printingSubTypeId = !empty($item['printing_sub_type_id']) ? (int)$item['printing_sub_type_id'] : null;
+
+    $enquiryId = !empty($bill['enquiry_id']) ? (int)$bill['enquiry_id'] : null;
+    $quotationId = !empty($bill['quotation_id']) ? (int)$bill['quotation_id'] : null;
+    $customerId = !empty($bill['customer_id']) ? (int)$bill['customer_id'] : null;
+    $functionTypeId = !empty($bill['function_type_id']) ? (int)$bill['function_type_id'] : null;
+    $salesUserId = $createdBy > 0 ? $createdBy : null;
+
+    $finalAmount = (float)($bill['final_amount'] ?? 0);
+    $advanceAmount = (float)($bill['advance_amount'] ?? 0);
+    $balanceAmount = (float)($bill['balance_amount'] ?? 0);
+    $deliveryDate = !empty($bill['delivery_date']) ? $bill['delivery_date'] : null;
+
+    /*
+     * Customized starts in Designing/Proofing. Printing role is intentionally
+     * not assigned at creation; existing workflow logic promotes it later.
+     */
+    $assignedPrintingRoleId = null;
+
+    $stmt = $conn->prepare("
+        INSERT INTO job_cards
+            (
+                job_card_no,
+                tracking_token,
+                enquiry_id,
+                quotation_id,
+                proforma_bill_id,
+                proforma_bill_item_id,
+                customer_id,
+                order_type,
+                customer_name,
+                mobile,
+                function_type_id,
+                product_id,
+                product_name,
+                printing_type_id,
+                printing_sub_type_id,
+                assigned_sales_user_id,
+                assigned_printing_role_id,
+                job_card_status_id,
+                current_workflow_step_id,
+                final_amount,
+                advance_amount,
+                balance_amount,
+                delivery_date,
+                created_by,
+                created_at,
+                updated_at
+            )
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+    ");
+
+    $stmt->bind_param(
+        'ssiiiiisssiiisiiiiidddsi',
+        $jobNo,
+        $trackingToken,
+        $enquiryId,
+        $quotationId,
+        $proformaId,
+        $proformaItemId,
+        $customerId,
+        $orderType,
+        $bill['customer_name'],
+        $bill['mobile'],
+        $functionTypeId,
+        $productId,
+        $productName,
+        $printingTypeId,
+        $printingSubTypeId,
+        $salesUserId,
+        $assignedPrintingRoleId,
+        $jobStatusId,
+        $currentStepId,
+        $finalAmount,
+        $advanceAmount,
+        $balanceAmount,
+        $deliveryDate,
+        $createdBy
+    );
+    $stmt->execute();
+    $jobCardId = (int)$stmt->insert_id;
+    $stmt->close();
+
+    pb_insert_job_card_item_compatible($conn, $jobCardId, $item);
+
+    $stmt = $conn->prepare("
+        SELECT ws.*, r.id AS role_id
+        FROM workflow_steps ws
+        LEFT JOIN roles r ON r.role_key = ws.default_owner_role_key
+        WHERE ws.order_type = 'customized'
+          AND ws.is_active = 1
+        ORDER BY ws.sort_order ASC
+    ");
+    $stmt->execute();
+    $res = $stmt->get_result();
+
+    $steps = [];
+    while ($row = $res->fetch_assoc()) {
+        $steps[] = $row;
+    }
+    $stmt->close();
+
+    foreach ($steps as $step) {
+        $stepId = (int)$step['id'];
+        $stepKey = (string)($step['step_key'] ?? '');
+        $roleId = !empty($step['role_id']) ? (int)$step['role_id'] : null;
+        $status = 'pending';
+        $actualStart = null;
+        $actualComplete = null;
+        $completedBy = null;
+
+        if (in_array($stepKey, pb_customized_sales_completed_steps(), true)) {
+            $roleId = $salesRoleId ?: $roleId;
+            $status = 'completed';
+            $actualStart = date('Y-m-d H:i:s');
+            $actualComplete = date('Y-m-d H:i:s');
+            $completedBy = $createdBy;
+        } elseif (in_array($stepKey, pb_customized_design_steps(), true)) {
+            $roleId = $designingRoleId ?: $roleId;
+            if ($stepKey === 'designing' || (int)$stepId === (int)$currentStepId) {
+                $status = 'in_progress';
+                $actualStart = date('Y-m-d H:i:s');
+            }
+        } elseif (in_array($stepKey, pb_customized_printing_steps(), true)) {
+            $roleId = $multicolorRoleId ?: $roleId;
+            $status = 'pending';
+        }
+
+        [$plannedStartDate, $plannedCompletionDate] =
+            pb_default_planned_dates($conn, $bill, $step, $plannedDates);
+
+        $stmt = $conn->prepare("
+            INSERT INTO job_tracking
+                (
+                    job_card_id,
+                    workflow_step_id,
+                    planned_start_date,
+                    planned_completion_date,
+                    status,
+                    responsible_role_id,
+                    actual_start_at,
+                    actual_completed_at,
+                    completed_by,
+                    created_at,
+                    updated_at
+                )
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            ON DUPLICATE KEY UPDATE
+                planned_start_date = VALUES(planned_start_date),
+                planned_completion_date = VALUES(planned_completion_date),
+                status = VALUES(status),
+                responsible_role_id = VALUES(responsible_role_id),
+                updated_at = NOW()
+        ");
+        $stmt->bind_param(
+            'iisssissi',
+            $jobCardId,
+            $stepId,
+            $plannedStartDate,
+            $plannedCompletionDate,
+            $status,
+            $roleId,
+            $actualStart,
+            $actualComplete,
+            $completedBy
+        );
+        $stmt->execute();
+        $stmt->close();
+    }
+
+    pb_log(
+        $conn,
+        'create_job_card',
+        'Proforma Bills',
+        $proformaId,
+        'Customized Job Card created for Proforma item #' . $proformaItemId . ': ' . $jobNo
+    );
+
+    return $jobCardId;
+}
+
+function pb_mark_proforma_job_cards_created(mysqli $conn, int $proformaId, int $createdBy): void
+{
+    $jobCardStatusPb = pb_status_id($conn, 'proforma_statuses', 'status_key', 'job_card_created');
+
+    if ($jobCardStatusPb) {
+        $stmt = $conn->prepare("
+            UPDATE proforma_bills
+            SET job_card_created = 1,
+                proforma_status_id = ?,
+                updated_by = ?,
+                updated_at = NOW()
+            WHERE id = ?
+        ");
+        $stmt->bind_param('iii', $jobCardStatusPb, $createdBy, $proformaId);
+    } else {
+        $stmt = $conn->prepare("
+            UPDATE proforma_bills
+            SET job_card_created = 1,
+                updated_by = ?,
+                updated_at = NOW()
+            WHERE id = ?
+        ");
+        $stmt->bind_param('ii', $createdBy, $proformaId);
+    }
+
+    $stmt->execute();
+    $stmt->close();
+}
+
+function pb_job_cards_for_proforma(mysqli $conn, int $proformaId): array
+{
+    $rows = [];
+
+    if ($proformaId <= 0 || !pb_table_exists($conn, 'job_cards')) {
+        return $rows;
+    }
+
+    $selectItemLink = apiColumnExists($conn, 'job_cards', 'proforma_bill_item_id')
+        ? 'proforma_bill_item_id'
+        : 'NULL AS proforma_bill_item_id';
+
+    $stmt = $conn->prepare("
+        SELECT id, job_card_no, {$selectItemLink}
+        FROM job_cards
+        WHERE proforma_bill_id = ?
+        ORDER BY id ASC
+    ");
+    $stmt->bind_param('i', $proformaId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+
+    while ($row = $res->fetch_assoc()) {
+        $rows[] = $row;
+    }
+
+    $stmt->close();
+    return $rows;
+}
+
 function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates = []): int
 {
     if ($proformaId <= 0) {
@@ -980,6 +1755,70 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
 
     if (!$bill) {
         throw new RuntimeException('Proforma bill not found.');
+    }
+
+    /*
+     * Customized:
+     * ONE Proforma -> MANY items -> ONE separate Job Card per item.
+     *
+     * Readymade continues with the existing ONE Job Card containing all items.
+     */
+    if ((string)($bill['order_type'] ?? '') === 'customized') {
+        if (!apiColumnExists($conn, 'job_cards', 'proforma_bill_item_id')) {
+            throw new RuntimeException(
+                'Database update required: run customized_multi_job_cards.sql before creating Customized Job Cards.'
+            );
+        }
+
+        $stmt = $conn->prepare("
+            SELECT *
+            FROM proforma_bill_items
+            WHERE proforma_bill_id = ?
+            ORDER BY sort_order ASC, id ASC
+        ");
+        $stmt->bind_param('i', $proformaId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        $customItems = [];
+        while ($row = $res->fetch_assoc()) {
+            $customItems[] = $row;
+        }
+        $stmt->close();
+
+        if (!$customItems) {
+            throw new RuntimeException('Please add at least one Customized product before creating Job Cards.');
+        }
+
+        $jobIds = [];
+        foreach ($customItems as $customItem) {
+            $jobIds[] = pb_create_customized_job_card_for_item(
+                $conn,
+                $bill,
+                $customItem,
+                $plannedDates
+            );
+        }
+
+        pb_mark_proforma_job_cards_created(
+            $conn,
+            $proformaId,
+            (int)($_SESSION['user_id'] ?? 0)
+        );
+
+        /*
+         * Also normalizes a legacy first Customized Job Card (created under the
+         * old one-Job-Card design) to contain only its mapped Proforma item.
+         * Existing workflow/status rows are preserved.
+         */
+        pb_sync_existing_job_card_from_proforma(
+            $conn,
+            $proformaId,
+            (int)($_SESSION['user_id'] ?? 0),
+            $plannedDates
+        );
+
+        return (int)($jobIds[0] ?? 0);
     }
 
     if ((int)($bill['job_card_created'] ?? 0) === 1) {
@@ -1132,62 +1971,7 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
     $stmt->close();
 
     foreach ($items as $item) {
-        $stmt = $conn->prepare("
-            INSERT INTO job_card_items
-                (
-                    job_card_id,
-                    product_id,
-                    item_name,
-                    description,
-                    qty,
-                    rate,
-                    amount,
-                    size_text,
-                    gsm_thickness,
-                    lamination_required,
-                    lamination_type,
-                    printing_side,
-                    screening_type,
-                    finishing_required,
-                    created_at
-                )
-            VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-        ");
-
-        $itemProductId = !empty($item['product_id']) ? (int)$item['product_id'] : null;
-        $itemName = (string)$item['item_name'];
-        $description = (string)($item['description'] ?? '');
-        $qty = (float)$item['qty'];
-        $rate = (float)$item['rate'];
-        $amount = (float)$item['amount'];
-        $sizeText = (string)($item['size_text'] ?? '');
-        $gsm = (string)($item['gsm_thickness'] ?? '');
-        $laminationRequired = isset($item['lamination_required']) ? (int)$item['lamination_required'] : null;
-        $laminationType = $item['lamination_type'] ?? null;
-        $printingSide = $item['printing_side'] ?? null;
-        $screeningType = $item['screening_type'] ?? null;
-        $finishingRequired = isset($item['finishing_required']) ? (int)$item['finishing_required'] : null;
-
-        $stmt->bind_param(
-            'iissdddssisssi',
-            $jobCardId,
-            $itemProductId,
-            $itemName,
-            $description,
-            $qty,
-            $rate,
-            $amount,
-            $sizeText,
-            $gsm,
-            $laminationRequired,
-            $laminationType,
-            $printingSide,
-            $screeningType,
-            $finishingRequired
-        );
-        $stmt->execute();
-        $stmt->close();
+        pb_insert_job_card_item_compatible($conn, $jobCardId, $item);
     }
 
     $stmt = $conn->prepare("
@@ -1378,6 +2162,293 @@ function pb_printing_type_allowed_for_readymade(mysqli $conn, ?int $printingType
             || str_contains($text, 'digital');
     } catch (Throwable $e) {
         return false;
+    }
+}
+
+
+/**
+ * Edit Proforma -> synchronize the EXISTING Job Card.
+ *
+ * Important:
+ * - Never creates another Job Card.
+ * - Keeps the same job_card.id, job_card_no, tracking_token and job_tracking rows.
+ * - Replaces only job_card_items and refreshes header summary fields.
+ * - Does not send WhatsApp.
+ */
+function pb_sync_existing_job_card_from_proforma(
+    mysqli $conn,
+    int $proformaId,
+    int $userId = 0,
+    array $plannedDates = []
+): void {
+    if (
+        $proformaId <= 0 ||
+        !pb_table_exists($conn, 'job_cards') ||
+        !pb_table_exists($conn, 'job_card_items') ||
+        !pb_table_exists($conn, 'proforma_bill_items')
+    ) {
+        return;
+    }
+
+    $stmt = $conn->prepare("SELECT * FROM proforma_bills WHERE id = ? LIMIT 1");
+    $stmt->bind_param('i', $proformaId);
+    $stmt->execute();
+    $bill = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$bill) {
+        return;
+    }
+
+    $stmt = $conn->prepare("
+        SELECT *
+        FROM proforma_bill_items
+        WHERE proforma_bill_id = ?
+        ORDER BY sort_order ASC, id ASC
+    ");
+    $stmt->bind_param('i', $proformaId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+
+    $items = [];
+    while ($row = $res->fetch_assoc()) {
+        $items[] = $row;
+    }
+    $stmt->close();
+
+    if (!$items) {
+        return;
+    }
+
+    $orderType = (string)($bill['order_type'] ?? 'readymade');
+
+    if ($orderType === 'customized') {
+        if (!apiColumnExists($conn, 'job_cards', 'proforma_bill_item_id')) {
+            throw new RuntimeException(
+                'Database update required: run customized_multi_job_cards.sql before updating Customized Job Cards.'
+            );
+        }
+
+        $shouldHaveJobs = (int)($bill['job_card_created'] ?? 0) === 1;
+
+        foreach ($items as $item) {
+            $itemId = (int)($item['id'] ?? 0);
+            if ($itemId <= 0) {
+                continue;
+            }
+
+            $stmt = $conn->prepare("
+                SELECT id
+                FROM job_cards
+                WHERE proforma_bill_id = ?
+                  AND proforma_bill_item_id = ?
+                LIMIT 1
+            ");
+            $stmt->bind_param('ii', $proformaId, $itemId);
+            $stmt->execute();
+            $jobRow = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if (!$jobRow) {
+                if ($shouldHaveJobs) {
+                    pb_create_customized_job_card_for_item($conn, $bill, $item, $plannedDates);
+                }
+                continue;
+            }
+
+            $jobCardId = (int)$jobRow['id'];
+            $customerId = !empty($bill['customer_id']) ? (int)$bill['customer_id'] : null;
+            $functionTypeId = !empty($bill['function_type_id']) ? (int)$bill['function_type_id'] : null;
+            $productId = !empty($item['product_id']) ? (int)$item['product_id'] : null;
+            $productName = (string)($item['item_name'] ?? 'Invitation Cards');
+            $printingTypeId = !empty($item['printing_type_id']) ? (int)$item['printing_type_id'] : null;
+            $printingSubTypeId = !empty($item['printing_sub_type_id']) ? (int)$item['printing_sub_type_id'] : null;
+            $updatedBy = $userId > 0 ? $userId : null;
+
+            $customerName = (string)($bill['customer_name'] ?? '');
+            $mobile = (string)($bill['mobile'] ?? '');
+            $finalAmount = (float)($bill['final_amount'] ?? 0);
+            $advanceAmount = (float)($bill['advance_amount'] ?? 0);
+            $balanceAmount = (float)($bill['balance_amount'] ?? 0);
+            $deliveryDate = !empty($bill['delivery_date']) ? (string)$bill['delivery_date'] : null;
+
+            $stmt = $conn->prepare("
+                UPDATE job_cards
+                SET
+                    customer_id = ?,
+                    order_type = 'customized',
+                    customer_name = ?,
+                    mobile = ?,
+                    function_type_id = ?,
+                    product_id = ?,
+                    product_name = ?,
+                    printing_type_id = ?,
+                    printing_sub_type_id = ?,
+                    final_amount = ?,
+                    advance_amount = ?,
+                    balance_amount = ?,
+                    delivery_date = ?,
+                    updated_by = ?,
+                    updated_at = NOW()
+                WHERE id = ?
+            ");
+            $stmt->bind_param(
+                'issiisiidddsii',
+                $customerId,
+                $customerName,
+                $mobile,
+                $functionTypeId,
+                $productId,
+                $productName,
+                $printingTypeId,
+                $printingSubTypeId,
+                $finalAmount,
+                $advanceAmount,
+                $balanceAmount,
+                $deliveryDate,
+                $updatedBy,
+                $jobCardId
+            );
+            $stmt->execute();
+            $stmt->close();
+
+            /*
+             * Customized Job Card contains only its own product.
+             * Existing job_tracking/workflow rows remain untouched.
+             */
+            $stmt = $conn->prepare("DELETE FROM job_card_items WHERE job_card_id = ?");
+            $stmt->bind_param('i', $jobCardId);
+            $stmt->execute();
+            $stmt->close();
+
+            pb_insert_job_card_item_compatible($conn, $jobCardId, $item);
+
+            /*
+             * Planned dates may be edited independently per Customized Job Card.
+             * Update ONLY planned date fields. Existing status/current step,
+             * responsible roles, actual timestamps, approvals, delay logic and
+             * status-update workflow are intentionally untouched.
+             */
+            $itemPlannedDates = pb_planned_dates_from_item_row($item, []);
+
+            foreach ($itemPlannedDates as $stepId => $dateRow) {
+                $workflowStepId = (int)$stepId;
+                if ($workflowStepId <= 0) {
+                    continue;
+                }
+
+                $plannedStart = $dateRow['start'] ?? null;
+                $plannedCompletion = $dateRow['completion'] ?? null;
+
+                $stmt = $conn->prepare("
+                    UPDATE job_tracking
+                    SET
+                        planned_start_date = ?,
+                        planned_completion_date = ?,
+                        updated_at = NOW()
+                    WHERE job_card_id = ?
+                      AND workflow_step_id = ?
+                ");
+                $stmt->bind_param(
+                    'ssii',
+                    $plannedStart,
+                    $plannedCompletion,
+                    $jobCardId,
+                    $workflowStepId
+                );
+                $stmt->execute();
+                $stmt->close();
+            }
+        }
+
+        return;
+    }
+
+    /*
+     * Readymade edit: existing one-Job-Card behavior.
+     */
+    $stmt = $conn->prepare("
+        SELECT id
+        FROM job_cards
+        WHERE proforma_bill_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+    ");
+    $stmt->bind_param('i', $proformaId);
+    $stmt->execute();
+    $jobRow = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$jobRow) {
+        return;
+    }
+
+    $jobCardId = (int)$jobRow['id'];
+    $firstItem = $items[0];
+
+    $customerId = !empty($bill['customer_id']) ? (int)$bill['customer_id'] : null;
+    $functionTypeId = !empty($bill['function_type_id']) ? (int)$bill['function_type_id'] : null;
+    $productId = !empty($firstItem['product_id']) ? (int)$firstItem['product_id'] : null;
+    $productName = (string)($firstItem['item_name'] ?? 'Invitation Cards');
+    $printingTypeId = !empty($firstItem['printing_type_id']) ? (int)$firstItem['printing_type_id'] : null;
+    $printingSubTypeId = !empty($firstItem['printing_sub_type_id']) ? (int)$firstItem['printing_sub_type_id'] : null;
+
+    $customerName = (string)($bill['customer_name'] ?? '');
+    $mobile = (string)($bill['mobile'] ?? '');
+    $finalAmount = (float)($bill['final_amount'] ?? 0);
+    $advanceAmount = (float)($bill['advance_amount'] ?? 0);
+    $balanceAmount = (float)($bill['balance_amount'] ?? 0);
+    $deliveryDate = !empty($bill['delivery_date']) ? (string)$bill['delivery_date'] : null;
+    $updatedBy = $userId > 0 ? $userId : null;
+
+    $stmt = $conn->prepare("
+        UPDATE job_cards
+        SET
+            customer_id = ?,
+            order_type = ?,
+            customer_name = ?,
+            mobile = ?,
+            function_type_id = ?,
+            product_id = ?,
+            product_name = ?,
+            printing_type_id = ?,
+            printing_sub_type_id = ?,
+            final_amount = ?,
+            advance_amount = ?,
+            balance_amount = ?,
+            delivery_date = ?,
+            updated_by = ?,
+            updated_at = NOW()
+        WHERE id = ?
+    ");
+    $stmt->bind_param(
+        'isssiisiidddsii',
+        $customerId,
+        $orderType,
+        $customerName,
+        $mobile,
+        $functionTypeId,
+        $productId,
+        $productName,
+        $printingTypeId,
+        $printingSubTypeId,
+        $finalAmount,
+        $advanceAmount,
+        $balanceAmount,
+        $deliveryDate,
+        $updatedBy,
+        $jobCardId
+    );
+    $stmt->execute();
+    $stmt->close();
+
+    $stmt = $conn->prepare("DELETE FROM job_card_items WHERE job_card_id = ?");
+    $stmt->bind_param('i', $jobCardId);
+    $stmt->execute();
+    $stmt->close();
+
+    foreach ($items as $item) {
+        pb_insert_job_card_item_compatible($conn, $jobCardId, $item);
     }
 }
 
@@ -1739,14 +2810,20 @@ function pb_send_whatsapp_by_api(mysqli $conn, int $id): array
 {
     $apiFile = __DIR__ . '/../includes/whatsapp-api.php';
 
-    if (!file_exists($apiFile)) {
+    if (!is_file($apiFile)) {
         return ['success' => false, 'message' => 'WhatsApp API file missing.'];
     }
 
     require_once $apiFile;
 
-    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
-        return ['success' => false, 'message' => 'WhatsApp API function missing.'];
+    /*
+     * IMPORTANT:
+     * The live ERP already uses the Meta template API. Do not route Proforma
+     * creation through the old Watzup/generic text-message path. New Proforma
+     * creation must call the approved `proforma_created` template directly.
+     */
+    if (!function_exists('subhiksha_send_template_whatsapp')) {
+        return ['success' => false, 'message' => 'WhatsApp template API function missing.'];
     }
 
     $row = pb_get_whatsapp_row($conn, $id);
@@ -1755,28 +2832,29 @@ function pb_send_whatsapp_by_api(mysqli $conn, int $id): array
         return ['success' => false, 'message' => 'Proforma bill not found.'];
     }
 
+    $mobile = trim((string)($row['mobile'] ?? ''));
+    if ($mobile === '') {
+        return ['success' => false, 'message' => 'Customer mobile number is missing.'];
+    }
+
     $variables = pb_whatsapp_variables($conn, $row);
-    $messageBody = pb_whatsapp_template_message($conn, 'proforma_created', $row);
     $meta = [
         'related_module' => 'Proforma Bills',
         'related_id' => $id,
         'customer_id' => $row['customer_id'] ?? null,
         'sent_by' => (int)($_SESSION['user_id'] ?? 0),
-        'extra_payload' => ['type' => 'text']
+        'language_code' => 'en',
+        'extra_payload' => [
+            'type' => 'template',
+            'template_key' => 'proforma_created',
+            'proforma_pdf_link' => (string)($variables['proforma_pdf_link'] ?? '')
+        ]
     ];
-
-    if (function_exists('subhiksha_send_whatsapp')) {
-        return subhiksha_send_whatsapp($conn, array_merge($meta, [
-            'mobile' => (string)($row['mobile'] ?? ''),
-            'message' => $messageBody,
-            'variables' => $variables
-        ]));
-    }
 
     return subhiksha_send_template_whatsapp(
         $conn,
         'proforma_created',
-        (string)($row['mobile'] ?? ''),
+        $mobile,
         $variables,
         $meta
     );
@@ -1784,38 +2862,22 @@ function pb_send_whatsapp_by_api(mysqli $conn, int $id): array
 
 function pb_send_whatsapp_preferred(mysqli $conn, int $id): array
 {
-    $row = pb_get_whatsapp_row($conn, $id);
+    /*
+     * Always use the existing live Meta template sender for automatic Proforma
+     * notifications. The sender itself validates whatsapp_enabled, Meta token,
+     * phone number id and template configuration.
+     */
+    $apiResult = pb_send_whatsapp_by_api($conn, $id);
+    $apiResult['mode'] = 'api';
+    $apiResult['manual_whatsapp'] = false;
+    $apiResult['template_key'] = 'proforma_created';
 
-    if (!$row) {
-        return ['success' => false, 'message' => 'Proforma bill not found.'];
+    if (!($apiResult['success'] ?? false)) {
+        $apiResult['message'] = 'WhatsApp template sending failed: '
+            . (string)($apiResult['message'] ?? $apiResult['response'] ?? 'Unknown error.');
     }
 
-    $manualUrl = pb_whatsapp_url($row);
-
-    if (pb_whatsapp_api_ready($conn)) {
-        $apiResult = pb_send_whatsapp_by_api($conn, $id);
-        $apiResult['mode'] = 'api';
-        $apiResult['manual_whatsapp'] = false;
-
-        if (!($apiResult['success'] ?? false)) {
-            $apiResult['message'] = 'WhatsApp API sending failed: ' . (string)($apiResult['response'] ?? $apiResult['message'] ?? 'Unknown error.');
-        }
-
-        return $apiResult;
-    }
-
-    $manualResult = pb_whatsapp_log_manual($conn, $id);
-    $manualResult['mode'] = 'manual';
-    $manualResult['manual_whatsapp'] = true;
-    $manualResult['open_whatsapp_url'] = $manualUrl;
-
-    if ($manualResult['success'] ?? false) {
-        $manualResult['message'] = 'WhatsApp API is not enabled. Manual WhatsApp mode opened.';
-    } else {
-        $manualResult['message'] = 'Manual WhatsApp failed: ' . (string)($manualResult['message'] ?? 'Unknown error.');
-    }
-
-    return $manualResult;
+    return $apiResult;
 }
 
 function pb_whatsapp_svg(): string
@@ -1941,11 +3003,22 @@ try {
 
 function apiResponse(bool $status, string $message = '', array $extra = []): void
 {
+    /*
+     * Remove any warning/notice text captured before the JSON response.
+     * This keeps the browser response parseable and lets the real error message
+     * reach Create/Edit Proforma.
+     */
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+
+    header('Content-Type: application/json; charset=utf-8');
+
     echo json_encode(array_merge([
         'status' => $status,
         'success' => $status,
         'message' => $message
-    ], $extra));
+    ], $extra), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
@@ -2150,6 +3223,19 @@ try {
                 apiRequirePermission($conn, 'can_create', 'You do not have permission to create proforma bills.');
             }
 
+            $existingBillForUpdate = null;
+            if ($id > 0) {
+                $stmt = $conn->prepare("SELECT * FROM proforma_bills WHERE id = ? LIMIT 1");
+                $stmt->bind_param('i', $id);
+                $stmt->execute();
+                $existingBillForUpdate = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+
+                if (!$existingBillForUpdate) {
+                    throw new RuntimeException('Proforma bill not found for editing.');
+                }
+            }
+
             $quotationId = pb_int($_POST['quotation_id'] ?? 0) ?: null;
             $functionTypeId = pb_function_type_id($conn, pb_post('function_type_id'));
             $orderType = pb_post('order_type', 'readymade');
@@ -2170,44 +3256,32 @@ try {
             $createJobCardNow = isset($_POST['create_job_card_now']) || (isset($_POST['auto_create_job_card']) && (string)$_POST['auto_create_job_card'] === '1');
             $plannedDates = pb_posted_planned_dates();
 
-            $rawProductValue = pb_post('product_id');
-            $productId = ($rawProductValue !== '' && ctype_digit($rawProductValue)) ? (int)$rawProductValue : null;
-            $manualItemName = pb_post('item_name');
-            if ($manualItemName === '') {
-                $manualItemName = pb_post('product_name');
-            }
-            $description = pb_post('description');
-            $qty = pb_float($_POST['qty'] ?? 1);
-            $rate = pb_float($_POST['rate'] ?? 0);
-            $printingPriceMasterId = pb_int($_POST['printing_price_master_id'] ?? 0) ?: null;
-            $priceSlabText = pb_post('price_slab_text');
-            $pricingPlateCharge = pb_float($_POST['pricing_plate_charge'] ?? 0);
-            $pricingPrintingCharge = pb_float($_POST['pricing_printing_charge'] ?? 0);
-            $pricingPackageCharge = pb_float($_POST['pricing_package_charge'] ?? 0);
-            $pricingAdditionalCharge = pb_float($_POST['pricing_additional_charge'] ?? 0);
-            $pricingIsGstInclusive = pb_int($_POST['pricing_is_gst_inclusive'] ?? 1) === 1 ? 1 : 0;
-            $printingTypeId = pb_int($_POST['printing_type_id'] ?? 0) ?: null;
-            $printingSubTypeId = pb_int($_POST['printing_sub_type_id'] ?? 0) ?: null;
+            /*
+             * Common Readymade Printing configuration.
+             * These values apply to every product under the same Proforma.
+             */
+            $globalPrintingTypeId = pb_int($_POST['printing_type_id'] ?? 0) ?: null;
+            $globalPrintingSubTypeId = pb_int($_POST['printing_sub_type_id'] ?? 0) ?: null;
+            $globalFinishingRequired = pb_int($_POST['finishing_required'] ?? 0) === 1 ? 1 : 0;
+            $globalPrintingPriceMasterId = pb_int($_POST['printing_price_master_id'] ?? 0) ?: null;
+            $globalPriceSlabText = pb_post('price_slab_text');
+            $globalIsGstInclusive = pb_int($_POST['pricing_is_gst_inclusive'] ?? 1) === 1 ? 1 : 0;
+            $globalDescription = pb_post('description');
 
-            if ($orderType === 'customized') {
-                $multiColorPrintingTypeId = pb_multicolor_printing_type_id($conn);
-                if (!$multiColorPrintingTypeId) {
-                    throw new RuntimeException('Multicolor Offset Print type is missing. Please add it in Printing Types master.');
-                }
-
-                $printingTypeId = $multiColorPrintingTypeId;
-                $printingSubTypeId = null;
+            /*
+             * Multiple Product payload.
+             * New Create Proforma UI sends all added product rows in items_json.
+             * Single-product fields remain as a backward-compatible fallback.
+             */
+            $itemsPayload = json_decode((string)($_POST['items_json'] ?? ''), true);
+            if (!is_array($itemsPayload) || !$itemsPayload) {
+                $itemsPayload = [[
+                    'product_id' => $_POST['product_id'] ?? null,
+                    'product_name' => pb_post('item_name') ?: pb_post('product_name'),
+                    'qty' => $_POST['qty'] ?? 1,
+                    'rate' => $_POST['rate'] ?? 0
+                ]];
             }
-            $finishingRequired = pb_int($_POST['finishing_required'] ?? 0) === 1 ? 1 : 0;
-            $sizeText = pb_post('size_text');
-            $gsmThickness = pb_post('gsm_thickness');
-            $laminationRequired = pb_int($_POST['lamination_required'] ?? 0) === 1 ? 1 : 0;
-            $laminationType = pb_post('lamination_type') ?: null;
-            if ($laminationRequired !== 1) {
-                $laminationType = null;
-            }
-            $printingSide = pb_post('printing_side') ?: null;
-            $screeningType = pb_post('screening_type') ?: null;
 
             $discountAmount = pb_float($_POST['discount_amount'] ?? 0);
             /* Extra card charge is applicable for both readymade and customized orders. */
@@ -2216,34 +3290,52 @@ try {
             $packingCharge = pb_float($_POST['packing_charge'] ?? 0);
             $printingCharge = pb_float($_POST['printing_charge'] ?? 0);
 
-            /*
-             * Pricing master only pre-fills values in the form.
-             * User can edit Rate / Plate-Additional / Package / Printing Charge.
-             * Save the actual edited values, not only the original hidden master values.
-             */
-            if ($printingPriceMasterId) {
-                $pricingPlateCharge = round(max(0, $extraCardCharge), 2);
-                $pricingPrintingCharge = round(max(0, $printingCharge), 2);
-                $pricingPackageCharge = round(max(0, $packingCharge), 2);
-                $pricingAdditionalCharge = 0.00;
-            }
             $gstPercent = pb_float($_POST['gst_percent'] ?? 18);
             if ($gstPercent < 0) $gstPercent = 0.0;
 
-            /* Split payment: cash and UPI can be received together. */
-            $cashAmount = pb_float($_POST['cash_amount'] ?? 0);
-            $upiAmount = pb_float($_POST['upi_amount'] ?? 0);
-            if ($cashAmount < 0 || $upiAmount < 0) {
-                throw new RuntimeException('Cash and UPI amounts cannot be negative.');
+            /*
+             * Split payment is collected only during CREATE.
+             * EDIT must not create/alter a payment transaction from this page.
+             * Existing advance is preserved and balance is recalculated against
+             * the edited Final Amount.
+             */
+            if ($id > 0 && $existingBillForUpdate) {
+                $cashAmount = 0.0;
+                $upiAmount = 0.0;
+                $advanceAmount = round((float)($existingBillForUpdate['advance_amount'] ?? 0), 2);
+                $paymentMode = '';
+                $paymentRef = '';
+                $cashRef = '';
+                $upiRef = '';
+            } else {
+                $cashAmount = pb_float($_POST['cash_amount'] ?? 0);
+                $upiAmount = pb_float($_POST['upi_amount'] ?? 0);
+
+                if ($cashAmount < 0 || $upiAmount < 0) {
+                    throw new RuntimeException('Cash and UPI amounts cannot be negative.');
+                }
+
+                $advanceAmount = round($cashAmount + $upiAmount, 2);
+                $paymentMode = ($cashAmount > 0 && $upiAmount > 0)
+                    ? 'split'
+                    : (($upiAmount > 0) ? 'upi' : 'cash');
+
+                $paymentRef = pb_post('payment_reference');
+                $cashRef = pb_post('cash_reference');
+                $upiRef = pb_post('upi_reference');
             }
-            $advanceAmount = round($cashAmount + $upiAmount, 2);
-            $paymentMode = ($cashAmount > 0 && $upiAmount > 0) ? 'split' : (($upiAmount > 0) ? 'upi' : 'cash');
-            $paymentRef = pb_post('payment_reference');
-            $cashRef = pb_post('cash_reference');
-            $upiRef = pb_post('upi_reference');
 
             if (!in_array($orderType, ['readymade', 'customized'], true)) {
                 throw new RuntimeException('Invalid order type.');
+            }
+
+            if (
+                $orderType === 'customized' &&
+                !apiColumnExists($conn, 'proforma_bill_items', 'planned_dates_json')
+            ) {
+                throw new RuntimeException(
+                    'Customized tracking database update is missing. Run create_proforma_compatibility.sql and try again.'
+                );
             }
 
             if ($customerName === '' || $mobile === '') {
@@ -2276,67 +3368,6 @@ try {
                 }
             }
 
-            if ($manualItemName === '' && !$productId) {
-                throw new RuntimeException('Please select product or enter product name.');
-            }
-
-            if ($orderType === 'readymade') {
-                if (!$printingTypeId) {
-                    throw new RuntimeException('Please select printing type for readymade order.');
-                }
-
-                if (!pb_printing_type_allowed_for_readymade($conn, $printingTypeId)) {
-                    throw new RuntimeException('Readymade order allows only Offset Print, Screen Print, or Digital Print.');
-                }
-
-                if (pb_is_screen_printing_type($conn, $printingTypeId) && !$printingSubTypeId) {
-                    throw new RuntimeException('Please select Screen Print sub-type: UV Products or Foil Products.');
-                }
-
-                if (in_array(strtolower((string)$laminationType), ['none', 'not_applicable'], true)) {
-                    $laminationRequired = 0;
-                    $laminationType = null;
-                }
-                $screeningType = null;
-            }
-
-            if ($orderType === 'customized') {
-                if ($sizeText === '') {
-                    $sizeText = '22x8.5';
-                }
-
-                if ($gsmThickness === '') {
-                    $gsmThickness = '300';
-                }
-
-                if (!$printingSide) {
-                    throw new RuntimeException('Please select Single Side Scoring or Double Side Scoring.');
-                }
-
-                if (!$screeningType) {
-                    throw new RuntimeException('Please select Regular Scoring or Special Scoring.');
-                }
-
-                if ($laminationRequired === 1 && !$laminationType) {
-                    throw new RuntimeException('Please select lamination type.');
-                }
-
-                $finishingRequired = 0;
-            }
-
-            if ($qty <= 0) {
-                throw new RuntimeException('Quantity must be greater than zero.');
-            }
-
-            /*
-             * Item rate is optional.
-             * When left blank/0, amount is calculated from Printing Charge + Plate/Additional + Package.
-             * If user manually enters rate, item amount = qty * rate.
-             */
-            if ($rate < 0) {
-                throw new RuntimeException('Price / rate cannot be negative.');
-            }
-
             if ($discountAmount < 0) {
                 throw new RuntimeException('Discount cannot be negative.');
             }
@@ -2357,17 +3388,201 @@ try {
                 throw new RuntimeException('Advance amount cannot be negative.');
             }
 
-            $userId = (int)($_SESSION['user_id'] ?? 0);
-            $productInfo = pb_find_or_create_product($conn, $rawProductValue, $manualItemName, $orderType, $rate, $userId);
-            $productId = $productInfo['id'];
-            $productName = trim((string)$productInfo['name']);
+            if ($orderType === 'readymade') {
+                if (!$globalPrintingTypeId) {
+                    throw new RuntimeException('Please select the common Printing Type for this Readymade Proforma.');
+                }
 
-            if ($productName === '') {
-                $productName = 'Invitation Cards';
+                if (!pb_printing_type_allowed_for_readymade($conn, $globalPrintingTypeId)) {
+                    throw new RuntimeException('Readymade order allows only Offset Print, Screen Print, or Digital Print.');
+                }
+
+                if (pb_is_screen_printing_type($conn, $globalPrintingTypeId) && !$globalPrintingSubTypeId) {
+                    throw new RuntimeException('Please select Screen Print sub-type: UV Products or Foil Products.');
+                }
             }
 
-            $amount = round($qty * $rate, 2);
-            $subTotal = $amount;
+            $userId = (int)($_SESSION['user_id'] ?? 0);
+            $proformaItems = [];
+            $subTotal = 0.0;
+            $totalQty = 0.0;
+
+            foreach (array_values($itemsPayload) as $itemIndex => $rawItem) {
+                if (!is_array($rawItem)) {
+                    throw new RuntimeException('Invalid product details at item ' . ($itemIndex + 1) . '.');
+                }
+
+                $rawProductValue = trim((string)($rawItem['product_id'] ?? ''));
+                $manualItemName = trim((string)($rawItem['product_name'] ?? $rawItem['item_name'] ?? ''));
+                $qty = pb_float($rawItem['qty'] ?? 0);
+                $rate = pb_float($rawItem['rate'] ?? 0);
+
+                if ($rawProductValue === '' && $manualItemName === '') {
+                    throw new RuntimeException('Please select product for item ' . ($itemIndex + 1) . '.');
+                }
+
+                if ($qty <= 0) {
+                    throw new RuntimeException('Quantity must be greater than zero for item ' . ($itemIndex + 1) . '.');
+                }
+
+                if ($rate < 0) {
+                    throw new RuntimeException('Price / rate cannot be negative for item ' . ($itemIndex + 1) . '.');
+                }
+
+                $itemPlannedDates = [];
+
+                if ($orderType === 'readymade') {
+                    /*
+                     * SAME Printing Type/Sub-Type/Finishing for every Readymade item.
+                     */
+                    $description = $globalDescription;
+                    $printingTypeId = $globalPrintingTypeId;
+                    $printingSubTypeId = $globalPrintingSubTypeId;
+                    $finishingRequired = $globalFinishingRequired;
+
+                    $sizeText = '';
+                    $gsmThickness = '';
+                    $laminationRequired = 0;
+                    $laminationType = null;
+                    $printingSide = null;
+                    $screeningType = null;
+
+                    $printingPriceMasterId = $globalPrintingPriceMasterId;
+                    $priceSlabText = $globalPriceSlabText;
+
+                    /*
+                     * Common bill charges are stored only at the Proforma header.
+                     * Keeping item charges at zero prevents duplication.
+                     */
+                    $pricingPlateCharge = 0.0;
+                    $pricingPrintingCharge = 0.0;
+                    $pricingPackageCharge = 0.0;
+                    $pricingAdditionalCharge = 0.0;
+                    $pricingIsGstInclusive = $globalIsGstInclusive;
+                } else {
+                    /*
+                     * Customized multi-product details will be handled separately.
+                     */
+                    $description = trim((string)($rawItem['description'] ?? $globalDescription));
+                    $printingTypeId = pb_int($rawItem['printing_type_id'] ?? $globalPrintingTypeId) ?: null;
+                    $printingSubTypeId = pb_int($rawItem['printing_sub_type_id'] ?? $globalPrintingSubTypeId) ?: null;
+                    $finishingRequired = pb_int($rawItem['finishing_required'] ?? 0) === 1 ? 1 : 0;
+                    $sizeText = trim((string)($rawItem['size_text'] ?? ''));
+                    $gsmThickness = trim((string)($rawItem['gsm_thickness'] ?? ''));
+                    $laminationRequired = pb_int($rawItem['lamination_required'] ?? 0) === 1 ? 1 : 0;
+                    $laminationType = trim((string)($rawItem['lamination_type'] ?? '')) ?: null;
+                    $printingSide = trim((string)($rawItem['printing_side'] ?? '')) ?: null;
+                    $screeningType = trim((string)($rawItem['screening_type'] ?? '')) ?: null;
+                    $printingPriceMasterId = pb_int($rawItem['printing_price_master_id'] ?? 0) ?: null;
+                    $priceSlabText = trim((string)($rawItem['price_slab_text'] ?? ''));
+                    $pricingPlateCharge = max(0, pb_float($rawItem['plate_charge'] ?? 0));
+                    $pricingPrintingCharge = max(0, pb_float($rawItem['item_printing_charge'] ?? 0));
+                    $pricingPackageCharge = max(0, pb_float($rawItem['item_package_charge'] ?? 0));
+                    $pricingAdditionalCharge = max(0, pb_float($rawItem['item_additional_charge'] ?? 0));
+                    $pricingIsGstInclusive = pb_int($rawItem['is_gst_inclusive'] ?? 1) === 1 ? 1 : 0;
+                    $itemPlannedDates = pb_normalize_planned_dates_array($rawItem['planned_dates'] ?? []);
+
+                    $multiColorPrintingTypeId = pb_multicolor_printing_type_id($conn);
+                    if (!$multiColorPrintingTypeId) {
+                        throw new RuntimeException('Multicolor Offset Print type is missing. Please add it in Printing Types master.');
+                    }
+                    $printingTypeId = $multiColorPrintingTypeId;
+                    $printingSubTypeId = null;
+
+                    if ($sizeText === '') $sizeText = '22x8.5';
+                    if ($gsmThickness === '') $gsmThickness = '300';
+                    if (!$printingSide) {
+                        throw new RuntimeException('Item ' . ($itemIndex + 1) . ': Please select Single Side Scoring or Double Side Scoring.');
+                    }
+                    if (!$screeningType) {
+                        throw new RuntimeException('Item ' . ($itemIndex + 1) . ': Please select Regular Scoring or Special Scoring.');
+                    }
+                    if ($laminationRequired === 1 && !$laminationType) {
+                        throw new RuntimeException('Item ' . ($itemIndex + 1) . ': Please select lamination type.');
+                    }
+                    $finishingRequired = 0;
+                }
+
+                $productInfo = pb_find_or_create_product(
+                    $conn,
+                    $rawProductValue,
+                    $manualItemName,
+                    $orderType,
+                    $rate,
+                    $userId
+                );
+
+                $productId = $productInfo['id'];
+                $productName = trim((string)$productInfo['name']);
+                if ($productName === '') {
+                    $productName = 'Invitation Cards';
+                }
+
+                $amount = round($qty * $rate, 2);
+                $subTotal += $amount;
+                $totalQty += $qty;
+
+                $proformaItems[] = [
+                    'proforma_item_id' => pb_int($rawItem['proforma_item_id'] ?? 0),
+                    'product_id' => $productId,
+                    'item_name' => $productName,
+                    'description' => $description,
+                    'qty' => $qty,
+                    'rate' => $rate,
+                    'amount' => $amount,
+                    'printing_type_id' => $printingTypeId,
+                    'printing_sub_type_id' => $printingSubTypeId,
+                    'finishing_required' => $finishingRequired,
+                    'size_text' => $sizeText,
+                    'gsm_thickness' => $gsmThickness,
+                    'lamination_required' => $laminationRequired,
+                    'lamination_type' => $laminationType,
+                    'printing_side' => $printingSide,
+                    'screening_type' => $screeningType,
+                    'printing_price_master_id' => $printingPriceMasterId,
+                    'price_slab_text' => $priceSlabText,
+                    'plate_charge' => $pricingPlateCharge,
+                    'item_printing_charge' => $pricingPrintingCharge,
+                    'item_package_charge' => $pricingPackageCharge,
+                    'item_additional_charge' => $pricingAdditionalCharge,
+                    'is_gst_inclusive' => $pricingIsGstInclusive,
+                    'planned_dates' => $itemPlannedDates,
+                    'sort_order' => $itemIndex + 1,
+                ];
+            }
+
+            if (!$proformaItems) {
+                throw new RuntimeException('Please add at least one product.');
+            }
+
+            $subTotal = round($subTotal, 2);
+            $totalQty = round($totalQty, 2);
+
+            /*
+             * Customized pricing is ITEM-WISE:
+             * every product has its own amount + production charges and later
+             * receives its own Job Card/workflow.
+             *
+             * Readymade keeps the existing common charge model.
+             */
+            if ($orderType === 'customized') {
+                $extraCardCharge = 0.0;
+                $packingCharge = 0.0;
+                $printingCharge = 0.0;
+
+                foreach ($proformaItems as $pricingItem) {
+                    $extraCardCharge +=
+                        (float)($pricingItem['plate_charge'] ?? 0)
+                        + (float)($pricingItem['item_additional_charge'] ?? 0);
+
+                    $packingCharge += (float)($pricingItem['item_package_charge'] ?? 0);
+                    $printingCharge += (float)($pricingItem['item_printing_charge'] ?? 0);
+                }
+
+                $extraCardCharge = round($extraCardCharge, 2);
+                $packingCharge = round($packingCharge, 2);
+                $printingCharge = round($printingCharge, 2);
+            }
 
             $grossBeforeDiscount = round($subTotal + $extraCardCharge + $packingCharge + $printingCharge, 2);
             if ($discountAmount > $grossBeforeDiscount) {
@@ -2375,7 +3590,6 @@ try {
             }
 
             $finalAmount = round(max(0, $grossBeforeDiscount - $discountAmount), 2);
-            /* Inclusive GST breakup: final amount is inclusive of GST. */
             $taxableValue = $gstPercent > 0 ? round($finalAmount / (1 + ($gstPercent / 100)), 2) : $finalAmount;
             $gstAmount = round(max(0, $finalAmount - $taxableValue), 2);
 
@@ -2385,15 +3599,22 @@ try {
 
             $balanceAmount = round(max(0, $finalAmount - $advanceAmount), 2);
 
+            /*
+             * New Proforma Bills require an advance payment.
+             * Edit mode keeps the existing behavior and is not blocked by this rule.
+             */
+            if ($id <= 0 && $finalAmount > 0.009 && $advanceAmount <= 0.009) {
+                throw new RuntimeException('Advance payment is compulsory. Please enter a Cash or UPI advance amount.');
+            }
+
             $cashDenomination = ['rows' => [], 'summary' => [], 'summary_text' => '', 'total' => 0.0];
-            if ($cashAmount > 0) {
+            if ($id <= 0 && $cashAmount > 0) {
                 $cashDenomination = pb_cash_denomination_payload();
                 if (abs((float)$cashDenomination['total'] - $cashAmount) > 0.009) {
                     throw new RuntimeException('Cash denomination total must match the cash amount.');
                 }
             }
 
-            $totalQty = $qty;
             $customerId = pb_customer_id($conn, $customerName, $mobile, $billingAddress, $gstNumber);
 
             $conn->begin_transaction();
@@ -2470,11 +3691,6 @@ try {
                     $userId,
                     $id
                 );
-                $stmt->execute();
-                $stmt->close();
-
-                $stmt = $conn->prepare("DELETE FROM proforma_bill_items WHERE proforma_bill_id = ?");
-                $stmt->bind_param('i', $id);
                 $stmt->execute();
                 $stmt->close();
 
@@ -2570,66 +3786,240 @@ try {
                 pb_log($conn, 'create_proforma_bill', 'Proforma Bills', $proformaId, 'Proforma bill created.');
             }
 
-            $stmt = $conn->prepare("
-                INSERT INTO proforma_bill_items
-                    (
-                        proforma_bill_id,
-                        product_id,
-                        item_name,
-                        description,
-                        qty,
-                        rate,
-                        amount,
-                        printing_type_id,
-                        printing_sub_type_id,
-                        finishing_required,
-                        size_text,
-                        gsm_thickness,
-                        lamination_required,
-                        lamination_type,
-                        printing_side,
-                        screening_type,
-                        printing_price_master_id,
-                        price_slab_text,
-                        plate_charge,
-                        item_printing_charge,
-                        item_package_charge,
-                        item_additional_charge,
-                        is_gst_inclusive,
-                        sort_order,
-                        created_at
+            /*
+             * Save Proforma items with STABLE ids.
+             * Customized Job Cards link directly to proforma_bill_items.id.
+             */
+            $existingItemIds = [];
+
+            if ($id > 0) {
+                $stmt = $conn->prepare("
+                    SELECT id
+                    FROM proforma_bill_items
+                    WHERE proforma_bill_id = ?
+                    ORDER BY id ASC
+                ");
+                $stmt->bind_param('i', $proformaId);
+                $stmt->execute();
+                $res = $stmt->get_result();
+                while ($row = $res->fetch_assoc()) {
+                    $existingItemIds[] = (int)$row['id'];
+                }
+                $stmt->close();
+            }
+
+            $savedItemIds = [];
+
+            foreach ($proformaItems as $itemIndex => &$item) {
+                $productId = !empty($item['product_id']) ? (int)$item['product_id'] : null;
+                $productName = (string)$item['item_name'];
+                $description = (string)$item['description'];
+                $qty = (float)$item['qty'];
+                $rate = (float)$item['rate'];
+                $amount = (float)$item['amount'];
+                $printingTypeId = !empty($item['printing_type_id']) ? (int)$item['printing_type_id'] : null;
+                $printingSubTypeId = !empty($item['printing_sub_type_id']) ? (int)$item['printing_sub_type_id'] : null;
+                $finishingRequired = (int)$item['finishing_required'];
+                $sizeText = (string)$item['size_text'];
+                $gsmThickness = (string)$item['gsm_thickness'];
+                $laminationRequired = (int)$item['lamination_required'];
+                $laminationType = $item['lamination_type'];
+                $printingSide = $item['printing_side'];
+                $screeningType = $item['screening_type'];
+                $printingPriceMasterId = !empty($item['printing_price_master_id']) ? (int)$item['printing_price_master_id'] : null;
+                $priceSlabText = (string)$item['price_slab_text'];
+                $pricingPlateCharge = (float)$item['plate_charge'];
+                $pricingPrintingCharge = (float)$item['item_printing_charge'];
+                $pricingPackageCharge = (float)$item['item_package_charge'];
+                $pricingAdditionalCharge = (float)$item['item_additional_charge'];
+                $pricingIsGstInclusive = (int)$item['is_gst_inclusive'];
+                $plannedDatesJson = $orderType === 'customized'
+                    ? json_encode(
+                        pb_normalize_planned_dates_array($item['planned_dates'] ?? []),
+                        JSON_UNESCAPED_SLASHES
                     )
-                VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())
-            ");
-            $stmt->bind_param(
-                'iissdddiiississsisddddi',
-                $proformaId,
-                $productId,
-                $productName,
-                $description,
-                $qty,
-                $rate,
-                $amount,
-                $printingTypeId,
-                $printingSubTypeId,
-                $finishingRequired,
-                $sizeText,
-                $gsmThickness,
-                $laminationRequired,
-                $laminationType,
-                $printingSide,
-                $screeningType,
-                $printingPriceMasterId,
-                $priceSlabText,
-                $pricingPlateCharge,
-                $pricingPrintingCharge,
-                $pricingPackageCharge,
-                $pricingAdditionalCharge,
-                $pricingIsGstInclusive
-            );
-            $stmt->execute();
-            $stmt->close();
+                    : null;
+                $sortOrder = $itemIndex + 1;
+
+                $proformaItemId = (int)($item['proforma_item_id'] ?? 0);
+                $canUpdateExisting =
+                    $id > 0 &&
+                    $proformaItemId > 0 &&
+                    in_array($proformaItemId, $existingItemIds, true);
+
+                if ($canUpdateExisting) {
+                    $stmt = $conn->prepare("
+                        UPDATE proforma_bill_items
+                        SET
+                            product_id = ?,
+                            item_name = ?,
+                            description = ?,
+                            qty = ?,
+                            rate = ?,
+                            amount = ?,
+                            printing_type_id = ?,
+                            printing_sub_type_id = ?,
+                            finishing_required = ?,
+                            size_text = ?,
+                            gsm_thickness = ?,
+                            lamination_required = ?,
+                            lamination_type = ?,
+                            printing_side = ?,
+                            screening_type = ?,
+                            printing_price_master_id = ?,
+                            price_slab_text = ?,
+                            plate_charge = ?,
+                            item_printing_charge = ?,
+                            item_package_charge = ?,
+                            item_additional_charge = ?,
+                            is_gst_inclusive = ?,
+                            planned_dates_json = ?,
+                            sort_order = ?
+                        WHERE id = ?
+                          AND proforma_bill_id = ?
+                    ");
+                    $stmt->bind_param(
+                        'issdddiiississsisddddisiii',
+                        $productId,
+                        $productName,
+                        $description,
+                        $qty,
+                        $rate,
+                        $amount,
+                        $printingTypeId,
+                        $printingSubTypeId,
+                        $finishingRequired,
+                        $sizeText,
+                        $gsmThickness,
+                        $laminationRequired,
+                        $laminationType,
+                        $printingSide,
+                        $screeningType,
+                        $printingPriceMasterId,
+                        $priceSlabText,
+                        $pricingPlateCharge,
+                        $pricingPrintingCharge,
+                        $pricingPackageCharge,
+                        $pricingAdditionalCharge,
+                        $pricingIsGstInclusive,
+                        $plannedDatesJson,
+                        $sortOrder,
+                        $proformaItemId,
+                        $proformaId
+                    );
+                    $stmt->execute();
+                    $stmt->close();
+                } else {
+                    $stmt = $conn->prepare("
+                        INSERT INTO proforma_bill_items
+                            (
+                                proforma_bill_id,
+                                product_id,
+                                item_name,
+                                description,
+                                qty,
+                                rate,
+                                amount,
+                                printing_type_id,
+                                printing_sub_type_id,
+                                finishing_required,
+                                size_text,
+                                gsm_thickness,
+                                lamination_required,
+                                lamination_type,
+                                printing_side,
+                                screening_type,
+                                printing_price_master_id,
+                                price_slab_text,
+                                plate_charge,
+                                item_printing_charge,
+                                item_package_charge,
+                                item_additional_charge,
+                                is_gst_inclusive,
+                                planned_dates_json,
+                                sort_order,
+                                created_at
+                            )
+                        VALUES
+                            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                    ");
+                    $stmt->bind_param(
+                        'iissdddiiississsisddddisi',
+                        $proformaId,
+                        $productId,
+                        $productName,
+                        $description,
+                        $qty,
+                        $rate,
+                        $amount,
+                        $printingTypeId,
+                        $printingSubTypeId,
+                        $finishingRequired,
+                        $sizeText,
+                        $gsmThickness,
+                        $laminationRequired,
+                        $laminationType,
+                        $printingSide,
+                        $screeningType,
+                        $printingPriceMasterId,
+                        $priceSlabText,
+                        $pricingPlateCharge,
+                        $pricingPrintingCharge,
+                        $pricingPackageCharge,
+                        $pricingAdditionalCharge,
+                        $pricingIsGstInclusive,
+                        $plannedDatesJson,
+                        $sortOrder
+                    );
+                    $stmt->execute();
+                    $proformaItemId = (int)$stmt->insert_id;
+                    $stmt->close();
+                }
+
+                $item['proforma_item_id'] = $proformaItemId;
+                $item['sort_order'] = $sortOrder;
+                $savedItemIds[] = $proformaItemId;
+            }
+            unset($item);
+
+            if ($id > 0) {
+                $removedItemIds = array_values(array_diff($existingItemIds, $savedItemIds));
+
+                if ($removedItemIds) {
+                    $safeIds = implode(',', array_map('intval', $removedItemIds));
+
+                    if (
+                        $orderType === 'customized' &&
+                        apiColumnExists($conn, 'job_cards', 'proforma_bill_item_id')
+                    ) {
+                        $conn->query("
+                            DELETE FROM job_cards
+                            WHERE proforma_bill_id = " . (int)$proformaId . "
+                              AND proforma_bill_item_id IN ({$safeIds})
+                        ");
+                    }
+
+                    $conn->query("
+                        DELETE FROM proforma_bill_items
+                        WHERE proforma_bill_id = " . (int)$proformaId . "
+                          AND id IN ({$safeIds})
+                    ");
+                }
+            }
+
+            /*
+             * Reserve all Proforma product quantities.
+             * No stock shortage error is thrown; Available may become negative.
+             */
+            pb_sync_proforma_stock($conn, $proformaId, $userId);
+
+            /*
+             * Edit mode keeps the SAME Job Card and SAME workflow.
+             * Only its header summary + item rows are synchronized.
+             */
+            if ($id > 0) {
+                pb_sync_existing_job_card_from_proforma($conn, $proformaId, $userId, $plannedDates);
+            }
 
             if ($advanceAmount > 0 && $id <= 0) {
                 $paymentType = $balanceAmount <= 0 ? 'full' : 'advance';
@@ -2696,22 +4086,19 @@ try {
             $isNewProforma = $id <= 0;
             $jobId = 0;
             $createdJobCard = false;
+            $createdJobCards = [];
 
             if ($createJobCardNow) {
                 $conn->begin_transaction();
                 $jobId = pb_create_job_card($conn, $proformaId, $plannedDates);
                 $conn->commit();
                 $createdJobCard = true;
+                $createdJobCards = pb_job_cards_for_proforma($conn, $proformaId);
             }
 
             $createdJobCardNo = '';
-            if ($createdJobCard && $jobId > 0 && pb_table_exists($conn, 'job_cards')) {
-                $stmt = $conn->prepare("SELECT job_card_no FROM job_cards WHERE id = ? LIMIT 1");
-                $stmt->bind_param('i', $jobId);
-                $stmt->execute();
-                $jobRow = $stmt->get_result()->fetch_assoc();
-                $stmt->close();
-                $createdJobCardNo = (string)($jobRow['job_card_no'] ?? '');
+            if ($createdJobCards) {
+                $createdJobCardNo = (string)($createdJobCards[0]['job_card_no'] ?? '');
             }
 
             if (empty($proformaNo)) {
@@ -2734,13 +4121,34 @@ try {
             if ($createdJobCard) {
                 $responseData['job_id'] = $jobId;
                 $responseData['job_card_no'] = $createdJobCardNo;
+                $responseData['job_ids'] = array_map(
+                    static fn(array $row): int => (int)$row['id'],
+                    $createdJobCards
+                );
+                $responseData['job_card_nos'] = array_map(
+                    static fn(array $row): string => (string)$row['job_card_no'],
+                    $createdJobCards
+                );
+                $responseData['job_card_count'] = count($createdJobCards);
                 $responseData['created_job_card'] = true;
             }
 
-            $responseMessage = $createdJobCard
-                ? 'Proforma bill saved and job card created successfully.'
-                : ($isNewProforma ? 'Proforma bill created successfully.' : 'Proforma bill updated successfully.');
+            if ($createdJobCard && $orderType === 'customized') {
+                $responseMessage =
+                    'Proforma bill saved successfully. '
+                    . count($createdJobCards)
+                    . ' separate Customized Job Card(s) created with independent tracking/workflow.';
+            } else {
+                $responseMessage = $createdJobCard
+                    ? 'Proforma bill saved and job card created successfully.'
+                    : ($isNewProforma ? 'Proforma bill created successfully.' : 'Proforma bill updated successfully.');
+            }
 
+            /*
+             * WhatsApp rule:
+             * - CREATE: send proforma_created after the Proforma is saved.
+             * - EDIT: never send proforma_created again.
+             */
             if ($isNewProforma) {
                 $whatsappResult = pb_send_whatsapp_preferred($conn, $proformaId);
                 $responseData['whatsapp'] = $whatsappResult;
@@ -2905,9 +4313,16 @@ try {
             $jobId = pb_create_job_card($conn, $proformaId, $plannedDates);
             $conn->commit();
 
-            apiResponse(true, 'Job card created successfully with tracking stages.', [
+            $jobCards = pb_job_cards_for_proforma($conn, $proformaId);
+
+            apiResponse(true, count($jobCards) > 1
+                ? count($jobCards) . ' Job Cards are available for this Proforma with independent tracking stages.'
+                : 'Job card created successfully with tracking stages.', [
                 'proforma_id' => $proformaId,
-                'job_id' => $jobId
+                'job_id' => $jobId,
+                'job_ids' => array_map(static fn(array $row): int => (int)$row['id'], $jobCards),
+                'job_card_nos' => array_map(static fn(array $row): string => (string)$row['job_card_no'], $jobCards),
+                'job_card_count' => count($jobCards)
             ]);
         }
 
