@@ -86,6 +86,9 @@ $hasPayment = qsl_table_exists($conn, 'quick_sale_payments');
 $where = "
     (? = ''
         OR qs.sale_no LIKE CONCAT('%', ?, '%')
+        OR COALESCE(qs.customer_name, '') LIKE CONCAT('%', ?, '%')
+        OR COALESCE(qs.mobile, '') LIKE CONCAT('%', ?, '%')
+        OR COALESCE(qs.address, '') LIKE CONCAT('%', ?, '%')
         OR EXISTS (
             SELECT 1
             FROM quick_sale_items qsi_search
@@ -113,9 +116,9 @@ if ($hasPayment) {
     $where .= " AND (? = '' OR ? = '') ";
 }
 
-$types = 'sssssssss';
+$types = 'ssssssssssss';
 $params = [
-    $q, $q, $q,
+    $q, $q, $q, $q, $q, $q,
     $fromDate, $fromDate,
     $toDate, $toDate,
     $paymentMode, $paymentMode
@@ -175,8 +178,12 @@ try {
         SELECT
             qs.id,
             qs.sale_no,
+            qs.customer_name,
+            qs.mobile,
+            qs.address,
             qs.total_amount,
             qs.created_at,
+            COALESCE(NULLIF(u.name, ''), NULLIF(u.username, ''), 'System') AS sale_by,
             COALESCE((
                 SELECT COUNT(*)
                 FROM quick_sale_items qsi_count
@@ -194,6 +201,7 @@ try {
             ), '') AS product_names,
             {$paymentSelect}
         FROM quick_sales qs
+        LEFT JOIN users u ON u.id = qs.created_by
         WHERE {$where}
         ORDER BY qs.id DESC
         LIMIT ? OFFSET ?
@@ -290,6 +298,33 @@ function qsl_page_url(int $page): string
         font-weight: 700;
     }
 
+    .customer-info {
+        min-width: 185px;
+        max-width: 260px;
+        line-height: 1.35;
+    }
+
+    .customer-info .customer-name {
+        display: block;
+        font-weight: 900;
+        color: var(--text-main);
+    }
+
+    .customer-info .customer-mobile,
+    .customer-info .customer-address {
+        display: block;
+        margin-top: 2px;
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--text-muted);
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    .customer-info .customer-address {
+        max-width: 250px;
+    }
+
     .payment-parts {
         font-size: 12px;
         font-weight: 800;
@@ -373,7 +408,7 @@ function qsl_page_url(int $page): string
                                 <label class="form-label fw-bold">Search</label>
                                 <input type="text" name="q" class="form-control"
                                     value="<?= qsl_e($q) ?>"
-                                    placeholder="Sale No / Product Name">
+                                    placeholder="Sale No / Customer / Mobile / Product">
                             </div>
 
                             <div class="col-lg-2 col-md-4">
@@ -414,6 +449,8 @@ function qsl_page_url(int $page): string
                             <thead>
                                 <tr>
                                     <th>Sale No</th>
+                                    <th>Customer</th>
+                                    <th>Sale By</th>
                                     <th>Date</th>
                                     <th>Products</th>
                                     <th class="text-end">Qty</th>
@@ -425,7 +462,7 @@ function qsl_page_url(int $page): string
                             <tbody>
                                 <?php if (!$rows): ?>
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted-custom py-4">
+                                    <td colspan="9" class="text-center text-muted-custom py-4">
                                         No Quick Sales found.
                                     </td>
                                 </tr>
@@ -439,6 +476,34 @@ function qsl_page_url(int $page): string
                                 ?>
                                 <tr>
                                     <td><strong><?= qsl_e($row['sale_no'] ?? '-') ?></strong></td>
+                                    <td>
+                                        <?php
+                                            $customerName = trim((string)($row['customer_name'] ?? ''));
+                                            $customerMobile = trim((string)($row['mobile'] ?? ''));
+                                            $customerAddress = trim((string)($row['address'] ?? ''));
+                                        ?>
+                                        <div class="customer-info">
+                                            <span class="customer-name">
+                                                <?= qsl_e($customerName !== '' ? $customerName : 'Walk-in Customer') ?>
+                                            </span>
+
+                                            <?php if ($customerMobile !== ''): ?>
+                                            <span class="customer-mobile">
+                                                <?= qsl_e($customerMobile) ?>
+                                            </span>
+                                            <?php endif; ?>
+
+                                            <?php if ($customerAddress !== ''): ?>
+                                            <span class="customer-address"
+                                                title="<?= qsl_e($customerAddress) ?>">
+                                                <?= qsl_e($customerAddress) ?>
+                                            </span>
+                                            <?php endif; ?>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <strong><?= qsl_e($row['sale_by'] ?? 'System') ?></strong>
+                                    </td>
                                     <td>
                                         <?= !empty($row['created_at'])
                                             ? qsl_e(date('d-m-Y h:i A', strtotime((string)$row['created_at'])))

@@ -30,6 +30,100 @@ function qs_api_table_exists(mysqli $conn, string $table): bool
 }
 
 
+
+function qs_api_column_exists(mysqli $conn, string $table, string $column): bool
+{
+    try {
+        $safeTable = $conn->real_escape_string($table);
+        $safeColumn = $conn->real_escape_string($column);
+        $res = $conn->query("SHOW COLUMNS FROM `{$safeTable}` LIKE '{$safeColumn}'");
+        $ok = $res && $res->num_rows > 0;
+        if ($res) $res->free();
+        return $ok;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function qs_api_public_invoice_url(string $token): string
+{
+    $https = !empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off';
+    $scheme = $https ? 'https' : 'http';
+    $host = trim((string)($_SERVER['HTTP_HOST'] ?? ''));
+    $script = str_replace('\\', '/', (string)($_SERVER['SCRIPT_NAME'] ?? '/api/quick-sale.php'));
+
+    // API lives in /api. Move one level up to the ERP root.
+    $root = rtrim(dirname(dirname($script)), '/');
+    if ($root === '.' || $root === '/') {
+        $root = '';
+    }
+
+    if ($host === '') {
+        return $root . '/quick_sale_invoice_pdf.php?token='
+            . rawurlencode($token) . '&download=1';
+    }
+
+    return $scheme . '://' . $host . $root
+        . '/quick_sale_invoice_pdf.php?token='
+        . rawurlencode($token) . '&download=1';
+}
+
+function qs_api_send_invoice_whatsapp(
+    mysqli $conn,
+    int $quickSaleId,
+    string $saleNo,
+    string $customerName,
+    string $mobile,
+    float $total,
+    string $invoiceToken,
+    ?int $sentBy
+): array {
+    $apiFile = __DIR__ . '/../includes/whatsapp-api.php';
+
+    if (!is_file($apiFile)) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp API file is missing.',
+            'log_id' => 0
+        ];
+    }
+
+    require_once $apiFile;
+
+    if (!function_exists('subhiksha_send_whatsapp')) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp sending function is unavailable.',
+            'log_id' => 0
+        ];
+    }
+
+    $invoiceUrl = qs_api_public_invoice_url($invoiceToken);
+
+    /*
+     * Use the existing live Meta sender without changing its configuration.
+     * This is a plain WhatsApp message containing the secure invoice link.
+     * Meta may reject non-template messages when no 24-hour customer-service
+     * conversation window is open; the Quick Sale itself is never rolled back.
+     */
+    $message =
+        "Dear {$customerName},\n\n"
+        . "Thank you for your purchase from Subhiksha Cards.\n"
+        . "Quick Sale Invoice: {$saleNo}\n"
+        . "Total Amount: ₹" . number_format($total, 2) . "\n\n"
+        . "Download Invoice:\n{$invoiceUrl}\n\n"
+        . "Thank you.";
+
+    return subhiksha_send_whatsapp($conn, [
+        'mobile' => $mobile,
+        'message' => $message,
+        'related_module' => 'Quick Sale',
+        'related_id' => $quickSaleId,
+        'customer_id' => null,
+        'sent_by' => $sentBy,
+    ]);
+}
+
 function qs_api_is_admin_role(mysqli $conn): bool
 {
     $sessionRoleKey = strtolower(trim((string)($_SESSION['role_key'] ?? '')));
@@ -631,12 +725,45 @@ try {
         }
     }
 
+    foreach (
+        ['customer_name', 'mobile', 'address', 'invoice_token', 'whatsapp_status', 'whatsapp_log_id', 'whatsapp_sent_at']
+        as $requiredColumn
+    ) {
+        if (!qs_api_column_exists($conn, 'quick_sales', $requiredColumn)) {
+            throw new RuntimeException(
+                'Quick Sale customer/WhatsApp database update is missing. Run database/quick_sale_customer_whatsapp_update.sql.'
+            );
+        }
+    }
+
     try {
         qs_api_ensure_payment_tables($conn);
     } catch (Throwable $e) {
         throw new RuntimeException(
             'Quick Sale payment database setup is missing. Run quick_sale_payment_update.sql. ' . $e->getMessage()
         );
+    }
+
+    $customerName = trim((string)($_POST['customer_name'] ?? ''));
+    $customerMobile = preg_replace('/\D+/', '', (string)($_POST['customer_mobile'] ?? ''));
+    $customerAddress = trim((string)($_POST['customer_address'] ?? ''));
+
+    if ($customerName === '') {
+        throw new RuntimeException('Customer Name is required.');
+    }
+
+    $customerNameLength = function_exists('mb_strlen') ? mb_strlen($customerName) : strlen($customerName);
+    if ($customerNameLength > 200) {
+        throw new RuntimeException('Customer Name cannot exceed 200 characters.');
+    }
+
+    if (!preg_match('/^\d{10}$/', $customerMobile)) {
+        throw new RuntimeException('Please enter a valid 10 digit customer mobile number.');
+    }
+
+    $customerAddressLength = function_exists('mb_strlen') ? mb_strlen($customerAddress) : strlen($customerAddress);
+    if ($customerAddressLength > 1000) {
+        throw new RuntimeException('Customer Address is too long.');
     }
 
     $rawJson = trim((string)($_POST['items_json'] ?? ''));
@@ -747,14 +874,34 @@ try {
     try {
         $saleNo = qs_api_next_no($conn);
 
+        $invoiceToken = bin2hex(random_bytes(24));
+
         $stmt = $conn->prepare("
             INSERT INTO quick_sales
-                (sale_no, total_amount, created_by, created_at)
+                (
+                    sale_no,
+                    customer_name,
+                    mobile,
+                    address,
+                    invoice_token,
+                    whatsapp_status,
+                    total_amount,
+                    created_by,
+                    created_at
+                )
             VALUES
-                (?, 0, ?, NOW())
+                (?, ?, ?, ?, ?, 'pending', 0, ?, NOW())
         ");
         $createdBy = $userId > 0 ? $userId : null;
-        $stmt->bind_param('si', $saleNo, $createdBy);
+        $stmt->bind_param(
+            'sssssi',
+            $saleNo,
+            $customerName,
+            $customerMobile,
+            $customerAddress,
+            $invoiceToken,
+            $createdBy
+        );
         $stmt->execute();
         $quickSaleId = (int)$stmt->insert_id;
         $stmt->close();
@@ -1010,9 +1157,73 @@ try {
 
         $conn->commit();
 
+        /*
+         * Send invoice only AFTER the database transaction is committed.
+         * A WhatsApp failure must never undo the sale, payment or stock movement.
+         */
+        $whatsapp = [
+            'success' => false,
+            'message' => 'WhatsApp was not sent.',
+            'log_id' => 0
+        ];
+
+        try {
+            $whatsapp = qs_api_send_invoice_whatsapp(
+                $conn,
+                $quickSaleId,
+                $saleNo,
+                $customerName,
+                $customerMobile,
+                $grandTotal,
+                $invoiceToken,
+                $createdBy
+            );
+        } catch (Throwable $waError) {
+            $whatsapp = [
+                'success' => false,
+                'message' => $waError->getMessage(),
+                'log_id' => 0
+            ];
+        }
+
+        $waStatus = !empty($whatsapp['success']) ? 'sent' : 'failed';
+        $waLogId = !empty($whatsapp['log_id']) ? (int)$whatsapp['log_id'] : null;
+
+        try {
+            if ($waStatus === 'sent') {
+                $stmt = $conn->prepare("
+                    UPDATE quick_sales
+                    SET whatsapp_status = 'sent',
+                        whatsapp_log_id = ?,
+                        whatsapp_sent_at = NOW()
+                    WHERE id = ?
+                ");
+                $stmt->bind_param('ii', $waLogId, $quickSaleId);
+            } else {
+                $stmt = $conn->prepare("
+                    UPDATE quick_sales
+                    SET whatsapp_status = 'failed',
+                        whatsapp_log_id = ?,
+                        whatsapp_sent_at = NULL
+                    WHERE id = ?
+                ");
+                $stmt->bind_param('ii', $waLogId, $quickSaleId);
+            }
+            $stmt->execute();
+            $stmt->close();
+        } catch (Throwable $ignored) {
+            // Sale is already safely committed.
+        }
+
         qs_api_response(true, 'Quick Sale, payment and stock saved successfully.', [
             'quick_sale_id' => $quickSaleId,
             'sale_no' => $saleNo,
+            'customer_name' => $customerName,
+            'customer_mobile' => $customerMobile,
+            'invoice_url' => qs_api_public_invoice_url($invoiceToken),
+            'whatsapp_sent' => !empty($whatsapp['success']),
+            'whatsapp_message' => (string)($whatsapp['message'] ?? ''),
+            'whatsapp_log_id' => $waLogId,
             'total_amount' => $grandTotal,
             'cash_received' => (float)$paymentBreakdown['cash_tendered'],
             'cash_applied' => (float)$paymentBreakdown['cash_applied'],

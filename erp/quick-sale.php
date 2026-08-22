@@ -329,13 +329,22 @@ try {
         SELECT
             qs.id,
             qs.sale_no,
+            qs.customer_name,
+            qs.mobile,
+            qs.address,
             qs.total_amount,
             qs.created_at,
+            COALESCE(
+                MAX(NULLIF(u.name, '')),
+                MAX(NULLIF(u.username, '')),
+                'System'
+            ) AS sale_by,
             COUNT(qsi.id) AS item_count,
             COALESCE(SUM(qsi.qty), 0) AS total_qty,
             {$paymentSelect}
         FROM quick_sales qs
         LEFT JOIN quick_sale_items qsi ON qsi.quick_sale_id = qs.id
+        LEFT JOIN users u ON u.id = qs.created_by
         GROUP BY qs.id
         ORDER BY qs.id DESC
         LIMIT 5
@@ -584,6 +593,25 @@ try {
         border-radius: 50%;
     }
 
+
+    .customer-panel {
+        border: 1px solid var(--border-soft);
+        border-radius: 20px;
+        padding: 18px;
+        background: color-mix(in srgb, #2563eb 4%, var(--card-bg));
+        margin-bottom: 18px;
+    }
+
+    .customer-panel .customer-note {
+        font-size: 11px;
+        font-weight: 800;
+        color: var(--text-muted);
+        margin-top: 5px;
+    }
+
+    .customer-panel .form-control {
+        min-height: 44px;
+    }
 
     .payment-panel {
         border: 1px solid var(--border-soft);
@@ -840,7 +868,7 @@ try {
                         <div>
                             <h1 class="mb-1">Quick Sale</h1>
                             <p class="text-muted-custom mb-0">
-                                Direct card sale. No Proforma, no Job Card and no production workflow.
+                                Direct card sale with instant stock reduction and invoice PDF. No Job Card or production workflow.
                             </p>
                         </div>
                     </div>
@@ -886,14 +914,43 @@ try {
                     <div class="section-title">Direct Sale</div>
 
                     <div class="quick-help mb-3">
-                        Only Product Name, Quantity and Price are needed. You can search an existing Product Master
-                        or type a new Product Name. Quick Sale can continue even when stock is insufficient; On Hand
-                        and Available stock may become negative.
+                        Enter the customer details first, then add Product Name, Quantity and Price. The customer
+                        mobile number is used to send the Quick Sale invoice automatically through WhatsApp after the
+                        sale is saved. Quick Sale can continue even when stock is insufficient.
                     </div>
 
                     <form id="quickSaleForm" autocomplete="off" novalidate>
                         <input type="hidden" name="csrf_token" value="<?= qs_e($csrfToken) ?>">
                         <input type="hidden" name="items_json" id="items_json" value="[]">
+
+                        <div class="customer-panel">
+                            <div class="section-title mb-2">Customer Details</div>
+                            <div class="row g-3">
+                                <div class="col-lg-4 col-md-6">
+                                    <label class="form-label fw-bold">Customer Name *</label>
+                                    <input type="text" name="customer_name" id="customer_name"
+                                        class="form-control" maxlength="200"
+                                        placeholder="Enter customer name" autocomplete="name">
+                                </div>
+
+                                <div class="col-lg-3 col-md-6">
+                                    <label class="form-label fw-bold">Mobile Number *</label>
+                                    <input type="text" name="customer_mobile" id="customer_mobile"
+                                        class="form-control" inputmode="numeric" maxlength="10"
+                                        placeholder="10 digit mobile number" autocomplete="tel">
+                                    <div class="customer-note">
+                                        Invoice will be sent to this WhatsApp number.
+                                    </div>
+                                </div>
+
+                                <div class="col-lg-5">
+                                    <label class="form-label fw-bold">Address</label>
+                                    <input type="text" name="customer_address" id="customer_address"
+                                        class="form-control" maxlength="1000"
+                                        placeholder="Optional customer address" autocomplete="street-address">
+                                </div>
+                            </div>
+                        </div>
 
                         <div class="row g-3 align-items-end">
                             <div class="col-lg-6">
@@ -979,9 +1036,9 @@ try {
                         <div class="row g-3 align-items-end mt-2">
                             <div class="col-lg-8">
                                 <div class="quick-help">
-                                    Quick Sale does not create Proforma, Job Card, tracking stages, printing workflow
-                                    or stock reservation. If stock is insufficient, the shortage remains visible as
-                                    negative stock.
+                                    Quick Sale does not create a Job Card, tracking stages, printing workflow or stock
+                                    reservation. After saving, an invoice PDF is generated using the existing Proforma
+                                    Bill PDF design. If stock is insufficient, the shortage remains visible as negative stock.
                                 </div>
                             </div>
 
@@ -1172,7 +1229,7 @@ try {
                                 Clear
                             </button>
                             <button type="submit" id="saveBtn" class="btn btn-success rounded-pill px-5 fw-bold">
-                                Save Quick Sale
+                                Save Quick Sale & Generate Invoice
                             </button>
                         </div>
                     </form>
@@ -1191,18 +1248,21 @@ try {
                             <thead>
                                 <tr>
                                     <th>Sale No</th>
+                                    <th>Customer</th>
+                                    <th>Sale By</th>
                                     <th>Date</th>
                                     <th class="text-end">Products</th>
                                     <th class="text-end">Qty</th>
                                     <th>Payment</th>
                                     <th class="text-end">Return</th>
                                     <th class="text-end">Total Amount</th>
+                                    <th class="text-end">Invoice</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <?php if (!$recentSales): ?>
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted-custom py-4">
+                                    <td colspan="10" class="text-center text-muted-custom py-4">
                                         No Quick Sale found.
                                     </td>
                                 </tr>
@@ -1211,6 +1271,30 @@ try {
                                 <?php foreach ($recentSales as $sale): ?>
                                 <tr>
                                     <td><strong><?= qs_e($sale['sale_no'] ?? '-') ?></strong></td>
+                                    <td>
+                                        <?php
+                                            $recentCustomerName = trim((string)($sale['customer_name'] ?? ''));
+                                            $recentCustomerMobile = trim((string)($sale['mobile'] ?? ''));
+                                            $recentCustomerAddress = trim((string)($sale['address'] ?? ''));
+                                        ?>
+                                        <strong>
+                                            <?= qs_e($recentCustomerName !== '' ? $recentCustomerName : 'Walk-in Customer') ?>
+                                        </strong>
+                                        <?php if ($recentCustomerMobile !== ''): ?>
+                                        <small class="d-block text-muted-custom fw-bold">
+                                            <?= qs_e($recentCustomerMobile) ?>
+                                        </small>
+                                        <?php endif; ?>
+                                        <?php if ($recentCustomerAddress !== ''): ?>
+                                        <small class="d-block text-muted-custom"
+                                            title="<?= qs_e($recentCustomerAddress) ?>">
+                                            <?= qs_e($recentCustomerAddress) ?>
+                                        </small>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <strong><?= qs_e($sale['sale_by'] ?? 'System') ?></strong>
+                                    </td>
                                     <td><?= !empty($sale['created_at']) ? qs_e(date('d-m-Y h:i A', strtotime($sale['created_at']))) : '-' ?>
                                     </td>
                                     <td class="text-end"><?= number_format((int)($sale['item_count'] ?? 0)) ?></td>
@@ -1227,6 +1311,13 @@ try {
                                     </td>
                                     <td class="text-end"><?= qs_e(qs_money($sale['return_amount'] ?? 0)) ?></td>
                                     <td class="text-end fw-bold"><?= qs_e(qs_money($sale['total_amount'] ?? 0)) ?></td>
+                                    <td class="text-end">
+                                        <a href="quick_sale_invoice_pdf.php?id=<?= (int)$sale['id'] ?>"
+                                           target="_blank"
+                                           class="btn btn-sm btn-outline-primary rounded-pill fw-bold px-3">
+                                            Invoice
+                                        </a>
+                                    </td>
                                 </tr>
                                 <?php endforeach; ?>
                             </tbody>
@@ -1273,6 +1364,9 @@ try {
         const denomError = document.getElementById('denomError');
         const saveDenomBtn = document.getElementById('saveDenomBtn');
         const clearProductSearchBtn = document.getElementById('clearProductSearchBtn');
+        const customerNameInput = document.getElementById('customer_name');
+        const customerMobileInput = document.getElementById('customer_mobile');
+        const customerAddressInput = document.getElementById('customer_address');
 
         function money(value) {
             return '₹' + (parseFloat(value || 0) || 0).toLocaleString('en-IN', {
@@ -1321,6 +1415,30 @@ try {
             }
         }
 
+
+        function validateCustomer(showErrors = true) {
+            const name = String(customerNameInput?.value || '').trim();
+            const mobile = String(customerMobileInput?.value || '').replace(/\D+/g, '');
+
+            if (!name) {
+                if (showErrors) {
+                    showToast('Please enter Customer Name.', 'danger', 'Customer Details');
+                    customerNameInput?.focus();
+                }
+                return false;
+            }
+
+            if (mobile.length !== 10) {
+                if (showErrors) {
+                    showToast('Please enter a valid 10 digit Mobile Number.', 'danger', 'Customer Details');
+                    customerMobileInput?.focus();
+                }
+                return false;
+            }
+
+            if (customerMobileInput) customerMobileInput.value = mobile;
+            return true;
+        }
 
         function saleTotal() {
             return Math.round(
@@ -2072,12 +2190,19 @@ try {
             if (cashAmountInput) cashAmountInput.value = '';
             if (upiAmountInput) upiAmountInput.value = '';
             if (upiReferenceInput) upiReferenceInput.value = '';
+            if (customerNameInput) customerNameInput.value = '';
+            if (customerMobileInput) customerMobileInput.value = '';
+            if (customerAddressInput) customerAddressInput.value = '';
             syncPaymentModeUi();
             denominationTotal();
         });
 
         document.getElementById('quickSaleForm')?.addEventListener('submit', function(event) {
             event.preventDefault();
+
+            if (!validateCustomer(true)) {
+                return;
+            }
 
             const current = currentProductSelection();
 
@@ -2106,7 +2231,7 @@ try {
             }
 
             const btn = document.getElementById('saveBtn');
-            const oldText = btn?.textContent || 'Save Quick Sale';
+            const oldText = btn?.textContent || 'Save Quick Sale & Generate Invoice';
 
             if (btn) {
                 btn.disabled = true;
@@ -2140,16 +2265,29 @@ try {
                         (Array.isArray(data.restored_products) && data.restored_products.length ?
                             '<br>Restored Product: ' + escapeHtml(data.restored_products.join(
                             ', ')) :
-                            ''),
+                            '') +
+                        (data.whatsapp_sent === true
+                            ? '<br>WhatsApp: Invoice sent to customer'
+                            : (data.whatsapp_message
+                                ? '<br>WhatsApp: ' + escapeHtml(data.whatsapp_message)
+                                : '')),
                         'success',
                         'Quick Sale Saved'
                     );
 
                     setTimeout(() => {
+                        const quickSaleId = parseInt(data.quick_sale_id || '0', 10);
+
+                        if (quickSaleId > 0) {
+                            window.location.href =
+                                'quick_sale_invoice_pdf.php?id=' + encodeURIComponent(quickSaleId);
+                            return;
+                        }
+
                         window.location.href = 'quick-sale.php?message=' +
                             encodeURIComponent((data.sale_no || 'Quick Sale') +
                                 ' saved successfully.');
-                    }, 900);
+                    }, 700);
                 })
                 .catch(error => {
                     showToast(escapeHtml(error.message || 'Unable to save Quick Sale.'), 'danger',
@@ -2159,6 +2297,10 @@ try {
                         btn.textContent = oldText;
                     }
                 });
+        });
+
+        customerMobileInput?.addEventListener('input', function() {
+            this.value = String(this.value || '').replace(/\D+/g, '').slice(0, 10);
         });
 
         /*

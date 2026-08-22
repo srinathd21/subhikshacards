@@ -252,6 +252,17 @@ if (!function_exists('sbp_amount_summary')) {
             'advance' => $advance,
             'balance' => $balance,
             'stored_final' => round((float)($bill['final_amount'] ?? 0), 2),
+
+            /*
+             * Quick Sale invoice presentation metadata.
+             * Normal Proforma bills ignore these fields and keep the existing
+             * TOTAL / ADVANCE / BALANCE behavior.
+             */
+            'is_quick_sale_invoice' => !empty($bill['is_quick_sale_invoice']),
+            'paid_amount' => round(max(
+                0,
+                (float)($bill['paid_amount'] ?? ($bill['advance_amount'] ?? 0))
+            ), 2),
         ];
     }
 }
@@ -1394,6 +1405,28 @@ class SubhikshaProformaInvoicePDF extends FPDF
                 false,
                 'tax'
             ];
+        }
+
+        /*
+         * QUICK SALE INVOICE
+         * ------------------
+         * Always show:
+         * TOTAL AMOUNT
+         * PAID
+         * BALANCE
+         *
+         * BALANCE stays visible even when the value is 0.00.
+         * Normal Proforma PDFs keep their existing behavior below.
+         */
+        if (!empty($summary['is_quick_sale_invoice'])) {
+            $paid = round(max(0, (float)($summary['paid_amount'] ?? 0)), 2);
+            $balance = round(max(0, $final - $paid), 2);
+
+            $rows[] = ['TOTAL AMOUNT', $final, true, 'total'];
+            $rows[] = ['PAID', $paid, false, 'advance'];
+            $rows[] = ['BALANCE', $balance, true, 'balance'];
+
+            return $rows;
         }
 
         $rows[] = ['TOTAL', $final, true, 'total'];
