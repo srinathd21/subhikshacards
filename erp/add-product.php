@@ -69,9 +69,9 @@ $csrfToken = ps_csrf_token();
                     </div>
 
                     <div class="col-12 col-lg-6">
-                        <label class="form-label fw-bold">Thumbnail Image *</label>
-                        <input type="file" name="thumbnail_image" id="thumbnailInput" class="form-control" accept="image/jpeg,image/png,image/webp,image/gif" required>
-                        <small class="text-muted-custom">Main product image used inside ERP and later on the website.</small>
+                        <label class="form-label fw-bold">Thumbnail Image <span class="text-muted fw-normal">(Optional)</span></label>
+                        <input type="file" name="thumbnail_image" id="thumbnailInput" class="form-control" accept="image/jpeg,image/png,image/webp,image/gif">
+                        <small class="text-muted-custom">Optional main product image used inside ERP and later on the website.</small>
                         <div class="mt-2"><img id="thumbnailPreview" class="image-preview" alt=""></div>
                     </div>
 
@@ -86,7 +86,7 @@ $csrfToken = ps_csrf_token();
                         <div class="settings-box">
                             <div class="d-flex flex-column flex-md-row align-items-md-end gap-3">
                                 <div class="form-check form-switch flex-grow-1">
-                                    <input class="form-check-input" type="checkbox" role="switch" name="low_stock_alert" id="lowStockAlert" >
+                                    <input class="form-check-input" type="checkbox" role="switch" name="low_stock_alert" id="lowStockAlert">
                                     <label class="form-check-label fw-bold" for="lowStockAlert">Enable Low Stock Alert</label>
                                     <div class="small text-muted-custom">Optional. Available Stock is checked against the minimum quantity.</div>
                                 </div>

@@ -604,7 +604,7 @@ $nowLocal = date('Y-m-d\TH:i');
             border-radius: 20px !important;
         }
 
-        .mobile-card > .d-flex.justify-content-between,
+        .mobile-card>.d-flex.justify-content-between,
         .mobile-card>.d-flex.justify-content-between {
             align-items: flex-start !important;
             gap: 12px !important;
@@ -697,6 +697,7 @@ $nowLocal = date('Y-m-d\TH:i');
     }
 
     @media(max-width:767.98px) {
+
         .mobile-card-actions .btn-action-icon,
         .mobile-card-actions .btn-delete-icon,
         .proforma-mobile-card .proforma-mobile-actions .btn-action-icon,
@@ -718,7 +719,6 @@ $nowLocal = date('Y-m-d\TH:i');
             height: 18px !important;
         }
     }
-
     </style>
 </head>
 
@@ -871,7 +871,8 @@ $nowLocal = date('Y-m-d\TH:i');
                                             data-customer-response="<?= e($row['customer_response'] ?? '-') ?>"
                                             data-next-callback="<?= e(fuDateTime($row['next_callback_at'] ?? null)) ?>"
                                             data-followup-status="<?= e($row['followup_status'] ?: 'Follow-up') ?>"
-                                            data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i data-lucide="eye"></i></button>
+                                            data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i
+                                                data-lucide="eye"></i></button>
 
                                         <?php if ($canEdit): ?>
                                         <button title="Edit" aria-label="Edit" type="button"
@@ -883,7 +884,8 @@ $nowLocal = date('Y-m-d\TH:i');
                                             data-call-remarks="<?= e($row['call_remarks']) ?>"
                                             data-customer-response="<?= e($row['customer_response'] ?? '') ?>"
                                             data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
-                                            data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i data-lucide="pencil"></i></button>
+                                            data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i
+                                                data-lucide="pencil"></i></button>
                                         <?php endif; ?>
 
                                         <?php if ($canDelete): ?>
@@ -893,7 +895,8 @@ $nowLocal = date('Y-m-d\TH:i');
                                             <input type="hidden" name="action" value="delete_record">
                                             <input type="hidden" name="id" value="<?= e($row['id']) ?>">
                                             <button title="Delete" aria-label="Delete" type="submit"
-                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i data-lucide="trash-2"></i></button>
+                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i
+                                                    data-lucide="trash-2"></i></button>
                                         </form>
                                         <?php endif; ?>
                                     </td>
@@ -938,7 +941,8 @@ $nowLocal = date('Y-m-d\TH:i');
                                     data-customer-response="<?= e($row['customer_response'] ?? '-') ?>"
                                     data-next-callback="<?= e(fuDateTime($row['next_callback_at'] ?? null)) ?>"
                                     data-followup-status="<?= e($row['followup_status'] ?: 'Follow-up') ?>"
-                                    data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i data-lucide="eye"></i></button>
+                                    data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i
+                                        data-lucide="eye"></i></button>
 
                                 <?php if ($canEdit): ?>
                                 <button title="Edit" aria-label="Edit" type="button"
@@ -949,7 +953,8 @@ $nowLocal = date('Y-m-d\TH:i');
                                     data-call-remarks="<?= e($row['call_remarks']) ?>"
                                     data-customer-response="<?= e($row['customer_response'] ?? '') ?>"
                                     data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
-                                    data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i data-lucide="pencil"></i></button>
+                                    data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i
+                                        data-lucide="pencil"></i></button>
                                 <?php endif; ?>
 
                                 <?php if ($canDelete): ?>
@@ -958,7 +963,9 @@ $nowLocal = date('Y-m-d\TH:i');
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="delete_record">
                                     <input type="hidden" name="id" value="<?= e($row['id']) ?>">
-                                    <button title="Delete" aria-label="Delete" type="submit" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i data-lucide="trash-2"></i></button>
+                                    <button title="Delete" aria-label="Delete" type="submit"
+                                        class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i
+                                            data-lucide="trash-2"></i></button>
                                 </form>
                                 <?php endif; ?>
                             </div>
@@ -1342,7 +1349,8 @@ $nowLocal = date('Y-m-d\TH:i');
 
             form.querySelector('button[type="submit"]')?.addEventListener('click', function() {
                 if (!window.followupsPermissions.canDelete) {
-                    showToast('You do not have permission to delete follow-ups.', 'danger', 'Access Denied');
+                    showToast('You do not have permission to delete follow-ups.', 'danger',
+                        'Access Denied');
                     return;
                 }
 

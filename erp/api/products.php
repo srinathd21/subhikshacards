@@ -84,12 +84,17 @@ try {
         $stmt->close();
         if ($duplicate) throw new RuntimeException('A product with the same name already exists. Edit or restore the existing product instead.');
 
-        if (empty($_FILES['thumbnail_image']) || (int)($_FILES['thumbnail_image']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
-            throw new RuntimeException('Thumbnail Image is required.');
+        // Thumbnail image is optional while creating a product.
+        $thumbnail = '';
+        if (
+            !empty($_FILES['thumbnail_image']) &&
+            (int)($_FILES['thumbnail_image']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE
+        ) {
+            $thumbnail = ps_upload_image($_FILES['thumbnail_image'], 'thumb');
+            if ($thumbnail !== '') {
+                $uploadedPaths[] = $thumbnail;
+            }
         }
-
-        $thumbnail = ps_upload_image($_FILES['thumbnail_image'], 'thumb');
-        $uploadedPaths[] = $thumbnail;
 
         $secondaryPaths = [];
         if (!empty($_FILES['secondary_images'])) {

@@ -4822,9 +4822,11 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                     const savedProformaId = parseInt(data.proforma_id || data.id || 0, 10);
 
                     /*
-                     * WhatsApp sending is handled ONLY by api/create_proforma.php
-                     * and ONLY for a newly created Proforma. Edit mode never sends
-                     * the proforma_created WhatsApp template.
+                     * WhatsApp sending is handled by api/create_proforma.php.
+                     * For a NEW Proforma the API now sends:
+                     * 1. proforma_created
+                     * 2. advance payment template for the payment row(s)
+                     * Edit mode never repeats these creation notifications.
                      */
 
                     let toastMessage = data.message || (editData ?
@@ -4840,20 +4842,43 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                         toastMessage += '<br>Customer Paid: ' + rupee(tenderedAmount) +
                             '<br>Return Amount: ' + rupee(returnAmount);
                     }
-                    if (!isEditSubmit && data.whatsapp_sent === true) {
-                        toastMessage += '<br>WhatsApp: Sent using API.';
-                    } else if (!isEditSubmit && data.whatsapp_sent === false) {
-                        toastMessage += '<br>WhatsApp failed: ' + (data.whatsapp_error ||
-                            data.whatsapp?.message || 'Please use Retry WhatsApp.');
+
+                    if (!isEditSubmit) {
+                        if (data.proforma_whatsapp_sent === true || data.whatsapp_sent === true) {
+                            toastMessage += '<br>Proforma WhatsApp: Sent.';
+                        } else if (data.proforma_whatsapp_sent === false || data.whatsapp_sent === false) {
+                            toastMessage += '<br>Proforma WhatsApp failed: ' +
+                                (data.proforma_whatsapp?.message ||
+                                    data.whatsapp_error ||
+                                    data.whatsapp?.message ||
+                                    'Please retry from Proforma Bills.');
+                        }
+
+                        if (data.advance_payment_whatsapp_attempted === true) {
+                            if (data.advance_payment_whatsapp_sent === true) {
+                                toastMessage += '<br>Advance Payment WhatsApp: Sent.';
+                            } else if (data.advance_payment_whatsapp_sent === false) {
+                                toastMessage += '<br>Advance Payment WhatsApp failed: ' +
+                                    (data.advance_payment_whatsapp_error ||
+                                        'Use Retry WhatsApp in the Proforma Payment page.');
+                            }
+                        }
                     } else if (data.whatsapp_mode === 'manual') {
                         toastMessage += '<br>WhatsApp: Manual window opened.';
                     }
 
                     clearFormDraft();
-                    const toastType = (!isEditSubmit && data.whatsapp_sent === false) ? 'warning' :
-                        'success';
-                    const toastTitle = toastType === 'warning' ? 'Proforma Saved — WhatsApp Failed' :
-                        'Success';
+
+                    const proformaWaFailed = !isEditSubmit &&
+                        (data.proforma_whatsapp_sent === false || data.whatsapp_sent === false);
+                    const advanceWaFailed = !isEditSubmit &&
+                        data.advance_payment_whatsapp_attempted === true &&
+                        data.advance_payment_whatsapp_sent === false;
+                    const toastType = (proformaWaFailed || advanceWaFailed) ? 'warning' : 'success';
+                    const toastTitle = toastType === 'warning'
+                        ? 'Proforma Saved — WhatsApp Attention'
+                        : 'Success';
+
                     showActionToast(toastMessage, toastType, toastTitle);
 
                     if (data.open_whatsapp_url) {
