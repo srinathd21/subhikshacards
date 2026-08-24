@@ -68,14 +68,35 @@ function qs_api_public_invoice_url(string $token): string
         . rawurlencode($token) . '&download=1';
 }
 
+function qs_api_invoice_id_url(int $quickSaleId): string
+{
+    $https = !empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off';
+    $scheme = $https ? 'https' : 'http';
+    $host = trim((string)($_SERVER['HTTP_HOST'] ?? ''));
+    $script = str_replace('\\', '/', (string)($_SERVER['SCRIPT_NAME'] ?? '/api/quick-sale.php'));
+
+    // API lives in /api. Move one level up to the ERP root.
+    $root = rtrim(dirname(dirname($script)), '/');
+    if ($root === '.' || $root === '/') {
+        $root = '';
+    }
+
+    $path = $root . '/quick_sale_invoice_pdf.php?id='
+        . rawurlencode((string)$quickSaleId) . '&download=1';
+
+    return $host === '' ? $path : $scheme . '://' . $host . $path;
+}
+
 function qs_api_send_invoice_whatsapp(
     mysqli $conn,
     int $quickSaleId,
     string $saleNo,
     string $customerName,
     string $mobile,
+    array $items,
     float $total,
-    string $invoiceToken,
+    float $paidAmount,
+    float $balanceAmount,
     ?int $sentBy
 ): array {
     $apiFile = __DIR__ . '/../includes/whatsapp-api.php';
@@ -90,38 +111,79 @@ function qs_api_send_invoice_whatsapp(
 
     require_once $apiFile;
 
-    if (!function_exists('subhiksha_send_whatsapp')) {
+    if (!function_exists('subhiksha_send_template_whatsapp')) {
         return [
             'success' => false,
-            'message' => 'WhatsApp sending function is unavailable.',
+            'message' => 'WhatsApp template sending function is unavailable.',
             'log_id' => 0
         ];
     }
 
-    $invoiceUrl = qs_api_public_invoice_url($invoiceToken);
+    $productParts = [];
+    foreach ($items as $item) {
+        $name = trim((string)($item['product_name'] ?? $item['item_name'] ?? ''));
+        $qty = (float)($item['qty'] ?? 0);
+
+        if ($name === '') {
+            continue;
+        }
+
+        $qtyText = abs($qty - round($qty)) < 0.00001
+            ? number_format($qty, 0)
+            : rtrim(rtrim(number_format($qty, 2, '.', ''), '0'), '.');
+
+        $productParts[] = $name . ' x ' . $qtyText;
+    }
+
+    $productDetails = $productParts
+        ? implode(', ', $productParts)
+        : 'Quick Sale Items';
+
+    // Keep BODY text concise for Meta variable limits.
+    if (function_exists('mb_strlen') && mb_strlen($productDetails) > 900) {
+        $productDetails = mb_substr($productDetails, 0, 897) . '...';
+    } elseif (strlen($productDetails) > 900) {
+        $productDetails = substr($productDetails, 0, 897) . '...';
+    }
 
     /*
-     * Use the existing live Meta sender without changing its configuration.
-     * This is a plain WhatsApp message containing the secure invoice link.
-     * Meta may reject non-template messages when no 24-hour customer-service
-     * conversation window is open; the Quick Sale itself is never rolled back.
+     * The approved Meta template has a dynamic URL button whose fixed URL ends
+     * with: quick_sale_invoice_pdf.php?id={{1}}
+     * The common WhatsApp helper extracts only the `id` value for that button.
      */
-    $message =
-        "Dear {$customerName},\n\n"
-        . "Thank you for your purchase from Subhiksha Cards.\n"
-        . "Quick Sale Invoice: {$saleNo}\n"
-        . "Total Amount: ₹" . number_format($total, 2) . "\n\n"
-        . "Download Invoice:\n{$invoiceUrl}\n\n"
-        . "Thank you.";
+    $invoiceUrl = qs_api_invoice_id_url($quickSaleId);
 
-    return subhiksha_send_whatsapp($conn, [
-        'mobile' => $mobile,
-        'message' => $message,
-        'related_module' => 'Quick Sale',
-        'related_id' => $quickSaleId,
-        'customer_id' => null,
-        'sent_by' => $sentBy,
-    ]);
+    $variables = [
+        'customer_name' => $customerName !== '' ? $customerName : 'Customer',
+        'quick_sale_no' => $saleNo,
+        'sale_no' => $saleNo,
+        'product_details' => $productDetails,
+        'total_amount' => number_format($total, 2),
+        'paid_amount' => number_format($paidAmount, 2),
+        'balance_amount' => number_format(max(0, $balanceAmount), 2),
+        'quick_sale_invoice_link' => $invoiceUrl,
+        'invoice_link' => $invoiceUrl,
+    ];
+
+    return subhiksha_send_template_whatsapp(
+        $conn,
+        'quick_sale_invoice',
+        $mobile,
+        $variables,
+        [
+            'related_module' => 'Quick Sale',
+            'related_id' => $quickSaleId,
+            'customer_id' => null,
+            'sent_by' => $sentBy,
+            'language_code' => 'en',
+            'extra_payload' => [
+                'type' => 'template',
+                'template_key' => 'quick_sale_invoice',
+                'quick_sale_id' => $quickSaleId,
+                'quick_sale_invoice_link' => $invoiceUrl,
+            ],
+        ]
+    );
 }
 
 function qs_api_is_admin_role(mysqli $conn): bool
@@ -1174,8 +1236,10 @@ try {
                 $saleNo,
                 $customerName,
                 $customerMobile,
+                $savedItems,
                 $grandTotal,
-                $invoiceToken,
+                (float)$paymentBreakdown['total_applied'],
+                max(0, $grandTotal - (float)$paymentBreakdown['total_applied']),
                 $createdBy
             );
         } catch (Throwable $waError) {

@@ -15,6 +15,10 @@
 require_once __DIR__ . '/includes/auth.php';
 require_permission($conn, 'can_view', 'dashboard.php');
 
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
 if (!function_exists('e')) {
     function e($value): string
     {
@@ -227,6 +231,119 @@ function dash_completed_job_where(): string
 $roleGroup = dash_role_group($roleKey);
 $displayName = trim((string)($_SESSION['name'] ?? $_SESSION['username'] ?? 'User')) ?: 'User';
 $today = date('Y-m-d');
+
+// -----------------------------------------------------------------------------
+// Follow-up login reminder
+// Shows once per login/session and includes today's + overdue pending follow-ups.
+// Effective reminder time = next_callback_at when scheduled, otherwise followup_at.
+// -----------------------------------------------------------------------------
+$followupReminderRows = [];
+$followupReminderTotal = 0;
+$followupReminderOverdue = 0;
+$showFollowupReminder = false;
+$followupReminderCanView = dash_can_page($conn, 'can_view', 'followups.php');
+$followupReminderCanModify = dash_can_page($conn, 'can_update', 'followups.php') || dash_can_page($conn, 'can_edit', 'followups.php');
+
+if (empty($_SESSION['followups_csrf'])) {
+    $_SESSION['followups_csrf'] = bin2hex(random_bytes(32));
+}
+$followupReminderCsrf = (string)$_SESSION['followups_csrf'];
+
+if ($followupReminderCanView && dash_table_exists($conn, 'enquiry_followups') && dash_table_exists($conn, 'enquiries')) {
+    try {
+        $activeEnquiryWhere = dash_col_exists($conn, 'enquiries', 'converted_to_order')
+            ? 'AND COALESCE(e.converted_to_order, 0) = 0'
+            : '';
+
+        $reminderSql = "
+            SELECT
+                ef.id,
+                ef.enquiry_id,
+                ef.followup_at,
+                ef.next_callback_at,
+                ef.call_remarks,
+                ef.followup_status,
+                e.enquiry_no,
+                e.customer_name,
+                e.mobile,
+                COALESCE(ef.next_callback_at, ef.followup_at) AS reminder_at
+            FROM enquiry_followups ef
+            INNER JOIN enquiries e ON e.id = ef.enquiry_id
+            WHERE COALESCE(ef.next_callback_at, ef.followup_at) IS NOT NULL
+              AND DATE(COALESCE(ef.next_callback_at, ef.followup_at)) <= CURDATE()
+              AND LOWER(COALESCE(ef.followup_status, 'followup_pending')) NOT IN
+                  ('completed','closed','converted_to_quotation','not_interested')
+              {$activeEnquiryWhere}
+            ORDER BY
+                CASE WHEN DATE(COALESCE(ef.next_callback_at, ef.followup_at)) < CURDATE() THEN 0 ELSE 1 END ASC,
+                COALESCE(ef.next_callback_at, ef.followup_at) ASC,
+                ef.id ASC
+            LIMIT 25
+        ";
+
+        $followupReminderRows = dash_fetch_all($conn, $reminderSql);
+        $followupReminderTotal = count($followupReminderRows);
+        foreach ($followupReminderRows as $reminderRow) {
+            $reminderDate = !empty($reminderRow['reminder_at'])
+                ? date('Y-m-d', strtotime((string)$reminderRow['reminder_at']))
+                : '';
+            if ($reminderDate !== '' && $reminderDate < $today) {
+                $followupReminderOverdue++;
+            }
+        }
+
+        $reminderSessionKey = 'followup_login_reminder_shown_' . $today;
+        if ($followupReminderTotal > 0 && empty($_SESSION[$reminderSessionKey])) {
+            $showFollowupReminder = true;
+            $_SESSION[$reminderSessionKey] = 1;
+        }
+    } catch (Throwable $e) {
+        $followupReminderRows = [];
+        $followupReminderTotal = 0;
+        $followupReminderOverdue = 0;
+        $showFollowupReminder = false;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Follow-up dashboard summary cards
+// -----------------------------------------------------------------------------
+$todayFollowupCount = 0;
+$overdueFollowupCount = 0;
+$upcomingFollowupCount = 0;
+
+if ($followupReminderCanView && dash_table_exists($conn, 'enquiry_followups')) {
+    $activeFollowupWhere = "
+        LOWER(COALESCE(followup_status, 'followup_pending')) NOT IN
+            ('completed','closed','converted_to_quotation','not_interested')
+    ";
+
+    $todayFollowupCount = (int)dash_scalar($conn, "
+        SELECT COUNT(*)
+        FROM enquiry_followups
+        WHERE {$activeFollowupWhere}
+          AND COALESCE(next_callback_at, followup_at) IS NOT NULL
+          AND DATE(COALESCE(next_callback_at, followup_at)) = CURDATE()
+    ", 0);
+
+    $overdueFollowupCount = (int)dash_scalar($conn, "
+        SELECT COUNT(*)
+        FROM enquiry_followups
+        WHERE {$activeFollowupWhere}
+          AND COALESCE(next_callback_at, followup_at) IS NOT NULL
+          AND DATE(COALESCE(next_callback_at, followup_at)) < CURDATE()
+    ", 0);
+
+    $upcomingFollowupCount = (int)dash_scalar($conn, "
+        SELECT COUNT(*)
+        FROM enquiry_followups
+        WHERE {$activeFollowupWhere}
+          AND COALESCE(next_callback_at, followup_at) IS NOT NULL
+          AND DATE(COALESCE(next_callback_at, followup_at)) > CURDATE()
+    ", 0);
+}
+
+$dueFollowupNotificationCount = $todayFollowupCount + $overdueFollowupCount;
 
 // -----------------------------------------------------------------------------
 // Live ERP counts
@@ -1119,6 +1236,115 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
         background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg))
     }
 
+    .followup-reminder-modal .modal-dialog {
+        max-width: 780px;
+        width: calc(100% - 32px);
+    }
+
+    .followup-reminder-modal .modal-content {
+        border: 0;
+        border-radius: 24px;
+        background: var(--card-bg);
+        color: var(--text-main);
+        box-shadow: 0 28px 80px rgba(15, 23, 42, .24);
+        overflow: hidden;
+    }
+
+    .followup-reminder-modal .modal-header {
+        border-bottom: 1px solid var(--border-soft);
+        padding: 20px 22px 16px;
+    }
+
+    .followup-reminder-head-icon {
+        width: 46px;
+        height: 46px;
+        border-radius: 16px;
+        display: grid;
+        place-items: center;
+        background: color-mix(in srgb, var(--brand-1) 12%, var(--card-bg));
+        color: var(--brand-1);
+        flex: 0 0 auto;
+    }
+
+    .followup-reminder-list {
+        max-height: min(62vh, 560px);
+        overflow-y: auto;
+        padding: 14px 18px 4px;
+    }
+
+    .followup-reminder-item {
+        border: 1px solid var(--border-soft);
+        border-radius: 18px;
+        padding: 15px;
+        margin-bottom: 12px;
+        background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg));
+    }
+
+    .followup-reminder-item.is-overdue {
+        border-color: color-mix(in srgb, #dc2626 32%, var(--border-soft));
+        background: color-mix(in srgb, #fee2e2 34%, var(--card-bg));
+    }
+
+    .followup-reminder-name {
+        font-size: 15px;
+        font-weight: 900;
+        color: var(--text-main);
+    }
+
+    .followup-reminder-meta,
+    .followup-reminder-remarks {
+        color: var(--text-muted);
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.45;
+    }
+
+    .followup-reminder-remarks {
+        color: var(--text-main);
+        margin-top: 8px;
+    }
+
+    .followup-reminder-status {
+        display: inline-flex;
+        align-items: center;
+        padding: 5px 9px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 900;
+        white-space: nowrap;
+        background: #dbeafe;
+        color: #1d4ed8;
+    }
+
+    .followup-reminder-status.overdue {
+        background: #fee2e2;
+        color: #b91c1c;
+    }
+
+    .followup-schedule-box {
+        display: none;
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px dashed var(--border-soft);
+    }
+
+    .followup-schedule-box.is-open {
+        display: block;
+    }
+
+    .followup-reminder-modal .modal-footer {
+        border-top: 1px solid var(--border-soft);
+        padding: 14px 18px 18px;
+    }
+
+    .followup-reminder-toast {
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        z-index: 13000;
+        max-width: 360px;
+    }
+
     @media(max-width:1199.98px) {
 
         .quick-action-grid,
@@ -1221,6 +1447,30 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
         }
     }
 
+    @media(max-width:767.98px) {
+        .followup-reminder-modal .modal-dialog {
+            margin: 10px;
+        }
+
+        .followup-reminder-modal .modal-header {
+            padding: 16px;
+        }
+
+        .followup-reminder-list {
+            padding: 12px;
+            max-height: 66vh;
+        }
+
+        .followup-reminder-item {
+            padding: 13px;
+            border-radius: 16px;
+        }
+
+        .followup-reminder-actions .btn {
+            flex: 1 1 auto;
+        }
+    }
+
     @media(max-width:420px) {
         .dashboard-page .dashboard-hero h1 {
             font-size: 22px
@@ -1270,6 +1520,89 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                     </div>
                     <?php endforeach; ?>
                 </div>
+
+                <?php if ($followupReminderCanView): ?>
+                <div class="row g-3 mb-3">
+                    <div class="col-12">
+                        <div class="card-ui dashboard-card">
+                            <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
+                                <div>
+                                    <h2 class="dashboard-card-title">Follow-up Notifications</h2>
+                                    <p class="text-muted-custom mb-0">
+                                        Today's, overdue and upcoming customer follow-ups.
+                                    </p>
+                                </div>
+                                <div class="d-flex flex-wrap gap-2">
+                                    <?php if ($followupReminderTotal > 0): ?>
+                                    <button type="button" class="btn btn-outline-primary rounded-pill fw-bold px-4"
+                                        data-bs-toggle="modal" data-bs-target="#todayFollowupReminderModal">
+                                        <i data-lucide="bell-ring" style="width:16px;height:16px"></i>
+                                        Open Reminder
+                                        <span class="badge text-bg-danger ms-1"><?= number_format($dueFollowupNotificationCount) ?></span>
+                                    </button>
+                                    <?php endif; ?>
+                                    <a href="followups.php" class="btn btn-primary rounded-pill fw-bold px-4">
+                                        View Follow-ups
+                                    </a>
+                                </div>
+                            </div>
+
+                            <div class="row g-3">
+                                <div class="col-12 col-md-4">
+                                    <a href="followups.php?from_date=<?= e($today) ?>&to_date=<?= e($today) ?>"
+                                        class="text-decoration-none">
+                                        <div class="dash-kpi-card h-100">
+                                            <div class="dash-kpi-icon"
+                                                style="background:linear-gradient(135deg,#16a34a,#22c55e)">
+                                                <i data-lucide="phone-call"></i>
+                                            </div>
+                                            <div>
+                                                <span class="dash-kpi-label">Today Follow-ups</span>
+                                                <span class="dash-kpi-value"><?= number_format($todayFollowupCount) ?></span>
+                                                <span class="dash-kpi-sub">Calls / callbacks due today</span>
+                                            </div>
+                                        </div>
+                                    </a>
+                                </div>
+
+                                <div class="col-12 col-md-4">
+                                    <a href="followups.php?to_date=<?= e(date('Y-m-d', strtotime('-1 day'))) ?>"
+                                        class="text-decoration-none">
+                                        <div class="dash-kpi-card h-100">
+                                            <div class="dash-kpi-icon"
+                                                style="background:linear-gradient(135deg,#dc2626,#f97316)">
+                                                <i data-lucide="clock-alert"></i>
+                                            </div>
+                                            <div>
+                                                <span class="dash-kpi-label">Overdue Follow-ups</span>
+                                                <span class="dash-kpi-value"><?= number_format($overdueFollowupCount) ?></span>
+                                                <span class="dash-kpi-sub">Pending follow-ups from earlier dates</span>
+                                            </div>
+                                        </div>
+                                    </a>
+                                </div>
+
+                                <div class="col-12 col-md-4">
+                                    <a href="followups.php?from_date=<?= e(date('Y-m-d', strtotime('+1 day'))) ?>"
+                                        class="text-decoration-none">
+                                        <div class="dash-kpi-card h-100">
+                                            <div class="dash-kpi-icon"
+                                                style="background:linear-gradient(135deg,#2563eb,#7c3aed)">
+                                                <i data-lucide="calendar-clock"></i>
+                                            </div>
+                                            <div>
+                                                <span class="dash-kpi-label">Upcoming Callbacks</span>
+                                                <span class="dash-kpi-value"><?= number_format($upcomingFollowupCount) ?></span>
+                                                <span class="dash-kpi-sub">Scheduled after today</span>
+                                            </div>
+                                        </div>
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
 
 
                 <div class="row g-3 mb-3">
@@ -1426,11 +1759,241 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
     <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
     </div>
 
+    <?php if ($followupReminderTotal > 0): ?>
+    <div class="modal fade followup-reminder-modal" id="todayFollowupReminderModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header align-items-start">
+                    <div class="d-flex gap-3 align-items-start">
+                        <div class="followup-reminder-head-icon"><i data-lucide="bell-ring"></i></div>
+                        <div>
+                            <div class="d-flex flex-wrap align-items-center gap-2">
+                                <h5 class="modal-title fw-black mb-0" style="font-weight:900">Today's Follow-up Reminder
+                                </h5>
+                                <span class="badge rounded-pill text-bg-warning"
+                                    id="followupReminderCount"><?= number_format($followupReminderTotal) ?></span>
+                            </div>
+                            <small class="text-muted-custom">
+                                <?= $followupReminderOverdue > 0 ? number_format($followupReminderOverdue) . ' overdue · ' : '' ?>
+                                Complete the call or schedule the next callback.
+                            </small>
+                        </div>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+
+                <div class="followup-reminder-list" id="followupReminderList">
+                    <?php foreach ($followupReminderRows as $reminder): ?>
+                    <?php
+                        $reminderAt = (string)($reminder['reminder_at'] ?? '');
+                        $isOverdue = $reminderAt !== '' && date('Y-m-d', strtotime($reminderAt)) < $today;
+                        $followupId = (int)($reminder['id'] ?? 0);
+                    ?>
+                    <div class="followup-reminder-item <?= $isOverdue ? 'is-overdue' : '' ?>"
+                        data-followup-id="<?= $followupId ?>">
+                        <div class="d-flex justify-content-between gap-2 align-items-start">
+                            <div>
+                                <div class="followup-reminder-name"><?= e($reminder['customer_name'] ?? '-') ?></div>
+                                <div class="followup-reminder-meta">
+                                    <?= e($reminder['mobile'] ?? '-') ?> ·
+                                    <?= e($reminderAt !== '' ? date('d-m-Y h:i A', strtotime($reminderAt)) : '-') ?>
+                                </div>
+                                <div class="followup-reminder-meta">Enquiry: <?= e($reminder['enquiry_no'] ?? '-') ?>
+                                </div>
+                            </div>
+                            <span class="followup-reminder-status <?= $isOverdue ? 'overdue' : '' ?>">
+                                <?= $isOverdue ? 'Overdue' : 'Due Today' ?>
+                            </span>
+                        </div>
+
+                        <div class="followup-reminder-remarks">
+                            <strong>Remarks:</strong> <?= e($reminder['call_remarks'] ?? '-') ?>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2 mt-3 followup-reminder-actions">
+                            <a href="followups.php?focus=<?= $followupId ?>"
+                                class="btn btn-sm btn-outline-primary rounded-pill fw-bold px-3">View</a>
+                            <?php if ($followupReminderCanModify): ?>
+                            <button type="button"
+                                class="btn btn-sm btn-outline-secondary rounded-pill fw-bold px-3 js-open-followup-schedule"
+                                data-id="<?= $followupId ?>">
+                                Schedule Next
+                            </button>
+                            <button type="button"
+                                class="btn btn-sm btn-success rounded-pill fw-bold px-3 js-complete-dashboard-followup"
+                                data-id="<?= $followupId ?>">
+                                <i data-lucide="check" style="width:14px;height:14px"></i> Complete
+                            </button>
+                            <?php endif; ?>
+                        </div>
+
+                        <?php if ($followupReminderCanModify): ?>
+                        <div class="followup-schedule-box" id="followupScheduleBox<?= $followupId ?>">
+                            <label class="form-label fw-bold small">Next Callback Date & Time</label>
+                            <div class="d-flex flex-column flex-sm-row gap-2">
+                                <input type="datetime-local" class="form-control form-control-sm js-followup-next-time"
+                                    data-id="<?= $followupId ?>" min="<?= e(date('Y-m-d\TH:i')) ?>">
+                                <button type="button"
+                                    class="btn btn-sm btn-primary rounded-pill fw-bold px-3 js-save-followup-schedule"
+                                    data-id="<?= $followupId ?>">Save</button>
+                                <button type="button"
+                                    class="btn btn-sm btn-outline-secondary rounded-pill fw-bold px-3 js-cancel-followup-schedule"
+                                    data-id="<?= $followupId ?>">Cancel</button>
+                            </div>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+
+                <div class="modal-footer justify-content-between">
+                    <small class="text-muted-custom">Closing this popup only dismisses the reminder. It does not
+                        complete the follow-up.</small>
+                    <a href="followups.php" class="btn btn-primary rounded-pill fw-bold px-4">View All Follow-ups</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
+
     <?php include __DIR__ . '/includes/script.php'; ?>
     <script>
-    if (window.lucide && typeof window.lucide.createIcons === 'function') {
-        window.lucide.createIcons();
-    }
+    (function() {
+        function refreshIcons() {
+            if (window.lucide && typeof window.lucide.createIcons === 'function') {
+                window.lucide.createIcons();
+            }
+        }
+
+        refreshIcons();
+
+        const reminderModalEl = document.getElementById('todayFollowupReminderModal');
+        const reminderList = document.getElementById('followupReminderList');
+        const reminderCount = document.getElementById('followupReminderCount');
+        const csrfToken = <?= json_encode($followupReminderCsrf, JSON_UNESCAPED_SLASHES) ?>;
+
+        function showReminderToast(message, type) {
+            const old = document.getElementById('followupReminderToast');
+            if (old) old.remove();
+
+            const wrap = document.createElement('div');
+            wrap.id = 'followupReminderToast';
+            wrap.className = 'alert ' + (type === 'danger' ? 'alert-danger' : 'alert-success') +
+                ' followup-reminder-toast shadow';
+            wrap.setAttribute('role', 'alert');
+            wrap.innerHTML = '<div class="d-flex justify-content-between gap-3 align-items-start"><strong>' +
+                String(message || '') +
+                '</strong><button type="button" class="btn-close" aria-label="Close"></button></div>';
+            wrap.querySelector('.btn-close')?.addEventListener('click', () => wrap.remove());
+            document.body.appendChild(wrap);
+            setTimeout(() => wrap.remove(), 3800);
+        }
+
+        function apiAction(payload) {
+            const formData = new FormData();
+            Object.entries(payload).forEach(([key, value]) => formData.append(key, value == null ? '' : String(
+                value)));
+            formData.append('csrf_token', csrfToken);
+
+            return fetch('api/followups.php', {
+                method: 'POST',
+                body: formData,
+                credentials: 'same-origin'
+            }).then(async response => {
+                const data = await response.json();
+                if (!data.status) throw new Error(data.message || 'Follow-up update failed.');
+                return data;
+            });
+        }
+
+        function removeReminder(id) {
+            reminderList?.querySelector('[data-followup-id="' + id + '"]')?.remove();
+            const remaining = reminderList ? reminderList.querySelectorAll('[data-followup-id]').length : 0;
+            if (reminderCount) reminderCount.textContent = String(remaining);
+            if (remaining === 0 && reminderModalEl && window.bootstrap && bootstrap.Modal) {
+                bootstrap.Modal.getOrCreateInstance(reminderModalEl).hide();
+            }
+        }
+
+        document.querySelectorAll('.js-complete-dashboard-followup').forEach(button => {
+            button.addEventListener('click', function() {
+                const id = this.dataset.id || '0';
+                if (!confirm('Mark this follow-up as completed?')) return;
+                this.disabled = true;
+                apiAction({
+                        action: 'complete_reminder',
+                        id
+                    })
+                    .then(data => {
+                        removeReminder(id);
+                        showReminderToast(data.message || 'Follow-up completed.', 'success');
+                    })
+                    .catch(error => {
+                        this.disabled = false;
+                        showReminderToast(error.message || 'Unable to complete follow-up.',
+                            'danger');
+                    });
+            });
+        });
+
+        document.querySelectorAll('.js-open-followup-schedule').forEach(button => {
+            button.addEventListener('click', function() {
+                const id = this.dataset.id || '0';
+                document.getElementById('followupScheduleBox' + id)?.classList.add('is-open');
+            });
+        });
+
+        document.querySelectorAll('.js-cancel-followup-schedule').forEach(button => {
+            button.addEventListener('click', function() {
+                const id = this.dataset.id || '0';
+                document.getElementById('followupScheduleBox' + id)?.classList.remove('is-open');
+            });
+        });
+
+        document.querySelectorAll('.js-save-followup-schedule').forEach(button => {
+            button.addEventListener('click', function() {
+                const id = this.dataset.id || '0';
+                const input = document.querySelector('.js-followup-next-time[data-id="' + id +
+                    '"]');
+                const nextTime = input?.value || '';
+                if (!nextTime) {
+                    showReminderToast('Select the next callback date and time.', 'danger');
+                    input?.focus();
+                    return;
+                }
+
+                this.disabled = true;
+                apiAction({
+                        action: 'schedule_next',
+                        id,
+                        next_callback_at: nextTime
+                    })
+                    .then(data => {
+                        removeReminder(id);
+                        showReminderToast(data.message || 'Next callback scheduled.',
+                            'success');
+                    })
+                    .catch(error => {
+                        this.disabled = false;
+                        showReminderToast(error.message || 'Unable to schedule callback.',
+                            'danger');
+                    });
+            });
+        });
+
+        const autoShowReminder = <?= $showFollowupReminder ? 'true' : 'false' ?>;
+        if (autoShowReminder && reminderModalEl && window.bootstrap && bootstrap.Modal) {
+            window.addEventListener('load', function() {
+                setTimeout(function() {
+                    bootstrap.Modal.getOrCreateInstance(reminderModalEl, {
+                        backdrop: true,
+                        keyboard: true
+                    }).show();
+                    refreshIcons();
+                }, 280);
+            });
+        }
+    })();
     </script>
 </body>
 

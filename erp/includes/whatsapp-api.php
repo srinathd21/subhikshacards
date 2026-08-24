@@ -266,7 +266,7 @@ if (!function_exists('subhiksha_wa_log')) {
 
 if (!function_exists('subhiksha_wa_supported_template_keys')) {
     /**
-     * The 13 Meta-approved templates and their exact BODY variable order.
+     * The Meta-approved templates and their exact BODY variable order.
      * meta_id values come from the active Meta Manager screenshots supplied
      * on 2026-08-05. Meta sends by template NAME, not by this numeric ID.
      * Do not reorder these values unless the corresponding approved Meta
@@ -364,6 +364,42 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'index' => '0',
                     'sub_type' => 'url',
                     'variable' => 'proforma_pdf_link',
+                    'value_mode' => 'query:id',
+                    'required' => true
+                ]
+            ],
+            'quick_sale_invoice' => [
+                'meta_id' => null,
+                'module' => 'Quick Sale',
+
+                /*
+                 * Meta template name: quick_sale_invoice
+                 *
+                 * BODY variable order:
+                 * {{1}} customer_name
+                 * {{2}} quick_sale_no
+                 * {{3}} product_details
+                 * {{4}} total_amount
+                 * {{5}} paid_amount
+                 * {{6}} balance_amount
+                 *
+                 * BUTTON:
+                 * Download Invoice -> dynamic Quick Sale ID
+                 * Fixed Meta URL example:
+                 * https://your-domain/erp/quick_sale_invoice_pdf.php?id={{1}}
+                 */
+                'body_variables' => [
+                    'customer_name',
+                    'quick_sale_no',
+                    'product_details',
+                    'total_amount',
+                    'paid_amount',
+                    'balance_amount'
+                ],
+                'button' => [
+                    'index' => '0',
+                    'sub_type' => 'url',
+                    'variable' => 'quick_sale_invoice_link',
                     'value_mode' => 'query:id',
                     'required' => true
                 ]
@@ -569,6 +605,14 @@ if (!function_exists('subhiksha_meta_variable_value')) {
                 'proforma_download_link',
                 'proforma_view_link',
                 'customer_proforma_link',
+                'invoice_link'
+            ],
+            'quick_sale_no' => ['sale_no', 'invoice_no'],
+            'product_details' => ['products', 'item_details', 'items'],
+            'total_amount' => ['final_amount', 'grand_total'],
+            'quick_sale_invoice_link' => [
+                'quick_sale_pdf_link',
+                'quick_sale_download_link',
                 'invoice_link'
             ],
             'stage_name' => ['current_stage', 'completed_stage'],

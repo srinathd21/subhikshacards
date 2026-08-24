@@ -21,6 +21,7 @@ if (empty($_SESSION['followups_csrf'])) {
 }
 
 $csrfToken = $_SESSION['followups_csrf'];
+$focusId = (int)($_GET['focus'] ?? 0);
 
 $currentPage = 'followups.php';
 $canView = can_view($conn, $currentPage);
@@ -204,10 +205,135 @@ if (!$statusOptions) {
     ];
 }
 
+$statusKeys = array_map(static fn(array $row): string => strtolower((string)($row['status_key'] ?? '')), $statusOptions);
+if (!in_array('completed', $statusKeys, true)) {
+    $statusOptions[] = ['status_key' => 'completed', 'status_name' => 'Completed'];
+}
+
+function fuTerminalStatus($value): bool
+{
+    return in_array(strtolower(trim((string)$value)), [
+        'completed', 'closed', 'converted_to_quotation', 'not_interested'
+    ], true);
+}
+
+function fuCurrentFilterQuery(array $extra = []): string
+{
+    $keep = [];
+    foreach (['q', 'from_date', 'to_date'] as $key) {
+        if (isset($_GET[$key]) && trim((string)$_GET[$key]) !== '') {
+            $keep[$key] = trim((string)$_GET[$key]);
+        }
+    }
+
+    foreach ($extra as $key => $value) {
+        if ($value === null || $value === '') {
+            unset($keep[$key]);
+        } else {
+            $keep[$key] = $value;
+        }
+    }
+
+    return http_build_query($keep);
+}
+
+function fuBindParams(mysqli_stmt $stmt, string $types, array &$params): void
+{
+    if ($types === '' || !$params) {
+        return;
+    }
+
+    $bind = [$types];
+    foreach ($params as $key => &$value) {
+        $bind[] = &$value;
+    }
+    call_user_func_array([$stmt, 'bind_param'], $bind);
+}
+
+$filterSearch = trim((string)($_GET['q'] ?? ''));
+$filterFromDate = trim((string)($_GET['from_date'] ?? ''));
+$filterToDate = trim((string)($_GET['to_date'] ?? ''));
+
+if ($filterFromDate !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $filterFromDate)) {
+    $filterFromDate = '';
+}
+if ($filterToDate !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $filterToDate)) {
+    $filterToDate = '';
+}
+if ($filterFromDate !== '' && $filterToDate !== '' && $filterFromDate > $filterToDate) {
+    [$filterFromDate, $filterToDate] = [$filterToDate, $filterFromDate];
+}
+
+$page = max(1, (int)($_GET['page'] ?? 1));
+$perPage = 20;
 $rows = [];
+$totalFilteredRows = 0;
+$totalPages = 1;
+
+$today = date('Y-m-d');
+$totalRows = 0;
+$todayRows = 0;
+$pendingCallbackRows = 0;
+
 if (fuTableExists($conn, 'enquiry_followups')) {
     try {
-        $res = $conn->query("
+        $effectiveDateSql = "DATE(COALESCE(ef.next_callback_at, ef.followup_at))";
+        $where = [];
+        $params = [];
+        $types = '';
+
+        if ($filterFromDate !== '') {
+            $where[] = "{$effectiveDateSql} >= ?";
+            $params[] = $filterFromDate;
+            $types .= 's';
+        }
+
+        if ($filterToDate !== '') {
+            $where[] = "{$effectiveDateSql} <= ?";
+            $params[] = $filterToDate;
+            $types .= 's';
+        }
+
+        if ($filterSearch !== '') {
+            $like = '%' . $filterSearch . '%';
+            $where[] = "(
+                e.enquiry_no LIKE ?
+                OR e.customer_name LIKE ?
+                OR e.mobile LIKE ?
+                OR ef.call_remarks LIKE ?
+                OR ef.customer_response LIKE ?
+                OR ef.followup_status LIKE ?
+            )";
+            for ($i = 0; $i < 6; $i++) {
+                $params[] = $like;
+                $types .= 's';
+            }
+        }
+
+        $whereSql = $where ? (' WHERE ' . implode(' AND ', $where)) : '';
+
+        $countSql = "
+            SELECT COUNT(*) AS total
+            FROM enquiry_followups ef
+            INNER JOIN enquiries e ON e.id = ef.enquiry_id
+            {$whereSql}
+        ";
+        $stmt = $conn->prepare($countSql);
+        $countParams = $params;
+        fuBindParams($stmt, $types, $countParams);
+        $stmt->execute();
+        $totalFilteredRows = (int)($stmt->get_result()->fetch_assoc()['total'] ?? 0);
+        $stmt->close();
+
+        $totalPages = max(1, (int)ceil($totalFilteredRows / $perPage));
+        if ($page > $totalPages) {
+            $page = $totalPages;
+        }
+        $offset = ($page - 1) * $perPage;
+
+        $focusOrderSql = $focusId > 0 ? "CASE WHEN ef.id = {$focusId} THEN 0 ELSE 1 END ASC," : '';
+
+        $listSql = "
             SELECT
                 ef.*,
                 e.enquiry_no,
@@ -216,45 +342,74 @@ if (fuTableExists($conn, 'enquiry_followups')) {
                 e.function_date,
                 ft.function_name,
                 es.status_name AS enquiry_status_name,
-                u.username AS created_by_name
+                u.username AS created_by_name,
+                COALESCE(ef.next_callback_at, ef.followup_at) AS effective_followup_at
             FROM enquiry_followups ef
             INNER JOIN enquiries e ON e.id = ef.enquiry_id
             LEFT JOIN function_types ft ON ft.id = e.function_type_id
             LEFT JOIN enquiry_statuses es ON es.id = e.enquiry_status_id
             LEFT JOIN users u ON u.id = ef.created_by
-            ORDER BY ef.followup_at DESC, ef.id DESC
-            LIMIT 500
-        ");
+            {$whereSql}
+            ORDER BY {$focusOrderSql} COALESCE(ef.next_callback_at, ef.followup_at) DESC, ef.id DESC
+            LIMIT ? OFFSET ?
+        ";
 
+        $listParams = $params;
+        $listTypes = $types . 'ii';
+        $listParams[] = $perPage;
+        $listParams[] = $offset;
+
+        $stmt = $conn->prepare($listSql);
+        fuBindParams($stmt, $listTypes, $listParams);
+        $stmt->execute();
+        $res = $stmt->get_result();
         while ($row = $res->fetch_assoc()) {
             $rows[] = $row;
         }
-        $res->free();
+        $stmt->close();
+
+        $summarySql = "
+            SELECT
+                COUNT(*) AS total_rows,
+                SUM(
+                    CASE
+                        WHEN LOWER(COALESCE(ef.followup_status, 'followup_pending')) NOT IN
+                            ('completed','closed','converted_to_quotation','not_interested')
+                         AND DATE(COALESCE(ef.next_callback_at, ef.followup_at)) = CURDATE()
+                        THEN 1 ELSE 0
+                    END
+                ) AS today_rows,
+                SUM(
+                    CASE
+                        WHEN LOWER(COALESCE(ef.followup_status, 'followup_pending')) NOT IN
+                            ('completed','closed','converted_to_quotation','not_interested')
+                         AND ef.next_callback_at IS NOT NULL
+                         AND ef.next_callback_at >= CURDATE()
+                        THEN 1 ELSE 0
+                    END
+                ) AS pending_callback_rows
+            FROM enquiry_followups ef
+        ";
+        $summaryRes = $conn->query($summarySql);
+        $summary = $summaryRes ? ($summaryRes->fetch_assoc() ?: []) : [];
+        if ($summaryRes) {
+            $summaryRes->free();
+        }
+        $totalRows = (int)($summary['total_rows'] ?? 0);
+        $todayRows = (int)($summary['today_rows'] ?? 0);
+        $pendingCallbackRows = (int)($summary['pending_callback_rows'] ?? 0);
     } catch (Throwable $e) {
         $message = 'List query error: ' . $e->getMessage();
         $messageType = 'danger';
         $toastTitle = 'Failed';
         $rows = [];
+        $totalFilteredRows = 0;
+        $totalPages = 1;
     }
 } else {
     $message = 'enquiry_followups table is missing. Run the support SQL file first.';
     $messageType = 'danger';
     $toastTitle = 'Failed';
-}
-
-$totalRows = count($rows);
-$todayRows = 0;
-$pendingCallbackRows = 0;
-$today = date('Y-m-d');
-
-foreach ($rows as $row) {
-    if (!empty($row['followup_at']) && date('Y-m-d', strtotime($row['followup_at'])) === $today) {
-        $todayRows++;
-    }
-
-    if (!empty($row['next_callback_at']) && strtotime($row['next_callback_at']) >= strtotime(date('Y-m-d 00:00:00'))) {
-        $pendingCallbackRows++;
-    }
 }
 
 function fuDateTime($value): string
@@ -604,7 +759,7 @@ $nowLocal = date('Y-m-d\TH:i');
             border-radius: 20px !important;
         }
 
-        .mobile-card>.d-flex.justify-content-between,
+        .mobile-card > .d-flex.justify-content-between,
         .mobile-card>.d-flex.justify-content-between {
             align-items: flex-start !important;
             gap: 12px !important;
@@ -697,7 +852,6 @@ $nowLocal = date('Y-m-d\TH:i');
     }
 
     @media(max-width:767.98px) {
-
         .mobile-card-actions .btn-action-icon,
         .mobile-card-actions .btn-delete-icon,
         .proforma-mobile-card .proforma-mobile-actions .btn-action-icon,
@@ -718,6 +872,28 @@ $nowLocal = date('Y-m-d\TH:i');
             width: 18px !important;
             height: 18px !important;
         }
+    }
+
+
+    .status-pill.completed {
+        color: #166534;
+        background: #dcfce7;
+    }
+
+    .followup-focus-row {
+        outline: 2px solid color-mix(in srgb, var(--brand-1) 55%, transparent);
+        outline-offset: -2px;
+        background: color-mix(in srgb, var(--brand-1) 7%, var(--card-bg)) !important;
+    }
+
+    .btn-complete-followup {
+        color: #15803d !important;
+        border-color: #86efac !important;
+    }
+
+    .btn-complete-followup:hover {
+        background: #dcfce7 !important;
+        color: #166534 !important;
     }
     </style>
 </head>
@@ -810,9 +986,51 @@ $nowLocal = date('Y-m-d\TH:i');
                             <h2 class="module-title">Follow-ups List</h2>
                             <p class="text-muted-custom mb-0">Correct flow: enquiry → follow-up → quotation.</p>
                         </div>
+                    </div>
 
-                        <div style="max-width:340px;width:100%">
-                            <input type="search" id="tableSearch" class="form-control" placeholder="Search...">
+                    <form method="get" class="filter-card mb-3">
+                        <div class="row g-3 align-items-end">
+                            <div class="col-12 col-lg-4">
+                                <label class="form-label fw-bold">Search</label>
+                                <input type="search" name="q" id="tableSearch" class="form-control"
+                                    value="<?= e($filterSearch) ?>"
+                                    placeholder="Enquiry / customer / mobile / remarks">
+                            </div>
+                            <div class="col-12 col-md-4 col-lg-2">
+                                <label class="form-label fw-bold">From Date</label>
+                                <input type="date" name="from_date" class="form-control"
+                                    value="<?= e($filterFromDate) ?>">
+                            </div>
+                            <div class="col-12 col-md-4 col-lg-2">
+                                <label class="form-label fw-bold">To Date</label>
+                                <input type="date" name="to_date" class="form-control"
+                                    value="<?= e($filterToDate) ?>">
+                            </div>
+                            <div class="col-12 col-md-4 col-lg-4 d-flex flex-wrap gap-2">
+                                <button type="submit" class="btn btn-primary rounded-pill px-4 fw-bold">
+                                    <i data-lucide="filter" style="width:16px;height:16px"></i> Filter
+                                </button>
+                                <a href="followups.php" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">
+                                    Clear
+                                </a>
+                            </div>
+                        </div>
+                        <div class="small text-muted-custom mt-2">
+                            Date filter uses Next Callback when scheduled; otherwise it uses Follow-up Time.
+                        </div>
+                    </form>
+
+                    <?php
+                        $showFrom = $totalFilteredRows > 0 ? (($page - 1) * $perPage) + 1 : 0;
+                        $showTo = $totalFilteredRows > 0 ? min($page * $perPage, $totalFilteredRows) : 0;
+                    ?>
+                    <div class="d-flex flex-column flex-sm-row justify-content-between align-items-sm-center gap-2 mb-3">
+                        <div class="small text-muted-custom fw-bold">
+                            Showing <?= number_format($showFrom) ?>-<?= number_format($showTo) ?>
+                            of <?= number_format($totalFilteredRows) ?> filtered follow-up(s)
+                        </div>
+                        <div class="small text-muted-custom fw-bold">
+                            Page <?= number_format($page) ?> of <?= number_format($totalPages) ?>
                         </div>
                     </div>
 
@@ -841,7 +1059,8 @@ $nowLocal = date('Y-m-d\TH:i');
                                 <?php endif; ?>
 
                                 <?php foreach ($rows as $row): ?>
-                                <tr>
+                                <?php $rowCompleted = fuTerminalStatus($row['followup_status'] ?? ''); ?>
+                                <tr id="followup-row-<?= (int)$row['id'] ?>" class="<?= $focusId === (int)$row['id'] ? 'followup-focus-row' : '' ?>">
                                     <td>
                                         <strong><?= e($row['enquiry_no']) ?></strong>
                                         <small
@@ -856,7 +1075,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                     <td><?= e($row['customer_response'] ?? '-') ?></td>
                                     <td><?= e(fuDateTime($row['next_callback_at'] ?? null)) ?></td>
                                     <td><span
-                                            class="status-pill pending"><?= e($row['followup_status'] ?: 'Follow-up') ?></span>
+                                            class="status-pill <?= $rowCompleted ? 'completed' : 'pending' ?>"><?= e($row['followup_status'] ?: 'Follow-up') ?></span>
                                     </td>
                                     <td class="text-end">
                                         <button title="View" aria-label="View" type="button"
@@ -871,8 +1090,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                             data-customer-response="<?= e($row['customer_response'] ?? '-') ?>"
                                             data-next-callback="<?= e(fuDateTime($row['next_callback_at'] ?? null)) ?>"
                                             data-followup-status="<?= e($row['followup_status'] ?: 'Follow-up') ?>"
-                                            data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i
-                                                data-lucide="eye"></i></button>
+                                            data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i data-lucide="eye"></i></button>
 
                                         <?php if ($canEdit): ?>
                                         <button title="Edit" aria-label="Edit" type="button"
@@ -884,8 +1102,13 @@ $nowLocal = date('Y-m-d\TH:i');
                                             data-call-remarks="<?= e($row['call_remarks']) ?>"
                                             data-customer-response="<?= e($row['customer_response'] ?? '') ?>"
                                             data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
-                                            data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i
-                                                data-lucide="pencil"></i></button>
+                                            data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i data-lucide="pencil"></i></button>
+                                        <?php endif; ?>
+
+                                        <?php if (($canEdit || $canUpdate) && !$rowCompleted): ?>
+                                        <button title="Complete" aria-label="Complete" type="button"
+                                            class="btn btn-sm btn-outline-success rounded-circle fw-bold btn-action-icon btn-complete-followup js-complete-followup"
+                                            data-id="<?= (int)$row['id'] ?>"><i data-lucide="check"></i></button>
                                         <?php endif; ?>
 
                                         <?php if ($canDelete): ?>
@@ -895,8 +1118,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                             <input type="hidden" name="action" value="delete_record">
                                             <input type="hidden" name="id" value="<?= e($row['id']) ?>">
                                             <button title="Delete" aria-label="Delete" type="submit"
-                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i
-                                                    data-lucide="trash-2"></i></button>
+                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i data-lucide="trash-2"></i></button>
                                         </form>
                                         <?php endif; ?>
                                     </td>
@@ -912,7 +1134,8 @@ $nowLocal = date('Y-m-d\TH:i');
                         <?php endif; ?>
 
                         <?php foreach ($rows as $row): ?>
-                        <div class="mobile-card">
+                        <?php $rowCompleted = fuTerminalStatus($row['followup_status'] ?? ''); ?>
+                        <div id="followup-mobile-<?= (int)$row['id'] ?>" class="mobile-card <?= $focusId === (int)$row['id'] ? 'followup-focus-row' : '' ?>">
                             <div class="d-flex justify-content-between gap-2">
                                 <div>
                                     <div class="mobile-card-title"><?= e($row['customer_name']) ?></div>
@@ -925,7 +1148,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                 </div>
 
                                 <span
-                                    class="status-pill pending"><?= e($row['followup_status'] ?: 'Follow-up') ?></span>
+                                    class="status-pill <?= $rowCompleted ? 'completed' : 'pending' ?>"><?= e($row['followup_status'] ?: 'Follow-up') ?></span>
                             </div>
 
                             <div class="mobile-card-actions">
@@ -941,8 +1164,7 @@ $nowLocal = date('Y-m-d\TH:i');
                                     data-customer-response="<?= e($row['customer_response'] ?? '-') ?>"
                                     data-next-callback="<?= e(fuDateTime($row['next_callback_at'] ?? null)) ?>"
                                     data-followup-status="<?= e($row['followup_status'] ?: 'Follow-up') ?>"
-                                    data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i
-                                        data-lucide="eye"></i></button>
+                                    data-created-by="<?= e($row['created_by_name'] ?? '-') ?>"><i data-lucide="eye"></i></button>
 
                                 <?php if ($canEdit): ?>
                                 <button title="Edit" aria-label="Edit" type="button"
@@ -953,8 +1175,13 @@ $nowLocal = date('Y-m-d\TH:i');
                                     data-call-remarks="<?= e($row['call_remarks']) ?>"
                                     data-customer-response="<?= e($row['customer_response'] ?? '') ?>"
                                     data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
-                                    data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i
-                                        data-lucide="pencil"></i></button>
+                                    data-followup-status="<?= e($row['followup_status'] ?? '') ?>"><i data-lucide="pencil"></i></button>
+                                <?php endif; ?>
+
+                                <?php if (($canEdit || $canUpdate) && !$rowCompleted): ?>
+                                <button title="Complete" aria-label="Complete" type="button"
+                                    class="btn btn-sm btn-outline-success rounded-circle fw-bold btn-action-icon btn-complete-followup js-complete-followup"
+                                    data-id="<?= (int)$row['id'] ?>"><i data-lucide="check"></i></button>
                                 <?php endif; ?>
 
                                 <?php if ($canDelete): ?>
@@ -963,15 +1190,65 @@ $nowLocal = date('Y-m-d\TH:i');
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="delete_record">
                                     <input type="hidden" name="id" value="<?= e($row['id']) ?>">
-                                    <button title="Delete" aria-label="Delete" type="submit"
-                                        class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i
-                                            data-lucide="trash-2"></i></button>
+                                    <button title="Delete" aria-label="Delete" type="submit" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-delete-icon btn-action-icon"><i data-lucide="trash-2"></i></button>
                                 </form>
                                 <?php endif; ?>
                             </div>
                         </div>
                         <?php endforeach; ?>
                     </div>
+
+                    <?php if ($totalPages > 1): ?>
+                    <nav class="mt-4" aria-label="Follow-up pagination">
+                        <ul class="pagination pagination-sm flex-wrap justify-content-center mb-2">
+                            <?php
+                                $previousPage = max(1, $page - 1);
+                                $nextPage = min($totalPages, $page + 1);
+                                $startPage = max(1, $page - 2);
+                                $endPage = min($totalPages, $page + 2);
+                            ?>
+                            <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                                <a class="page-link"
+                                    href="<?= $page <= 1 ? '#' : 'followups.php?' . e(fuCurrentFilterQuery(['page' => $previousPage])) ?>">
+                                    Previous
+                                </a>
+                            </li>
+
+                            <?php if ($startPage > 1): ?>
+                            <li class="page-item">
+                                <a class="page-link" href="followups.php?<?= e(fuCurrentFilterQuery(['page' => 1])) ?>">1</a>
+                            </li>
+                            <?php if ($startPage > 2): ?>
+                            <li class="page-item disabled"><span class="page-link">…</span></li>
+                            <?php endif; ?>
+                            <?php endif; ?>
+
+                            <?php for ($pageNo = $startPage; $pageNo <= $endPage; $pageNo++): ?>
+                            <li class="page-item <?= $pageNo === $page ? 'active' : '' ?>">
+                                <a class="page-link"
+                                    href="followups.php?<?= e(fuCurrentFilterQuery(['page' => $pageNo])) ?>"><?= $pageNo ?></a>
+                            </li>
+                            <?php endfor; ?>
+
+                            <?php if ($endPage < $totalPages): ?>
+                            <?php if ($endPage < $totalPages - 1): ?>
+                            <li class="page-item disabled"><span class="page-link">…</span></li>
+                            <?php endif; ?>
+                            <li class="page-item">
+                                <a class="page-link"
+                                    href="followups.php?<?= e(fuCurrentFilterQuery(['page' => $totalPages])) ?>"><?= $totalPages ?></a>
+                            </li>
+                            <?php endif; ?>
+
+                            <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
+                                <a class="page-link"
+                                    href="<?= $page >= $totalPages ? '#' : 'followups.php?' . e(fuCurrentFilterQuery(['page' => $nextPage])) ?>">
+                                    Next
+                                </a>
+                            </li>
+                        </ul>
+                    </nav>
+                    <?php endif; ?>
                 </div>
             </section>
         </main>
@@ -1157,6 +1434,7 @@ $nowLocal = date('Y-m-d\TH:i');
     window.followupsPermissions = {
         canCreate: <?= $canCreate ? 'true' : 'false' ?>,
         canEdit: <?= $canEdit ? 'true' : 'false' ?>,
+        canUpdate: <?= $canUpdate ? 'true' : 'false' ?>,
         canDelete: <?= $canDelete ? 'true' : 'false' ?>
     };
     </script>
@@ -1349,8 +1627,7 @@ $nowLocal = date('Y-m-d\TH:i');
 
             form.querySelector('button[type="submit"]')?.addEventListener('click', function() {
                 if (!window.followupsPermissions.canDelete) {
-                    showToast('You do not have permission to delete follow-ups.', 'danger',
-                        'Access Denied');
+                    showToast('You do not have permission to delete follow-ups.', 'danger', 'Access Denied');
                     return;
                 }
 
@@ -1377,6 +1654,51 @@ $nowLocal = date('Y-m-d\TH:i');
             });
         });
 
+
+        document.querySelectorAll('.js-complete-followup').forEach(function(button) {
+            button.addEventListener('click', function() {
+                if (!window.followupsPermissions.canEdit && !window.followupsPermissions.canUpdate) {
+                    showToast('You do not have permission to update follow-ups.', 'danger', 'Access Denied');
+                    return;
+                }
+
+                if (!confirm('Mark this follow-up as completed?')) return;
+
+                const formData = new FormData();
+                formData.append('action', 'complete_reminder');
+                formData.append('id', button.dataset.id || '0');
+                formData.append('csrf_token', '<?= e($csrfToken) ?>');
+
+                button.disabled = true;
+                fetch('api/followups.php', {
+                        method: 'POST',
+                        body: formData,
+                        credentials: 'same-origin'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        showToast(data.message || (data.status ? 'Follow-up completed.' : 'Update failed.'),
+                            data.status ? 'success' : 'danger', data.status ? 'Completed' : 'Failed');
+                        if (data.status) {
+                            setTimeout(() => window.location.reload(), 650);
+                        } else {
+                            button.disabled = false;
+                        }
+                    })
+                    .catch(() => {
+                        button.disabled = false;
+                        showToast('API request failed.', 'danger', 'Failed');
+                    });
+            });
+        });
+
+        const focusId = <?= (int)$focusId ?>;
+        if (focusId > 0) {
+            const focusEl = document.getElementById('followup-row-' + focusId) || document.getElementById('followup-mobile-' + focusId);
+            if (focusEl) {
+                setTimeout(() => focusEl.scrollIntoView({behavior: 'smooth', block: 'center'}), 250);
+            }
+        }
 
         document.getElementById('tableSearch')?.addEventListener('input', function() {
             const value = this.value.toLowerCase().trim();

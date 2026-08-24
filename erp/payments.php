@@ -1,9 +1,16 @@
 <?php
 /**
  * payments.php
- * Paid payment history page using Subhiksha template style.
- * Default view: paid / active payments only.
- * Cancel filter: shows cancelled payment details.
+ * Subhiksha Cards ERP - Unified Payments page.
+ *
+ * One list only:
+ * - Paid Proforma bills
+ * - Unpaid / Partially Paid Proforma bills
+ * - Paid Quick Sales
+ * - Cancelled payment entries (when Cancelled filter is selected)
+ *
+ * No separate Pending Payments section.
+ * Pagination and all summary values work on the currently selected filters.
  */
 
 require_once __DIR__ . '/includes/auth.php';
@@ -26,9 +33,7 @@ function payTableExists(mysqli $conn, string $table): bool
         $table = $conn->real_escape_string($table);
         $res = $conn->query("SHOW TABLES LIKE '{$table}'");
         $ok = $res && $res->num_rows > 0;
-        if ($res) {
-            $res->free();
-        }
+        if ($res) $res->free();
         return $ok;
     } catch (Throwable $e) {
         return false;
@@ -39,18 +44,14 @@ function payColExists(mysqli $conn, string $table, string $col): bool
 {
     static $cache = [];
     $key = $table . '.' . $col;
-    if (array_key_exists($key, $cache)) {
-        return $cache[$key];
-    }
+    if (array_key_exists($key, $cache)) return $cache[$key];
 
     try {
         $tableEsc = $conn->real_escape_string($table);
         $colEsc = $conn->real_escape_string($col);
         $res = $conn->query("SHOW COLUMNS FROM `{$tableEsc}` LIKE '{$colEsc}'");
         $ok = $res && $res->num_rows > 0;
-        if ($res) {
-            $res->free();
-        }
+        if ($res) $res->free();
         return $cache[$key] = $ok;
     } catch (Throwable $e) {
         return $cache[$key] = false;
@@ -59,9 +60,7 @@ function payColExists(mysqli $conn, string $table, string $col): bool
 
 function payEnsureCancelColumns(mysqli $conn): void
 {
-    if (!payTableExists($conn, 'payments')) {
-        return;
-    }
+    if (!payTableExists($conn, 'payments')) return;
 
     $alters = [];
     if (!payColExists($conn, 'payments', 'is_cancelled')) {
@@ -111,9 +110,7 @@ function payCheckCsrf(): void
 
 function payCanCancel(mysqli $conn): bool
 {
-    if (function_exists('is_admin_user') && is_admin_user()) {
-        return true;
-    }
+    if (function_exists('is_admin_user') && is_admin_user()) return true;
 
     if (function_exists('can_update')) {
         try {
@@ -135,7 +132,7 @@ function payRedirect(array $params = []): void
 function payKeepParams(array $extra = []): array
 {
     $keep = [];
-    foreach (['view', 'job_card_id', 'proforma_id', 'q', 'date_from', 'date_to'] as $key) {
+    foreach (['status', 'job_card_id', 'proforma_id', 'q', 'date_from', 'date_to', 'page'] as $key) {
         if (isset($_GET[$key]) && trim((string)$_GET[$key]) !== '') {
             $keep[$key] = trim((string)$_GET[$key]);
         }
@@ -151,9 +148,7 @@ function paySetBillAndJobAmounts(mysqli $conn, int $proformaId, float $newAdvanc
     $bill = $stmt->get_result()->fetch_assoc();
     $stmt->close();
 
-    if (!$bill) {
-        throw new RuntimeException('Related proforma bill not found.');
-    }
+    if (!$bill) throw new RuntimeException('Related proforma bill not found.');
 
     $finalAmount = (float)$bill['final_amount'];
     $newAdvance = max(0, min($finalAmount, $newAdvance));
@@ -173,10 +168,33 @@ function paySetBillAndJobAmounts(mysqli $conn, int $proformaId, float $newAdvanc
     }
 }
 
+function payBindAndExecute(mysqli_stmt $stmt, string $types, array $params): void
+{
+    if ($params) {
+        $stmt->bind_param($types, ...$params);
+    }
+    $stmt->execute();
+}
+
+function payBuildUrl(array $extra = []): string
+{
+    $params = [];
+    foreach (['status', 'job_card_id', 'proforma_id', 'q', 'date_from', 'date_to', 'page'] as $key) {
+        if (isset($_GET[$key]) && trim((string)$_GET[$key]) !== '') {
+            $params[$key] = trim((string)$_GET[$key]);
+        }
+    }
+    $params = array_merge($params, $extra);
+    foreach ($params as $key => $value) {
+        if ($value === null || $value === '') unset($params[$key]);
+    }
+    return 'payments.php' . ($params ? '?' . http_build_query($params) : '');
+}
+
 try {
     payEnsureCancelColumns($conn);
 } catch (Throwable $e) {
-    // Page will still load. Cancel action will show error if required columns are unavailable.
+    // Keep the page available even if ALTER permission is unavailable.
 }
 
 if (empty($_SESSION['payments_csrf'])) {
@@ -213,19 +231,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             throw new RuntimeException('Invalid action.');
         }
 
-        if (!payColExists($conn, 'payments', 'is_cancelled') || !payColExists($conn, 'payments', 'cancelled_at') || !payColExists($conn, 'payments', 'cancelled_by') || !payColExists($conn, 'payments', 'cancel_reason')) {
-            throw new RuntimeException('Payment cancel columns are missing. Please add is_cancelled, cancelled_at, cancelled_by and cancel_reason to payments table.');
+        if (
+            !payColExists($conn, 'payments', 'is_cancelled') ||
+            !payColExists($conn, 'payments', 'cancelled_at') ||
+            !payColExists($conn, 'payments', 'cancelled_by') ||
+            !payColExists($conn, 'payments', 'cancel_reason')
+        ) {
+            throw new RuntimeException('Payment cancel columns are missing.');
         }
 
         $paymentId = (int)($_POST['payment_id'] ?? 0);
         $cancelReason = trim((string)($_POST['cancel_reason'] ?? ''));
-
-        if ($paymentId <= 0) {
-            throw new RuntimeException('Invalid payment.');
-        }
-        if ($cancelReason === '') {
-            throw new RuntimeException('Cancel reason is required.');
-        }
+        if ($paymentId <= 0) throw new RuntimeException('Invalid payment.');
+        if ($cancelReason === '') throw new RuntimeException('Cancel reason is required.');
 
         $stmt = $conn->prepare('
             SELECT p.*, pb.id AS bill_id, pb.advance_amount
@@ -239,15 +257,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $payment = $stmt->get_result()->fetch_assoc();
         $stmt->close();
 
-        if (!$payment) {
-            throw new RuntimeException('Payment not found.');
-        }
-        if (empty($payment['bill_id'])) {
-            throw new RuntimeException('Related proforma bill not found.');
-        }
-        if ((int)($payment['is_cancelled'] ?? 0) === 1) {
-            throw new RuntimeException('This payment is already cancelled.');
-        }
+        if (!$payment) throw new RuntimeException('Payment not found.');
+        if (empty($payment['bill_id'])) throw new RuntimeException('Related proforma bill not found.');
+        if ((int)($payment['is_cancelled'] ?? 0) === 1) throw new RuntimeException('This payment is already cancelled.');
 
         $userId = (int)($_SESSION['user_id'] ?? 0);
         $stmt = $conn->prepare('UPDATE payments SET is_cancelled = 1, cancelled_at = NOW(), cancelled_by = ?, cancel_reason = ? WHERE id = ?');
@@ -264,9 +276,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$view = strtolower(trim((string)($_GET['view'] ?? 'paid')));
-if (!in_array($view, ['paid', 'cancelled'], true)) {
-    $view = 'paid';
+// -----------------------------------------------------------------------------
+// Filters + pagination
+// -----------------------------------------------------------------------------
+$statusFilter = strtolower(trim((string)($_GET['status'] ?? 'all')));
+
+// Backward compatibility with older links that used ?view=cancelled.
+if (!isset($_GET['status']) && strtolower((string)($_GET['view'] ?? '')) === 'cancelled') {
+    $statusFilter = 'cancelled';
+}
+
+if (!in_array($statusFilter, ['all', 'paid', 'unpaid', 'cancelled'], true)) {
+    $statusFilter = 'all';
 }
 
 $jobCardId = (int)($_GET['job_card_id'] ?? 0);
@@ -274,179 +295,75 @@ $proformaId = (int)($_GET['proforma_id'] ?? 0);
 $q = trim((string)($_GET['q'] ?? ''));
 $dateFrom = trim((string)($_GET['date_from'] ?? ''));
 $dateTo = trim((string)($_GET['date_to'] ?? ''));
+$page = max(1, (int)($_GET['page'] ?? 1));
+$perPage = 20;
+$exportPdf = (string)($_GET['export'] ?? '') === 'pdf';
 
-$rows = [];
-$paidCount = 0;
-$cancelledCount = 0;
-$paidAmount = 0;
-$cancelledAmount = 0;
-$cashAmount = 0;
-$upiAmount = 0;
-$bankAmount = 0;
+if ($dateFrom !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateFrom)) $dateFrom = '';
+if ($dateTo !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateTo)) $dateTo = '';
+
+$allRows = [];
+$displayRows = [];
 $jobContext = null;
 $canCancel = payCanCancel($conn);
-$pendingRows = [];
-$pendingCount = 0;
-$pendingBalance = 0.0;
 
+$hasProformaBills = payTableExists($conn, 'proforma_bills');
 $hasProformaPayments = payTableExists($conn, 'payments');
 $hasQuickSalePayments = payTableExists($conn, 'quick_sale_payments') && payTableExists($conn, 'quick_sales');
+$hasCancel = $hasProformaPayments && payColExists($conn, 'payments', 'is_cancelled');
 
-if (!$hasProformaPayments && !$hasQuickSalePayments) {
-    $error = 'No payment history table is available.';
+if (!$hasProformaBills && !$hasQuickSalePayments) {
+    $error = 'No payment data is available.';
 }
 
-/*
- * PENDING / PARTIALLY PAID PROFORMA BILLS
- * --------------------------------------
- * One row per Proforma where the authoritative outstanding balance is > 0.
- * If payment rows exist, active payments are the source of truth.
- * Legacy Proformas with no payment rows fall back to proforma_bills.advance_amount.
- */
-if ($error === '' && payTableExists($conn, 'proforma_bills')) {
+// -----------------------------------------------------------------------------
+// ACTIVE PROFORMA BILLS: one row per Proforma.
+// Paid / Partially Paid / Unpaid are calculated from active payment rows.
+// -----------------------------------------------------------------------------
+if ($error === '' && $hasProformaBills && $statusFilter !== 'cancelled') {
     try {
-        $pendingHasCancel = $hasProformaPayments && payColExists($conn, 'payments', 'is_cancelled');
-        $pendingPaymentJoin = '';
-        $pendingPaidExpr = 'COALESCE(pb.advance_amount, 0)';
+        $activePaidPart = $hasCancel
+            ? 'CASE WHEN COALESCE(is_cancelled,0) = 0 THEN amount ELSE 0 END'
+            : 'amount';
+        $activeDatePart = $hasCancel
+            ? 'CASE WHEN COALESCE(is_cancelled,0) = 0 THEN payment_date ELSE NULL END'
+            : 'payment_date';
+        $activeIdPart = $hasCancel
+            ? 'CASE WHEN COALESCE(is_cancelled,0) = 0 THEN id ELSE NULL END'
+            : 'id';
+
+        $paymentJoin = '';
+        $paidExpr = 'COALESCE(pb.advance_amount,0)';
+        $lastPaymentDateExpr = 'NULL';
+        $lastPaymentIdExpr = 'NULL';
 
         if ($hasProformaPayments) {
-            $pendingActiveAmountExpr = $pendingHasCancel
-                ? 'CASE WHEN COALESCE(is_cancelled,0) = 0 THEN amount ELSE 0 END'
-                : 'amount';
-
-            $pendingPaymentJoin = "
+            $paymentJoin = "
                 LEFT JOIN (
                     SELECT
                         proforma_bill_id,
                         COUNT(*) AS payment_count,
-                        COALESCE(SUM({$pendingActiveAmountExpr}), 0) AS active_paid
+                        COALESCE(SUM({$activePaidPart}),0) AS active_paid,
+                        MAX({$activeDatePart}) AS last_payment_date,
+                        MAX({$activeIdPart}) AS last_payment_id
                     FROM payments
                     GROUP BY proforma_bill_id
                 ) pa ON pa.proforma_bill_id = pb.id
+                LEFT JOIN payments lp ON lp.id = pa.last_payment_id
             ";
 
-            $pendingPaidExpr = "CASE
+            $paidExpr = "CASE
                 WHEN COALESCE(pa.payment_count,0) > 0 THEN COALESCE(pa.active_paid,0)
                 ELSE COALESCE(pb.advance_amount,0)
             END";
+            $lastPaymentDateExpr = 'pa.last_payment_date';
+            $lastPaymentIdExpr = 'pa.last_payment_id';
         }
 
-        $pendingWhere = [];
-        $pendingParams = [];
-        $pendingTypes = '';
-
-        if ($jobCardId > 0) {
-            $pendingWhere[] = 'jc.id = ?';
-            $pendingParams[] = $jobCardId;
-            $pendingTypes .= 'i';
-        }
-
-        if ($proformaId > 0) {
-            $pendingWhere[] = 'pb.id = ?';
-            $pendingParams[] = $proformaId;
-            $pendingTypes .= 'i';
-        }
-
-        /* For unpaid bills there may be no payment_date, so use Proforma created date. */
-        if ($dateFrom !== '') {
-            $pendingWhere[] = 'DATE(pb.created_at) >= ?';
-            $pendingParams[] = $dateFrom;
-            $pendingTypes .= 's';
-        }
-
-        if ($dateTo !== '') {
-            $pendingWhere[] = 'DATE(pb.created_at) <= ?';
-            $pendingParams[] = $dateTo;
-            $pendingTypes .= 's';
-        }
-
-        if ($q !== '') {
-            $like = '%' . $q . '%';
-            $pendingWhere[] = '(pb.proforma_no LIKE ? OR pb.customer_name LIKE ? OR pb.mobile LIKE ? OR COALESCE(jc.job_card_no,\'\') LIKE ?)';
-            for ($i = 0; $i < 4; $i++) {
-                $pendingParams[] = $like;
-                $pendingTypes .= 's';
-            }
-        }
-
-        $pendingWhere[] = "GREATEST(COALESCE(pb.final_amount,0) - ({$pendingPaidExpr}), 0) > 0.009";
-        $pendingWhereSql = 'WHERE ' . implode(' AND ', $pendingWhere);
-
-        $pendingSql = "
-            SELECT
-                pb.id AS bill_id,
-                pb.proforma_no,
-                pb.customer_id,
-                pb.customer_name,
-                pb.mobile,
-                pb.order_type,
-                pb.final_amount,
-                pb.advance_amount AS stored_advance_amount,
-                pb.balance_amount AS stored_balance_amount,
-                pb.delivery_date,
-                pb.created_at AS proforma_created_at,
-                ({$pendingPaidExpr}) AS paid_amount,
-                GREATEST(COALESCE(pb.final_amount,0) - ({$pendingPaidExpr}), 0) AS current_balance,
-                jc.id AS job_card_id,
-                jc.job_card_no,
-                jcs.status_name AS job_status_name
-            FROM proforma_bills pb
-            {$pendingPaymentJoin}
-            LEFT JOIN (
-                SELECT proforma_bill_id, MAX(id) AS latest_job_card_id
-                FROM job_cards
-                GROUP BY proforma_bill_id
-            ) jx ON jx.proforma_bill_id = pb.id
-            LEFT JOIN job_cards jc ON jc.id = jx.latest_job_card_id
-            LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id
-            {$pendingWhereSql}
-            ORDER BY pb.id DESC
-            LIMIT 300
-        ";
-
-        $stmt = $conn->prepare($pendingSql);
-        if ($pendingParams) {
-            $stmt->bind_param($pendingTypes, ...$pendingParams);
-        }
-        $stmt->execute();
-        $res = $stmt->get_result();
-        while ($row = $res->fetch_assoc()) {
-            $pendingRows[] = $row;
-            $pendingBalance += (float)($row['current_balance'] ?? 0);
-        }
-        $stmt->close();
-        $pendingCount = count($pendingRows);
-    } catch (Throwable $e) {
-        $error = 'Unable to load pending payments: ' . $e->getMessage();
-    }
-}
-
-if ($error === '' && $hasProformaPayments) {
-    try {
-        $hasCancel = payColExists($conn, 'payments', 'is_cancelled');
-        $hasCancelledAt = payColExists($conn, 'payments', 'cancelled_at');
-        $hasCancelledBy = payColExists($conn, 'payments', 'cancelled_by');
-        $hasCancelReason = payColExists($conn, 'payments', 'cancel_reason');
-        $hasReceivedBy = payColExists($conn, 'payments', 'received_by');
-
-        $cancelledSelect = $hasCancel ? 'COALESCE(p.is_cancelled,0) AS is_cancelled' : '0 AS is_cancelled';
-        $cancelledAtSelect = $hasCancelledAt ? 'p.cancelled_at' : 'NULL AS cancelled_at';
-        $cancelledBySelect = $hasCancelledBy ? 'p.cancelled_by' : 'NULL AS cancelled_by';
-        $cancelReasonSelect = $hasCancelReason ? 'p.cancel_reason' : 'NULL AS cancel_reason';
-        $receivedBySelect = $hasReceivedBy ? "COALESCE(ru.username, '-') AS received_by_name" : "'-' AS received_by_name";
-        $receivedByJoin = $hasReceivedBy ? 'LEFT JOIN users ru ON ru.id = p.received_by' : '';
-        $cancelBySelect = $hasCancelledBy ? "COALESCE(cu.username, '-') AS cancelled_by_name" : "'-' AS cancelled_by_name";
-        $cancelByJoin = $hasCancelledBy ? 'LEFT JOIN users cu ON cu.id = p.cancelled_by' : '';
-
+        $balanceExpr = "GREATEST(COALESCE(pb.final_amount,0) - ({$paidExpr}), 0)";
         $where = [];
         $params = [];
         $types = '';
-
-        if ($view === 'paid') {
-            $where[] = $hasCancel ? 'COALESCE(p.is_cancelled,0) = 0' : '1 = 1';
-        } else {
-            $where[] = $hasCancel ? 'COALESCE(p.is_cancelled,0) = 1' : '1 = 0';
-        }
 
         if ($jobCardId > 0) {
             $where[] = 'jc.id = ?';
@@ -460,166 +377,118 @@ if ($error === '' && $hasProformaPayments) {
             $types .= 'i';
         }
 
+        // Unified date behavior: latest active payment date when available,
+        // otherwise Proforma created date (required for completely unpaid bills).
+        $effectiveDateExpr = "DATE(COALESCE({$lastPaymentDateExpr}, pb.created_at))";
+
         if ($dateFrom !== '') {
-            $where[] = 'p.payment_date >= ?';
+            $where[] = "{$effectiveDateExpr} >= ?";
             $params[] = $dateFrom;
             $types .= 's';
         }
 
         if ($dateTo !== '') {
-            $where[] = 'p.payment_date <= ?';
+            $where[] = "{$effectiveDateExpr} <= ?";
             $params[] = $dateTo;
             $types .= 's';
         }
 
         if ($q !== '') {
             $like = '%' . $q . '%';
-            $where[] = '(p.payment_no LIKE ? OR pb.proforma_no LIKE ? OR pb.customer_name LIKE ? OR pb.mobile LIKE ? OR jc.job_card_no LIKE ? OR p.reference_no LIKE ?)';
+            $where[] = "(pb.proforma_no LIKE ? OR pb.customer_name LIKE ? OR pb.mobile LIKE ? OR COALESCE(jc.job_card_no,'') LIKE ? OR COALESCE(lp.payment_no,'') LIKE ? OR COALESCE(lp.reference_no,'') LIKE ?)";
             for ($i = 0; $i < 6; $i++) {
                 $params[] = $like;
                 $types .= 's';
             }
         }
 
+        if ($statusFilter === 'paid') {
+            $where[] = "{$balanceExpr} <= 0.009";
+        } elseif ($statusFilter === 'unpaid') {
+            // Includes both completely unpaid and partially paid bills.
+            $where[] = "{$balanceExpr} > 0.009";
+        }
+
         $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+        $jobJoin = payTableExists($conn, 'job_cards')
+            ? "
+                LEFT JOIN (
+                    SELECT proforma_bill_id, MAX(id) AS latest_job_card_id
+                    FROM job_cards
+                    GROUP BY proforma_bill_id
+                ) jx ON jx.proforma_bill_id = pb.id
+                LEFT JOIN job_cards jc ON jc.id = jx.latest_job_card_id
+                " . (payTableExists($conn, 'job_card_statuses')
+                    ? 'LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id'
+                    : '')
+            : '';
+
+        $jobSelect = payTableExists($conn, 'job_cards')
+            ? "jc.id AS job_card_id, jc.job_card_no, " . (payTableExists($conn, 'job_card_statuses') ? 'jcs.status_name' : "'-'") . " AS job_status_name"
+            : "NULL AS job_card_id, NULL AS job_card_no, '-' AS job_status_name";
+
+        $lastPaymentSelect = $hasProformaPayments
+            ? "lp.payment_no AS last_payment_no, lp.payment_mode AS last_payment_mode, lp.reference_no AS last_reference_no, lp.received_by AS last_received_by"
+            : "NULL AS last_payment_no, NULL AS last_payment_mode, NULL AS last_reference_no, NULL AS last_received_by";
 
         $sql = "
             SELECT
-                p.*,
-                {$cancelledSelect},
-                {$cancelledAtSelect},
-                {$cancelledBySelect},
-                {$cancelReasonSelect},
-                {$receivedBySelect},
-                {$cancelBySelect},
                 pb.id AS bill_id,
                 pb.proforma_no,
+                pb.customer_id,
                 pb.customer_name,
                 pb.mobile,
                 pb.order_type,
                 pb.final_amount,
-                pb.advance_amount,
-                pb.balance_amount,
                 pb.delivery_date,
-                ft.function_name,
-                ps.status_name AS proforma_status_name,
-                jc.id AS job_card_id,
-                jc.job_card_no,
-                jcs.status_name AS job_status_name
-            FROM payments p
-            LEFT JOIN proforma_bills pb ON pb.id = p.proforma_bill_id
-            LEFT JOIN function_types ft ON ft.id = pb.function_type_id
-            LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
-            LEFT JOIN (
-                SELECT proforma_bill_id, MAX(id) AS latest_job_card_id
-                FROM job_cards
-                GROUP BY proforma_bill_id
-            ) jx ON jx.proforma_bill_id = pb.id
-            LEFT JOIN job_cards jc ON jc.id = jx.latest_job_card_id
-            LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id
-            {$receivedByJoin}
-            {$cancelByJoin}
+                pb.created_at AS proforma_created_at,
+                ({$paidExpr}) AS paid_amount,
+                {$balanceExpr} AS current_balance,
+                {$lastPaymentDateExpr} AS last_payment_date,
+                {$lastPaymentIdExpr} AS last_payment_id,
+                {$lastPaymentSelect},
+                {$jobSelect}
+            FROM proforma_bills pb
+            {$paymentJoin}
+            {$jobJoin}
             {$whereSql}
-            ORDER BY p.id DESC
-            LIMIT 300
+            ORDER BY COALESCE({$lastPaymentDateExpr}, pb.created_at) DESC, pb.id DESC
         ";
 
         $stmt = $conn->prepare($sql);
-        if ($params) {
-            $stmt->bind_param($types, ...$params);
-        }
-        $stmt->execute();
+        payBindAndExecute($stmt, $types, $params);
         $res = $stmt->get_result();
         while ($row = $res->fetch_assoc()) {
-            $row['payment_source'] = 'proforma';
-            $rows[] = $row;
-        }
-        $stmt->close();
+            $paid = (float)($row['paid_amount'] ?? 0);
+            $balance = (float)($row['current_balance'] ?? 0);
+            $final = (float)($row['final_amount'] ?? 0);
 
-        $summaryWhere = [];
-        $summaryParams = [];
-        $summaryTypes = '';
-        if ($jobCardId > 0) {
-            $summaryWhere[] = 'jc.id = ?';
-            $summaryParams[] = $jobCardId;
-            $summaryTypes .= 'i';
-        }
-        if ($proformaId > 0) {
-            $summaryWhere[] = 'pb.id = ?';
-            $summaryParams[] = $proformaId;
-            $summaryTypes .= 'i';
-        }
-        if ($dateFrom !== '') {
-            $summaryWhere[] = 'p.payment_date >= ?';
-            $summaryParams[] = $dateFrom;
-            $summaryTypes .= 's';
-        }
-        if ($dateTo !== '') {
-            $summaryWhere[] = 'p.payment_date <= ?';
-            $summaryParams[] = $dateTo;
-            $summaryTypes .= 's';
-        }
-        if ($q !== '') {
-            $like = '%' . $q . '%';
-            $summaryWhere[] = '(p.payment_no LIKE ? OR pb.proforma_no LIKE ? OR pb.customer_name LIKE ? OR pb.mobile LIKE ? OR jc.job_card_no LIKE ? OR p.reference_no LIKE ?)';
-            for ($i = 0; $i < 6; $i++) {
-                $summaryParams[] = $like;
-                $summaryTypes .= 's';
+            if ($balance <= 0.009) {
+                $billStatus = 'paid';
+            } elseif ($paid > 0.009 && $paid < $final - 0.009) {
+                $billStatus = 'partial';
+            } else {
+                $billStatus = 'unpaid';
             }
-        }
-        $summaryWhereSql = $summaryWhere ? 'WHERE ' . implode(' AND ', $summaryWhere) : '';
 
-        $summarySql = "
-            SELECT
-                SUM(CASE WHEN " . ($hasCancel ? 'COALESCE(p.is_cancelled,0) = 0' : '1=1') . " THEN 1 ELSE 0 END) AS paid_count,
-                SUM(CASE WHEN " . ($hasCancel ? 'COALESCE(p.is_cancelled,0) = 0' : '1=1') . " THEN p.amount ELSE 0 END) AS paid_amount,
-                SUM(CASE WHEN " . ($hasCancel ? 'COALESCE(p.is_cancelled,0) = 1' : '1=0') . " THEN 1 ELSE 0 END) AS cancelled_count,
-                SUM(CASE WHEN " . ($hasCancel ? 'COALESCE(p.is_cancelled,0) = 1' : '1=0') . " THEN p.amount ELSE 0 END) AS cancelled_amount,
-                SUM(CASE WHEN " . ($hasCancel ? 'COALESCE(p.is_cancelled,0) = 0' : '1=1') . " AND LOWER(COALESCE(p.payment_mode,'')) = 'cash' THEN p.amount ELSE 0 END) AS cash_amount,
-                SUM(CASE WHEN " . ($hasCancel ? 'COALESCE(p.is_cancelled,0) = 0' : '1=1') . " AND LOWER(COALESCE(p.payment_mode,'')) = 'upi' THEN p.amount ELSE 0 END) AS upi_amount,
-                SUM(CASE WHEN " . ($hasCancel ? 'COALESCE(p.is_cancelled,0) = 0' : '1=1') . " AND LOWER(COALESCE(p.payment_mode,'')) = 'bank' THEN p.amount ELSE 0 END) AS bank_amount
-            FROM payments p
-            LEFT JOIN proforma_bills pb ON pb.id = p.proforma_bill_id
-            LEFT JOIN (
-                SELECT proforma_bill_id, MAX(id) AS latest_job_card_id
-                FROM job_cards
-                GROUP BY proforma_bill_id
-            ) jx ON jx.proforma_bill_id = pb.id
-            LEFT JOIN job_cards jc ON jc.id = jx.latest_job_card_id
-            {$summaryWhereSql}
-        ";
-        $stmt = $conn->prepare($summarySql);
-        if ($summaryParams) {
-            $stmt->bind_param($summaryTypes, ...$summaryParams);
+            $row['record_type'] = 'proforma';
+            $row['bill_status'] = $billStatus;
+            $row['sort_date'] = (string)($row['last_payment_date'] ?: $row['proforma_created_at']);
+            $allRows[] = $row;
         }
-        $stmt->execute();
-        $summary = $stmt->get_result()->fetch_assoc();
         $stmt->close();
-
-        $paidCount = (int)($summary['paid_count'] ?? 0);
-        $cancelledCount = (int)($summary['cancelled_count'] ?? 0);
-        $paidAmount = (float)($summary['paid_amount'] ?? 0);
-        $cancelledAmount = (float)($summary['cancelled_amount'] ?? 0);
-        $cashAmount = (float)($summary['cash_amount'] ?? 0);
-        $upiAmount = (float)($summary['upi_amount'] ?? 0);
-        $bankAmount = (float)($summary['bank_amount'] ?? 0);
     } catch (Throwable $e) {
-        $error = 'Unable to load payments: ' . $e->getMessage();
+        $error = 'Unable to load Proforma payment details: ' . $e->getMessage();
     }
 }
 
-
-/*
- * QUICK SALE PAYMENTS
- * -------------------
- * Quick Sale Cash / UPI rows are part of the same Payment History page.
- * They have no Proforma or Job Card, so when a Proforma/Job Card context filter
- * is active they are intentionally excluded.
- */
+// -----------------------------------------------------------------------------
+// QUICK SALE: always a paid record. Added into the SAME list.
+// -----------------------------------------------------------------------------
 if (
     $error === '' &&
     $hasQuickSalePayments &&
-    $view === 'paid' &&
+    in_array($statusFilter, ['all', 'paid'], true) &&
     $jobCardId <= 0 &&
     $proformaId <= 0
 ) {
@@ -633,26 +502,23 @@ if (
             $qsParams[] = $dateFrom;
             $qsTypes .= 's';
         }
-
         if ($dateTo !== '') {
             $qsWhere[] = 'qsp.payment_date <= ?';
             $qsParams[] = $dateTo;
             $qsTypes .= 's';
         }
-
         if ($q !== '') {
             $like = '%' . $q . '%';
-            $qsWhere[] = '(
+            $qsWhere[] = "(
                 qsp.payment_no LIKE ?
                 OR qs.sale_no LIKE ?
-                OR qsp.reference_no LIKE ?
+                OR COALESCE(qsp.reference_no,'') LIKE ?
                 OR EXISTS (
-                    SELECT 1
-                    FROM quick_sale_items qsi_search
+                    SELECT 1 FROM quick_sale_items qsi_search
                     WHERE qsi_search.quick_sale_id = qs.id
                       AND qsi_search.product_name LIKE ?
                 )
-            )';
+            )";
             for ($i = 0; $i < 4; $i++) {
                 $qsParams[] = $like;
                 $qsTypes .= 's';
@@ -660,111 +526,162 @@ if (
         }
 
         $qsWhereSql = $qsWhere ? 'WHERE ' . implode(' AND ', $qsWhere) : '';
-        $hasQsReceivedBy = payColExists($conn, 'quick_sale_payments', 'received_by');
-        $qsReceivedSelect = $hasQsReceivedBy
-            ? "COALESCE(qsu.username, '-') AS received_by_name"
-            : "'-' AS received_by_name";
-        $qsReceivedJoin = $hasQsReceivedBy
-            ? 'LEFT JOIN users qsu ON qsu.id = qsp.received_by'
-            : '';
+        $qsCustomerSelect = payColExists($conn, 'quick_sales', 'customer_name')
+            ? "COALESCE(NULLIF(qs.customer_name,''),'Counter Sale')"
+            : "'Counter Sale'";
+        $qsMobileSelect = payColExists($conn, 'quick_sales', 'mobile')
+            ? "COALESCE(NULLIF(qs.mobile,''),'-')"
+            : "'-'";
 
         $qsSql = "
             SELECT
-                qsp.id,
-                qsp.payment_no,
-                'Quick Sale' AS payment_type,
-                qsp.payment_mode,
-                qsp.amount,
-                qsp.payment_date,
-                qsp.reference_no,
-                qsp.remarks,
-                qsp.created_at,
-                COALESCE(qsp.tendered_amount, qsp.amount) AS tendered_amount,
-                COALESCE(qsp.return_amount, 0) AS return_amount,
-                0 AS is_cancelled,
-                NULL AS cancelled_at,
-                NULL AS cancelled_by,
-                NULL AS cancel_reason,
-                {$qsReceivedSelect},
-                '-' AS cancelled_by_name,
-                NULL AS bill_id,
-                qs.sale_no AS proforma_no,
-                'Quick Sale' AS customer_name,
-                '-' AS mobile,
-                'quick_sale' AS order_type,
-                qs.total_amount AS final_amount,
-                qs.total_amount AS advance_amount,
-                0 AS balance_amount,
-                NULL AS delivery_date,
-                'Quick Sale' AS function_name,
-                'Paid' AS proforma_status_name,
-                NULL AS job_card_id,
-                NULL AS job_card_no,
-                NULL AS job_status_name,
                 qs.id AS quick_sale_id,
+                qs.sale_no,
+                {$qsCustomerSelect} AS customer_name,
+                {$qsMobileSelect} AS mobile,
+                qs.total_amount AS final_amount,
+                COALESCE(SUM(qsp.amount),0) AS paid_amount,
+                GREATEST(COALESCE(qs.total_amount,0) - COALESCE(SUM(qsp.amount),0),0) AS current_balance,
+                MAX(qsp.payment_date) AS last_payment_date,
+                MAX(qsp.id) AS last_payment_id,
+                GROUP_CONCAT(DISTINCT UPPER(qsp.payment_mode) ORDER BY qsp.id SEPARATOR ' + ') AS last_payment_mode,
+                GROUP_CONCAT(DISTINCT NULLIF(qsp.reference_no,'') ORDER BY qsp.id SEPARATOR ', ') AS last_reference_no,
                 COALESCE((
                     SELECT GROUP_CONCAT(qsi.product_name ORDER BY qsi.id SEPARATOR ', ')
                     FROM quick_sale_items qsi
                     WHERE qsi.quick_sale_id = qs.id
-                ), '') AS quick_sale_products
-            FROM quick_sale_payments qsp
-            INNER JOIN quick_sales qs ON qs.id = qsp.quick_sale_id
-            {$qsReceivedJoin}
+                ), '') AS quick_sale_products,
+                qs.created_at AS sale_created_at
+            FROM quick_sales qs
+            INNER JOIN quick_sale_payments qsp ON qsp.quick_sale_id = qs.id
             {$qsWhereSql}
-            ORDER BY qsp.id DESC
-            LIMIT 300
+            GROUP BY qs.id
+            ORDER BY MAX(qsp.payment_date) DESC, qs.id DESC
         ";
 
         $stmt = $conn->prepare($qsSql);
-        if ($qsParams) {
-            $stmt->bind_param($qsTypes, ...$qsParams);
-        }
-        $stmt->execute();
+        payBindAndExecute($stmt, $qsTypes, $qsParams);
         $res = $stmt->get_result();
         while ($row = $res->fetch_assoc()) {
-            $row['payment_source'] = 'quick_sale';
-            $rows[] = $row;
+            $row['record_type'] = 'quick_sale';
+            $row['bill_status'] = 'paid';
+            $row['bill_id'] = null;
+            $row['proforma_no'] = $row['sale_no'] ?? '-';
+            $row['order_type'] = 'quick_sale';
+            $row['job_card_id'] = null;
+            $row['job_card_no'] = null;
+            $row['job_status_name'] = '-';
+            $row['sort_date'] = (string)($row['last_payment_date'] ?: $row['sale_created_at']);
+            $allRows[] = $row;
         }
         $stmt->close();
-
-        $qsSummarySql = "
-            SELECT
-                COUNT(*) AS paid_count,
-                COALESCE(SUM(qsp.amount), 0) AS paid_amount,
-                COALESCE(SUM(CASE WHEN LOWER(qsp.payment_mode) = 'cash' THEN qsp.amount ELSE 0 END), 0) AS cash_amount,
-                COALESCE(SUM(CASE WHEN LOWER(qsp.payment_mode) = 'upi' THEN qsp.amount ELSE 0 END), 0) AS upi_amount
-            FROM quick_sale_payments qsp
-            INNER JOIN quick_sales qs ON qs.id = qsp.quick_sale_id
-            {$qsWhereSql}
-        ";
-
-        $stmt = $conn->prepare($qsSummarySql);
-        if ($qsParams) {
-            $stmt->bind_param($qsTypes, ...$qsParams);
-        }
-        $stmt->execute();
-        $qsSummary = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
-
-        $paidCount += (int)($qsSummary['paid_count'] ?? 0);
-        $paidAmount += (float)($qsSummary['paid_amount'] ?? 0);
-        $cashAmount += (float)($qsSummary['cash_amount'] ?? 0);
-        $upiAmount += (float)($qsSummary['upi_amount'] ?? 0);
-
-        usort($rows, static function (array $a, array $b): int {
-            $aTime = strtotime((string)($a['created_at'] ?? $a['payment_date'] ?? '')) ?: 0;
-            $bTime = strtotime((string)($b['created_at'] ?? $b['payment_date'] ?? '')) ?: 0;
-            if ($aTime === $bTime) {
-                return ((int)($b['id'] ?? 0)) <=> ((int)($a['id'] ?? 0));
-            }
-            return $bTime <=> $aTime;
-        });
     } catch (Throwable $e) {
         $error = 'Unable to load Quick Sale payments: ' . $e->getMessage();
     }
 }
 
-if ($jobCardId > 0 && $error === '') {
+// -----------------------------------------------------------------------------
+// CANCELLED FILTER: cancelled payment entries use the SAME table area.
+// -----------------------------------------------------------------------------
+if ($error === '' && $statusFilter === 'cancelled' && $hasProformaPayments && $hasCancel) {
+    try {
+        $where = ['COALESCE(p.is_cancelled,0) = 1'];
+        $params = [];
+        $types = '';
+
+        if ($jobCardId > 0) {
+            $where[] = 'jc.id = ?';
+            $params[] = $jobCardId;
+            $types .= 'i';
+        }
+        if ($proformaId > 0) {
+            $where[] = 'pb.id = ?';
+            $params[] = $proformaId;
+            $types .= 'i';
+        }
+        if ($dateFrom !== '') {
+            $where[] = 'p.payment_date >= ?';
+            $params[] = $dateFrom;
+            $types .= 's';
+        }
+        if ($dateTo !== '') {
+            $where[] = 'p.payment_date <= ?';
+            $params[] = $dateTo;
+            $types .= 's';
+        }
+        if ($q !== '') {
+            $like = '%' . $q . '%';
+            $where[] = "(p.payment_no LIKE ? OR pb.proforma_no LIKE ? OR pb.customer_name LIKE ? OR pb.mobile LIKE ? OR COALESCE(jc.job_card_no,'') LIKE ? OR COALESCE(p.reference_no,'') LIKE ?)";
+            for ($i = 0; $i < 6; $i++) {
+                $params[] = $like;
+                $types .= 's';
+            }
+        }
+
+        $whereSql = 'WHERE ' . implode(' AND ', $where);
+        $hasCancelledBy = payColExists($conn, 'payments', 'cancelled_by');
+        $cancelByJoin = $hasCancelledBy ? 'LEFT JOIN users cu ON cu.id = p.cancelled_by' : '';
+        $cancelBySelect = $hasCancelledBy ? "COALESCE(cu.username,'-')" : "'-'";
+        $jobJoin = payTableExists($conn, 'job_cards')
+            ? "
+                LEFT JOIN (
+                    SELECT proforma_bill_id, MAX(id) AS latest_job_card_id
+                    FROM job_cards GROUP BY proforma_bill_id
+                ) jx ON jx.proforma_bill_id = pb.id
+                LEFT JOIN job_cards jc ON jc.id = jx.latest_job_card_id
+            "
+            : '';
+        $jobSelect = payTableExists($conn, 'job_cards')
+            ? 'jc.id AS job_card_id, jc.job_card_no'
+            : 'NULL AS job_card_id, NULL AS job_card_no';
+
+        $sql = "
+            SELECT
+                p.id AS payment_id,
+                p.payment_no,
+                p.payment_mode,
+                p.amount AS cancelled_amount,
+                p.payment_date,
+                p.reference_no,
+                p.cancelled_at,
+                p.cancel_reason,
+                {$cancelBySelect} AS cancelled_by_name,
+                pb.id AS bill_id,
+                pb.proforma_no,
+                pb.customer_name,
+                pb.mobile,
+                pb.order_type,
+                pb.final_amount,
+                pb.balance_amount AS current_balance,
+                {$jobSelect}
+            FROM payments p
+            LEFT JOIN proforma_bills pb ON pb.id = p.proforma_bill_id
+            {$jobJoin}
+            {$cancelByJoin}
+            {$whereSql}
+            ORDER BY COALESCE(p.cancelled_at,p.created_at) DESC, p.id DESC
+        ";
+
+        $stmt = $conn->prepare($sql);
+        payBindAndExecute($stmt, $types, $params);
+        $res = $stmt->get_result();
+        while ($row = $res->fetch_assoc()) {
+            $row['record_type'] = 'cancelled';
+            $row['bill_status'] = 'cancelled';
+            $row['paid_amount'] = 0;
+            $row['sort_date'] = (string)($row['cancelled_at'] ?: $row['payment_date']);
+            $allRows[] = $row;
+        }
+        $stmt->close();
+    } catch (Throwable $e) {
+        $error = 'Unable to load cancelled payments: ' . $e->getMessage();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Job-card context (preserved)
+// -----------------------------------------------------------------------------
+if ($jobCardId > 0 && $error === '' && payTableExists($conn, 'job_cards')) {
     try {
         $stmt = $conn->prepare('
             SELECT
@@ -774,13 +691,9 @@ if ($jobCardId > 0 && $error === '') {
                 pb.mobile,
                 pb.final_amount,
                 pb.advance_amount,
-                pb.balance_amount,
-                ft.function_name,
-                jcs.status_name AS job_status_name
+                pb.balance_amount
             FROM job_cards jc
             LEFT JOIN proforma_bills pb ON pb.id = jc.proforma_bill_id
-            LEFT JOIN function_types ft ON ft.id = pb.function_type_id
-            LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id
             WHERE jc.id = ?
             LIMIT 1
         ');
@@ -793,10 +706,49 @@ if ($jobCardId > 0 && $error === '') {
     }
 }
 
+// Sort after Proforma + Quick Sale merge.
+usort($allRows, static function (array $a, array $b): int {
+    $aTime = strtotime((string)($a['sort_date'] ?? '')) ?: 0;
+    $bTime = strtotime((string)($b['sort_date'] ?? '')) ?: 0;
+    if ($aTime === $bTime) {
+        $aId = (int)($a['bill_id'] ?? $a['quick_sale_id'] ?? $a['payment_id'] ?? 0);
+        $bId = (int)($b['bill_id'] ?? $b['quick_sale_id'] ?? $b['payment_id'] ?? 0);
+        return $bId <=> $aId;
+    }
+    return $bTime <=> $aTime;
+});
+
+// Filter-aware summary cards.
+$filteredCount = count($allRows);
+$summaryPaidAmount = 0.0;
+$summaryOutstanding = 0.0;
+$summaryPaidBills = 0;
+$summaryNeedsPayment = 0;
+$summaryCancelledAmount = 0.0;
+
+foreach ($allRows as $row) {
+    $status = (string)($row['bill_status'] ?? '');
+    if ($status === 'cancelled') {
+        $summaryCancelledAmount += (float)($row['cancelled_amount'] ?? 0);
+        continue;
+    }
+
+    $summaryPaidAmount += (float)($row['paid_amount'] ?? 0);
+    $summaryOutstanding += (float)($row['current_balance'] ?? 0);
+    if ($status === 'paid') $summaryPaidBills++;
+    if (in_array($status, ['unpaid', 'partial'], true)) $summaryNeedsPayment++;
+}
+
+$totalPages = max(1, (int)ceil($filteredCount / $perPage));
+if ($page > $totalPages) $page = $totalPages;
+$offset = ($page - 1) * $perPage;
+$displayRows = $exportPdf ? $allRows : array_slice($allRows, $offset, $perPage);
+$showFrom = $filteredCount > 0 ? $offset + 1 : 0;
+$showTo = $filteredCount > 0 ? min($offset + count($displayRows), $filteredCount) : 0;
+
 $pageTitle = $jobContext ? 'Payments - ' . ($jobContext['job_card_no'] ?? '') : 'Payments';
-$exportPdf = (string)($_GET['export'] ?? '') === 'pdf';
 $exportParams = array_filter([
-    'view' => $view,
+    'status' => $statusFilter !== 'all' ? $statusFilter : null,
     'job_card_id' => $jobCardId ?: null,
     'proforma_id' => $proformaId ?: null,
     'q' => $q ?: null,
@@ -805,6 +757,370 @@ $exportParams = array_filter([
     'export' => 'pdf'
 ]);
 $exportUrl = 'payments.php?' . http_build_query($exportParams);
+
+/*
+ * PDF / print export uses a dedicated report-only document.
+ * Do not render the ERP sidebar, navigation, dashboard cards, filters or action buttons.
+ * The browser print dialog can then be saved as PDF without capturing the application UI.
+ */
+if ($exportPdf) {
+    $statusNames = [
+        'all' => 'All',
+        'paid' => 'Paid',
+        'unpaid' => 'Unpaid / Partially Paid',
+        'cancelled' => 'Cancelled',
+    ];
+    $exportStatusLabel = $statusNames[$statusFilter] ?? 'All';
+    $exportDateLabel = 'All Dates';
+    if ($dateFrom !== '' && $dateTo !== '') {
+        $exportDateLabel = payDate($dateFrom) . ' to ' . payDate($dateTo);
+    } elseif ($dateFrom !== '') {
+        $exportDateLabel = 'From ' . payDate($dateFrom);
+    } elseif ($dateTo !== '') {
+        $exportDateLabel = 'Up to ' . payDate($dateTo);
+    }
+    ?>
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Payment Report - Subhiksha Cards</title>
+    <style>
+    @page {
+        size: A4 landscape;
+        margin: 10mm;
+    }
+
+    * {
+        box-sizing: border-box;
+    }
+
+    html,
+    body {
+        margin: 0;
+        padding: 0;
+        background: #fff;
+        color: #111827;
+        font-family: Arial, Helvetica, sans-serif;
+    }
+
+    body {
+        font-size: 11px;
+    }
+
+    .report {
+        width: 100%;
+    }
+
+    .report-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 20px;
+        border-bottom: 2px solid #111827;
+        padding-bottom: 10px;
+        margin-bottom: 12px;
+    }
+
+    .company {
+        font-size: 20px;
+        font-weight: 800;
+        letter-spacing: .2px;
+    }
+
+    .report-title {
+        font-size: 15px;
+        font-weight: 700;
+        margin-top: 3px;
+    }
+
+    .generated {
+        text-align: right;
+        line-height: 1.55;
+        color: #4b5563;
+    }
+
+    .filters {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+        margin-bottom: 10px;
+    }
+
+    .filter-box {
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        padding: 7px 9px;
+        min-height: 44px;
+    }
+
+    .filter-box small {
+        display: block;
+        color: #6b7280;
+        font-size: 9px;
+        text-transform: uppercase;
+        font-weight: 700;
+        margin-bottom: 3px;
+    }
+
+    .filter-box strong {
+        font-size: 10.5px;
+        word-break: break-word;
+    }
+
+    .summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+        margin-bottom: 12px;
+    }
+
+    .summary-box {
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        padding: 8px 9px;
+    }
+
+    .summary-box span {
+        display: block;
+        color: #6b7280;
+        font-size: 9px;
+        font-weight: 700;
+        text-transform: uppercase;
+        margin-bottom: 3px;
+    }
+
+    .summary-box strong {
+        font-size: 13px;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+    }
+
+    thead {
+        display: table-header-group;
+    }
+
+    tr {
+        page-break-inside: avoid;
+    }
+
+    th,
+    td {
+        border: 1px solid #d1d5db;
+        padding: 6px 5px;
+        vertical-align: top;
+        overflow-wrap: anywhere;
+    }
+
+    th {
+        background: #f3f4f6;
+        font-size: 9px;
+        text-transform: uppercase;
+        text-align: left;
+    }
+
+    td {
+        font-size: 9.5px;
+        line-height: 1.35;
+    }
+
+    .num {
+        text-align: right;
+        white-space: nowrap;
+    }
+
+    .muted {
+        color: #6b7280;
+        font-size: 8.5px;
+        display: block;
+        margin-top: 2px;
+    }
+
+    .status {
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .paid {
+        color: #166534;
+    }
+
+    .partial {
+        color: #c2410c;
+    }
+
+    .unpaid,
+    .cancelled {
+        color: #b91c1c;
+    }
+
+    .empty {
+        text-align: center;
+        padding: 18px;
+        color: #6b7280;
+    }
+
+    .footer-note {
+        margin-top: 8px;
+        font-size: 9px;
+        color: #6b7280;
+        text-align: right;
+    }
+
+    @media screen {
+        body {
+            padding: 18px;
+            background: #eef2f7;
+        }
+
+        .report {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 18px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, .12);
+        }
+    }
+
+    @media print {
+        body {
+            padding: 0 !important;
+            background: #fff !important;
+        }
+
+        .report {
+            max-width: none;
+            padding: 0;
+            box-shadow: none;
+        }
+    }
+    </style>
+</head>
+
+<body>
+    <div class="report">
+        <div class="report-head">
+            <div>
+                <div class="company">SUBHIKSHA CARDS</div>
+                <div class="report-title">Payment Report</div>
+            </div>
+            <div class="generated">
+                <strong>Generated:</strong> <?= e(date('d-m-Y h:i A')) ?><br>
+                <strong>Records:</strong> <?= number_format($filteredCount) ?>
+            </div>
+        </div>
+
+        <div class="filters">
+            <div class="filter-box"><small>Payment Status</small><strong><?= e($exportStatusLabel) ?></strong></div>
+            <div class="filter-box"><small>Date Range</small><strong><?= e($exportDateLabel) ?></strong></div>
+            <div class="filter-box"><small>Search</small><strong><?= e($q !== '' ? $q : 'All') ?></strong></div>
+            <div class="filter-box">
+                <small>Context</small><strong><?= e($jobContext ? ('Job Card ' . ($jobContext['job_card_no'] ?? '-')) : ($proformaId > 0 ? ('Proforma ID ' . $proformaId) : 'All Bills')) ?></strong>
+            </div>
+        </div>
+
+        <div class="summary">
+            <div class="summary-box"><span>Filtered Records</span><strong><?= number_format($filteredCount) ?></strong>
+            </div>
+            <div class="summary-box"><span>Paid Amount</span><strong><?= e(payMoney($summaryPaidAmount)) ?></strong>
+            </div>
+            <div class="summary-box"><span>Outstanding</span><strong><?= e(payMoney($summaryOutstanding)) ?></strong>
+            </div>
+            <div class="summary-box"><span>Needs
+                    Payment</span><strong><?= number_format($summaryNeedsPayment) ?></strong></div>
+        </div>
+
+        <table>
+            <colgroup>
+                <col style="width:13%">
+                <col style="width:18%">
+                <col style="width:12%">
+                <col style="width:11%">
+                <col style="width:11%">
+                <col style="width:11%">
+                <col style="width:13%">
+                <col style="width:11%">
+            </colgroup>
+            <thead>
+                <tr>
+                    <th>Bill / Payment</th>
+                    <th>Customer</th>
+                    <th>Job Card</th>
+                    <th class="num">Total</th>
+                    <th class="num">Paid</th>
+                    <th class="num">Balance</th>
+                    <th>Date / Mode</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (!$displayRows): ?>
+                <tr>
+                    <td colspan="8" class="empty">No payment records found for the selected filters.</td>
+                </tr>
+                <?php else: ?>
+                <?php foreach ($displayRows as $row): ?>
+                <?php
+                    $recordType = (string)($row['record_type'] ?? 'proforma');
+                    $billStatus = (string)($row['bill_status'] ?? 'unpaid');
+                    $isQuickSale = $recordType === 'quick_sale';
+                    $isCancelled = $recordType === 'cancelled';
+                    $paid = (float)($row['paid_amount'] ?? 0);
+                    $balance = (float)($row['current_balance'] ?? 0);
+                    $statusLabel = $billStatus === 'partial' ? 'Partially Paid' : ucfirst($billStatus);
+                    $dateValue = $isCancelled
+                        ? ($row['payment_date'] ?? null)
+                        : ($row['last_payment_date'] ?? ($row['sort_date'] ?? null));
+                    $modeValue = $isCancelled
+                        ? 'Cancelled'
+                        : (string)($row['last_payment_mode'] ?? ($paid > 0 ? '-' : 'No payment'));
+                ?>
+                <tr>
+                    <td>
+                        <strong><?= e($row['proforma_no'] ?? '-') ?></strong>
+                        <?php if ($isQuickSale): ?><span class="muted">Quick
+                            Sale</span><?php elseif ($isCancelled && !empty($row['payment_no'])): ?><span
+                            class="muted"><?= e($row['payment_no']) ?></span><?php endif; ?>
+                    </td>
+                    <td>
+                        <strong><?= e($row['customer_name'] ?? '-') ?></strong>
+                        <span class="muted"><?= e($row['mobile'] ?? '-') ?></span>
+                        <?php if ($isQuickSale && !empty($row['quick_sale_products'])): ?><span
+                            class="muted"><?= e($row['quick_sale_products']) ?></span><?php endif; ?>
+                    </td>
+                    <td><?= e($isQuickSale ? 'N/A' : ($row['job_card_no'] ?? 'Not Created')) ?></td>
+                    <td class="num"><strong><?= e(payMoney($row['final_amount'] ?? 0)) ?></strong></td>
+                    <td class="num"><?= e(payMoney($isCancelled ? ($row['cancelled_amount'] ?? 0) : $paid)) ?></td>
+                    <td class="num"><?= e(payMoney($balance)) ?></td>
+                    <td><?= e(payDate($dateValue)) ?><span
+                            class="muted"><?= e($modeValue !== '' ? $modeValue : '-') ?></span></td>
+                    <td><span class="status <?= e($billStatus) ?>"><?= e($statusLabel) ?></span></td>
+                </tr>
+                <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+        <div class="footer-note">Subhiksha Cards ERP · Payment Report</div>
+    </div>
+    <script>
+    window.addEventListener('load', function() {
+        setTimeout(function() {
+            window.print();
+        }, 250);
+    });
+    </script>
+</body>
+
+</html>
+<?php
+    exit;
+}
 ?>
 <!doctype html>
 <html lang="en">
@@ -875,16 +1191,26 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
         font-weight: 900;
         border-radius: 999px;
         padding: 5px 9px;
-        background: color-mix(in srgb, var(--info-color) 14%, transparent);
-        color: var(--info-color);
         display: inline-flex;
         align-items: center;
         white-space: nowrap
     }
 
-    .status-pill.ok {
+    .status-pill.paid {
         color: #166534;
         background: #dcfce7
+    }
+
+    .status-pill.partial {
+        color: #c2410c;
+        background: #fff7ed;
+        border: 1px solid #fed7aa
+    }
+
+    .status-pill.unpaid {
+        color: #b91c1c;
+        background: #fef2f2;
+        border: 1px solid #fecaca
     }
 
     .status-pill.cancelled {
@@ -903,17 +1229,6 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
         min-height: 46px
     }
 
-    .payment-tabs {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap
-    }
-
-    .payment-tabs .btn {
-        border-radius: 999px;
-        font-weight: 900
-    }
-
     .filter-card {
         border: 1px solid var(--border-soft);
         border-radius: 18px;
@@ -930,17 +1245,9 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
         font-weight: 900
     }
 
-    .cancelled-amount {
-        color: #991b1b;
-        font-weight: 900;
-        text-decoration: line-through
-    }
-
-    .cancel-inline {
-        display: grid;
-        grid-template-columns: minmax(130px, 1fr) auto;
-        gap: 6px;
-        align-items: center
+    .balance-amount {
+        color: #b91c1c;
+        font-weight: 900
     }
 
     .job-context {
@@ -1015,23 +1322,23 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
         line-height: 1.45
     }
 
-    .btn-action-icon {
-        width: 36px !important;
-        height: 36px !important;
-        min-width: 36px !important;
-        max-width: 36px !important;
-        padding: 0 !important;
-        border-radius: 50% !important;
-        display: inline-flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        line-height: 1 !important
+    .pagination .page-link {
+        font-weight: 800;
+        border-radius: 10px;
+        margin: 0 2px;
+        color: var(--text-main);
+        background: var(--card-bg);
+        border-color: var(--border-soft)
     }
 
-    .btn-action-icon svg {
-        width: 16px !important;
-        height: 16px !important;
-        stroke-width: 2.5 !important
+    .pagination .page-item.active .page-link {
+        background: var(--brand-1, #2563eb);
+        border-color: var(--brand-1, #2563eb);
+        color: #fff
+    }
+
+    .pagination .page-item.disabled .page-link {
+        opacity: .5
     }
 
     @media(max-width:767.98px) {
@@ -1057,24 +1364,12 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
             display: block
         }
 
-        .cancel-inline {
-            grid-template-columns: 1fr
-        }
-
-        .mobile-card-actions .btn,
-        .mobile-card-actions form {
-            flex: 1 1 auto
-        }
-
         .mobile-card-actions .btn {
             width: 100%
         }
 
-        .btn-action-icon {
-            width: 42px !important;
-            height: 42px !important;
-            min-width: 42px !important;
-            max-width: 42px !important
+        .filter-card .btn {
+            width: 100%
         }
     }
 
@@ -1087,8 +1382,8 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
         .app-shell>aside,
         .no-print,
         .filter-card,
-        .payment-tabs,
-        .toast-container {
+        .toast-container,
+        .pagination-wrap {
             display: none !important
         }
 
@@ -1138,22 +1433,20 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
         <?php include __DIR__ . '/includes/sidebar.php'; ?>
         <main id="main">
             <?php include __DIR__ . '/includes/nav.php'; ?>
-
             <section class="page-section module-page">
                 <div class="card-ui page-head">
                     <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
                         <div>
-                            <h1 class="mb-1">Payment History</h1>
+                            <h1 class="mb-1">Payments</h1>
                             <p class="text-muted-custom mb-0">
-                                <?= $jobContext ? 'Payment history for job card ' . e($jobContext['job_card_no'] ?? '-') : 'Pending Proforma collections, Proforma and Quick Sale payment history with cancelled Proforma payment details.' ?>
+                                <?= $jobContext ? 'Payment details for job card ' . e($jobContext['job_card_no'] ?? '-') : 'Paid, unpaid and partially paid bills in one list with filter-wise pagination.' ?>
                             </p>
                         </div>
                         <div class="d-flex flex-column flex-sm-row gap-2 no-print">
                             <a href="proforma_bills.php"
                                 class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Proforma List</a>
-                            <a href="<?= e($exportUrl) ?>" class="btn btn-primary rounded-pill px-4 fw-bold">
-                                <i data-lucide="file-down"></i> Export PDF
-                            </a>
+                            <a href="<?= e($exportUrl) ?>" class="btn btn-primary rounded-pill px-4 fw-bold"><i
+                                    data-lucide="file-down"></i> Export PDF</a>
                         </div>
                     </div>
                 </div>
@@ -1166,8 +1459,7 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
                             <div class="toast-body">
                                 <div class="toast-title"><?= e($toastTitle) ?></div>
                                 <div class="toast-message"><?= e($message) ?></div>
-                            </div>
-                            <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
+                            </div><button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
                                 aria-label="Close"></button>
                         </div>
                     </div>
@@ -1190,8 +1482,7 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
                         <div class="col-md-3"><strong>Customer</strong><br><?= e($jobContext['customer_name'] ?? '-') ?>
                             · <?= e($jobContext['mobile'] ?? '') ?></div>
                         <div class="col-md-3">
-                            <strong>Balance</strong><br><?= e(payMoney($jobContext['balance_amount'] ?? 0)) ?>
-                        </div>
+                            <strong>Balance</strong><br><?= e(payMoney($jobContext['balance_amount'] ?? 0)) ?></div>
                     </div>
                 </div>
                 <?php endif; ?>
@@ -1199,206 +1490,81 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
                 <div class="row g-3 mb-3">
                     <div class="col-12 col-md-3">
                         <div class="card-ui stat-card h-100">
-                            <div class="stat-icon" style="background:linear-gradient(135deg,#16a34a,#22c55e)"><i
-                                    data-lucide="indian-rupee"></i></div>
-                            <div><span>Paid Amount</span><strong><?= e(payMoney($paidAmount)) ?></strong></div>
+                            <div class="stat-icon" style="background:linear-gradient(135deg,#2563eb,#0ea5e9)"><i
+                                    data-lucide="list-filter"></i></div>
+                            <div><span>Filtered Records</span><strong><?= number_format($filteredCount) ?></strong>
+                            </div>
                         </div>
                     </div>
                     <div class="col-12 col-md-3">
                         <div class="card-ui stat-card h-100">
-                            <div class="stat-icon" style="background:linear-gradient(135deg,#2563eb,#0ea5e9)"><i
-                                    data-lucide="receipt"></i></div>
-                            <div><span>Paid Entries</span><strong><?= number_format($paidCount) ?></strong></div>
+                            <div class="stat-icon" style="background:linear-gradient(135deg,#16a34a,#22c55e)"><i
+                                    data-lucide="indian-rupee"></i></div>
+                            <div><span>Paid Amount</span><strong><?= e(payMoney($summaryPaidAmount)) ?></strong></div>
                         </div>
                     </div>
                     <div class="col-12 col-md-3">
                         <div class="card-ui stat-card h-100">
                             <div class="stat-icon" style="background:linear-gradient(135deg,#dc2626,#ef4444)"><i
-                                    data-lucide="x-circle"></i></div>
-                            <div><span>Cancelled</span><strong><?= number_format($cancelledCount) ?></strong></div>
+                                    data-lucide="wallet-cards"></i></div>
+                            <div><span>Outstanding</span><strong><?= e(payMoney($summaryOutstanding)) ?></strong></div>
                         </div>
                     </div>
                     <div class="col-12 col-md-3">
                         <div class="card-ui stat-card h-100">
-                            <div class="stat-icon" style="background:linear-gradient(135deg,#7c3aed,#9333ea)"><i
-                                    data-lucide="credit-card"></i></div>
-                            <div><span>UPI + Bank</span><strong><?= e(payMoney($upiAmount + $bankAmount)) ?></strong>
+                            <div class="stat-icon" style="background:linear-gradient(135deg,#f59e0b,#f97316)"><i
+                                    data-lucide="clock-alert"></i></div>
+                            <div><span>Need Payment</span><strong><?= number_format($summaryNeedsPayment) ?></strong>
                             </div>
                         </div>
                     </div>
                 </div>
-
-                <?php if ($view === 'paid' && $jobContext === null): ?>
-                <div class="card-ui module-card mb-3">
-                    <div
-                        class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
-                        <div>
-                            <h2 class="module-title">Pending Payments</h2>
-                            <p class="text-muted-custom mb-0">
-                                Unpaid and partially paid Proforma bills with balance greater than zero.
-                            </p>
-                        </div>
-                        <div class="d-flex align-items-center gap-2 flex-wrap">
-                            <span class="status-pill" style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa">
-                                <?= number_format($pendingCount) ?> Bills
-                            </span>
-                            <span class="status-pill" style="background:#fef2f2;color:#b91c1c;border:1px solid #fecaca">
-                                Balance <?= e(payMoney($pendingBalance)) ?>
-                            </span>
-                        </div>
-                    </div>
-
-                    <div class="table-responsive desktop-table">
-                        <table class="table-ui">
-                            <thead>
-                                <tr>
-                                    <th>Proforma</th>
-                                    <th>Customer</th>
-                                    <th>Job Card</th>
-                                    <th>Total</th>
-                                    <th>Paid</th>
-                                    <th>Balance</th>
-                                    <th>Status</th>
-                                    <th class="no-print">Action</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php if (!$pendingRows): ?>
-                                <tr>
-                                    <td colspan="8" class="text-center text-muted-custom py-4">No unpaid or partially
-                                        paid Proforma bills found.</td>
-                                </tr>
-                                <?php endif; ?>
-
-                                <?php foreach ($pendingRows as $pending): ?>
-                                <?php
-                                    $pendingPaid = (float)($pending['paid_amount'] ?? 0);
-                                    $pendingDue = (float)($pending['current_balance'] ?? 0);
-                                    $pendingLabel = $pendingPaid > 0.009 ? 'Partially Paid' : 'Unpaid';
-                                ?>
-                                <tr>
-                                    <td>
-                                        <a href="proforma_bill_view.php?id=<?= (int)$pending['bill_id'] ?>"
-                                            class="fw-bold text-decoration-none">
-                                            <?= e($pending['proforma_no'] ?? '-') ?>
-                                        </a>
-                                        <small
-                                            class="d-block text-muted-custom"><?= e(payDate($pending['proforma_created_at'] ?? null)) ?></small>
-                                    </td>
-                                    <td>
-                                        <strong><?= e($pending['customer_name'] ?? '-') ?></strong>
-                                        <small
-                                            class="d-block text-muted-custom"><?= e($pending['mobile'] ?? '-') ?></small>
-                                    </td>
-                                    <td>
-                                        <?php if (!empty($pending['job_card_id'])): ?>
-                                        <span class="status-pill job"><?= e($pending['job_card_no'] ?? '-') ?></span>
-                                        <small
-                                            class="d-block text-muted-custom mt-1"><?= e($pending['job_status_name'] ?? '-') ?></small>
-                                        <?php else: ?>
-                                        <span class="text-muted-custom fw-bold">Not Created</span>
-                                        <?php endif; ?>
-                                    </td>
-                                    <td><strong><?= e(payMoney($pending['final_amount'] ?? 0)) ?></strong></td>
-                                    <td><span class="paid-amount"><?= e(payMoney($pendingPaid)) ?></span></td>
-                                    <td><strong class="text-danger"><?= e(payMoney($pendingDue)) ?></strong></td>
-                                    <td>
-                                        <span class="status-pill <?= $pendingPaid > 0.009 ? '' : 'cancelled' ?>"
-                                            style="<?= $pendingPaid > 0.009 ? 'background:#fff7ed;color:#c2410c;border:1px solid #fed7aa' : 'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca' ?>">
-                                            <?= e($pendingLabel) ?>
-                                        </span>
-                                    </td>
-                                    <td class="no-print">
-                                        <a href="proforma_payment.php?id=<?= (int)$pending['bill_id'] ?>"
-                                            class="btn btn-success btn-sm rounded-pill px-3 fw-bold">
-                                            <i data-lucide="indian-rupee"></i> Pay
-                                        </a>
-                                    </td>
-                                </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
-
-                    <div class="mobile-cards">
-                        <?php if (!$pendingRows): ?>
-                        <div class="mobile-card text-center text-muted-custom">No unpaid or partially paid Proforma
-                            bills found.</div>
-                        <?php endif; ?>
-
-                        <?php foreach ($pendingRows as $pending): ?>
-                        <?php
-                            $pendingPaid = (float)($pending['paid_amount'] ?? 0);
-                            $pendingDue = (float)($pending['current_balance'] ?? 0);
-                            $pendingLabel = $pendingPaid > 0.009 ? 'Partially Paid' : 'Unpaid';
-                        ?>
-                        <div class="mobile-card">
-                            <div class="d-flex justify-content-between gap-2">
-                                <div>
-                                    <div class="mobile-card-title"><?= e($pending['proforma_no'] ?? '-') ?></div>
-                                    <span class="mobile-card-subtitle"><?= e($pending['customer_name'] ?? '-') ?> ·
-                                        <?= e($pending['mobile'] ?? '-') ?></span>
-                                    <span class="mobile-card-subtitle">Total:
-                                        <?= e(payMoney($pending['final_amount'] ?? 0)) ?></span>
-                                    <span class="mobile-card-subtitle">Paid: <?= e(payMoney($pendingPaid)) ?></span>
-                                    <span class="mobile-card-subtitle text-danger fw-bold">Balance:
-                                        <?= e(payMoney($pendingDue)) ?></span>
-                                    <span class="mobile-card-subtitle">Job Card:
-                                        <?= e($pending['job_card_no'] ?? 'Not Created') ?></span>
-                                </div>
-                                <span class="status-pill"
-                                    style="<?= $pendingPaid > 0.009 ? 'background:#fff7ed;color:#c2410c;border:1px solid #fed7aa' : 'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca' ?>">
-                                    <?= e($pendingLabel) ?>
-                                </span>
-                            </div>
-                            <div class="mobile-card-actions no-print">
-                                <a href="proforma_payment.php?id=<?= (int)$pending['bill_id'] ?>"
-                                    class="btn btn-success rounded-pill fw-bold">
-                                    <i data-lucide="indian-rupee"></i> Make Payment
-                                </a>
-                            </div>
-                        </div>
-                        <?php endforeach; ?>
-                    </div>
-                </div>
-                <?php endif; ?>
 
                 <div class="card-ui module-card">
                     <div
                         class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
                         <div>
-                            <h2 class="module-title">
-                                <?= $view === 'cancelled' ? 'Cancelled Payment Details' : 'Paid Payment History' ?></h2>
-                            <p class="text-muted-custom mb-0">
-                                <?= $view === 'cancelled' ? 'Cancelled entries are shown here with cancel reason and user.' : 'Only active paid payment entries are shown here.' ?>
-                            </p>
+                            <h2 class="module-title">Payment List</h2>
+                            <p class="text-muted-custom mb-0">No separate pending section. Use Payment Status to switch
+                                between Paid and Unpaid / Partially Paid bills.</p>
                         </div>
-                        <div class="payment-tabs no-print">
-                            <?php $paidUrl = 'payments.php?' . http_build_query(array_filter(['view' => 'paid', 'job_card_id' => $jobCardId ?: null, 'proforma_id' => $proformaId ?: null, 'q' => $q ?: null, 'date_from' => $dateFrom ?: null, 'date_to' => $dateTo ?: null])); ?>
-                            <?php $cancelUrl = 'payments.php?' . http_build_query(array_filter(['view' => 'cancelled', 'job_card_id' => $jobCardId ?: null, 'proforma_id' => $proformaId ?: null, 'q' => $q ?: null, 'date_from' => $dateFrom ?: null, 'date_to' => $dateTo ?: null])); ?>
-                            <a class="btn <?= $view === 'paid' ? 'btn-success' : 'btn-outline-success' ?> px-4"
-                                href="<?= e($paidUrl) ?>">Paid</a>
-                            <a class="btn <?= $view === 'cancelled' ? 'btn-danger' : 'btn-outline-danger' ?> px-4"
-                                href="<?= e($cancelUrl) ?>">Cancelled</a>
-                        </div>
+                        <?php if (!$exportPdf): ?>
+                        <div class="small text-muted-custom fw-bold">Showing
+                            <?= number_format($showFrom) ?>-<?= number_format($showTo) ?> of
+                            <?= number_format($filteredCount) ?></div>
+                        <?php endif; ?>
                     </div>
 
-                    <form method="get" class="filter-card mb-3 no-print">
-                        <input type="hidden" name="view" value="<?= e($view) ?>">
-                        <input type="hidden" name="job_card_id" value="<?= $jobCardId > 0 ? (int)$jobCardId : '' ?>">
-                        <input type="hidden" name="proforma_id" value="<?= $proformaId > 0 ? (int)$proformaId : '' ?>">
+                    <form method="get" class="filter-card mb-3 no-print" id="paymentFilterForm">
+                        <?php if ($jobCardId > 0): ?><input type="hidden" name="job_card_id"
+                            value="<?= (int)$jobCardId ?>"><?php endif; ?>
+                        <?php if ($proformaId > 0): ?><input type="hidden" name="proforma_id"
+                            value="<?= (int)$proformaId ?>"><?php endif; ?>
                         <div class="row g-3 align-items-end">
-                            <div class="col-md-4"><label class="form-label fw-bold">Search</label><input type="search"
-                                    name="q" class="form-control" value="<?= e($q) ?>"
-                                    placeholder="Payment no / proforma / quick sale / product / reference"></div>
-                            <div class="col-md-2"><label class="form-label fw-bold">From</label><input type="date"
+                            <div class="col-12 col-lg-3">
+                                <label class="form-label fw-bold">Payment Status</label>
+                                <select name="status" id="paymentStatusFilter" class="form-select">
+                                    <option value="all" <?= $statusFilter === 'all' ? 'selected' : '' ?>>All</option>
+                                    <option value="paid" <?= $statusFilter === 'paid' ? 'selected' : '' ?>>Paid</option>
+                                    <option value="unpaid" <?= $statusFilter === 'unpaid' ? 'selected' : '' ?>>Unpaid /
+                                        Partially Paid</option>
+                                    <option value="cancelled" <?= $statusFilter === 'cancelled' ? 'selected' : '' ?>>
+                                        Cancelled</option>
+                                </select>
+                            </div>
+                            <div class="col-12 col-lg-3">
+                                <label class="form-label fw-bold">Search</label>
+                                <input type="search" name="q" class="form-control" value="<?= e($q) ?>"
+                                    placeholder="Proforma / customer / mobile / job card">
+                            </div>
+                            <div class="col-6 col-lg-2"><label class="form-label fw-bold">From</label><input type="date"
                                     name="date_from" class="form-control" value="<?= e($dateFrom) ?>"></div>
-                            <div class="col-md-2"><label class="form-label fw-bold">To</label><input type="date"
+                            <div class="col-6 col-lg-2"><label class="form-label fw-bold">To</label><input type="date"
                                     name="date_to" class="form-control" value="<?= e($dateTo) ?>"></div>
-                            <div class="col-md-4"><button type="submit"
-                                    class="btn btn-primary rounded-pill px-4 fw-bold">Filter</button> <a
+                            <div class="col-12 col-lg-2 d-flex gap-2"><button type="submit"
+                                    class="btn btn-primary rounded-pill fw-bold flex-fill">Filter</button><a
                                     href="payments.php"
-                                    class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Reset</a></div>
+                                    class="btn btn-outline-secondary rounded-pill fw-bold flex-fill">Reset</a></div>
                         </div>
                     </form>
 
@@ -1406,40 +1572,36 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
                         <table class="table-ui" id="paymentsTable">
                             <thead>
                                 <tr>
-                                    <th>Payment No</th>
+                                    <th>Bill / Sale</th>
                                     <th>Customer</th>
-                                    <th>Proforma</th>
                                     <th>Job Card</th>
-                                    <th>Mode</th>
-                                    <th>Amount</th>
-                                    <th>Date / Ref</th>
+                                    <th>Total</th>
+                                    <th>Paid</th>
+                                    <th>Balance</th>
+                                    <th>Last Payment</th>
                                     <th>Status</th>
+                                    <th class="no-print">Action</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php if (!$rows): ?>
+                                <?php if (!$displayRows): ?>
                                 <tr>
-                                    <td colspan="8" class="text-center text-muted-custom py-4">No
-                                        <?= $view === 'cancelled' ? 'cancelled' : 'paid' ?> payment details found.</td>
+                                    <td colspan="9" class="text-center text-muted-custom py-4">No payment details found
+                                        for the selected filters.</td>
                                 </tr>
                                 <?php endif; ?>
 
-                                <?php foreach ($rows as $row): ?>
+                                <?php foreach ($displayRows as $row): ?>
                                 <?php
-                                $isCancelled = (int)($row['is_cancelled'] ?? 0) === 1;
-                                $isQuickSale = (string)($row['payment_source'] ?? 'proforma') === 'quick_sale';
-                            ?>
+                            $recordType = (string)($row['record_type'] ?? 'proforma');
+                            $billStatus = (string)($row['bill_status'] ?? 'unpaid');
+                            $isQuickSale = $recordType === 'quick_sale';
+                            $isCancelled = $recordType === 'cancelled';
+                            $paid = (float)($row['paid_amount'] ?? 0);
+                            $balance = (float)($row['current_balance'] ?? 0);
+                            $statusLabel = $billStatus === 'partial' ? 'Partially Paid' : ucfirst($billStatus);
+                        ?>
                                 <tr>
-                                    <td>
-                                        <strong><?= e($row['payment_no'] ?? '-') ?></strong>
-                                        <small
-                                            class="d-block text-muted-custom"><?= $isQuickSale ? 'Quick Sale Payment' : 'ID: ' . (int)($row['id'] ?? 0) ?></small>
-                                    </td>
-                                    <td>
-                                        <?= e($isQuickSale ? 'Counter Sale' : ($row['customer_name'] ?? '-')) ?>
-                                        <small
-                                            class="d-block text-muted-custom"><?= e($isQuickSale ? ($row['quick_sale_products'] ?? '-') : ($row['mobile'] ?? '-')) ?></small>
-                                    </td>
                                     <td>
                                         <?php if ($isQuickSale): ?>
                                         <a href="quick-sales.php?q=<?= urlencode((string)($row['proforma_no'] ?? '')) ?>"
@@ -1448,111 +1610,155 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
                                         <?php else: ?>
                                         <a href="proforma_bill_view.php?id=<?= (int)($row['bill_id'] ?? 0) ?>"
                                             class="fw-bold text-decoration-none"><?= e($row['proforma_no'] ?? '-') ?></a>
-                                        <small
-                                            class="d-block text-muted-custom"><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></small>
+                                        <?php if ($isCancelled): ?><small class="d-block text-muted-custom">Payment:
+                                            <?= e($row['payment_no'] ?? '-') ?></small><?php else: ?><small
+                                            class="d-block text-muted-custom"><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></small><?php endif; ?>
                                         <?php endif; ?>
+                                    </td>
+                                    <td><strong><?= e($row['customer_name'] ?? '-') ?></strong><small
+                                            class="d-block text-muted-custom"><?= e($row['mobile'] ?? '-') ?></small><?php if ($isQuickSale && !empty($row['quick_sale_products'])): ?><small
+                                            class="d-block text-muted-custom"><?= e($row['quick_sale_products']) ?></small><?php endif; ?>
                                     </td>
                                     <td>
-                                        <?php if ($isQuickSale): ?>
-                                        <span class="status-pill">Not Applicable</span>
-                                        <?php elseif (!empty($row['job_card_id'])): ?>
-                                        <a href="payments.php?view=<?= e($view) ?>&job_card_id=<?= (int)$row['job_card_id'] ?>"
-                                            class="status-pill job text-decoration-none"><?= e($row['job_card_no'] ?? '-') ?></a>
-                                        <small
-                                            class="d-block text-muted-custom mt-1"><?= e($row['job_status_name'] ?? '-') ?></small>
-                                        <?php else: ?>
-                                        <span class="text-muted-custom fw-bold">Not Created</span>
-                                        <?php endif; ?>
+                                        <?php if ($isQuickSale): ?><span class="text-muted-custom fw-bold">N/A</span>
+                                        <?php elseif (!empty($row['job_card_id'])): ?><span
+                                            class="status-pill job"><?= e($row['job_card_no'] ?? '-') ?></span><?php if (!empty($row['job_status_name'])): ?><small
+                                            class="d-block text-muted-custom mt-1"><?= e($row['job_status_name']) ?></small><?php endif; ?>
+                                        <?php else: ?><span class="text-muted-custom fw-bold">Not
+                                            Created</span><?php endif; ?>
                                     </td>
-                                    <td><?= e(ucfirst((string)($row['payment_type'] ?? '-'))) ?><small
-                                            class="d-block text-muted-custom"><?= e(strtoupper((string)($row['payment_mode'] ?? '-'))) ?></small>
-                                    </td>
+                                    <td><strong><?= e(payMoney($row['final_amount'] ?? 0)) ?></strong></td>
                                     <td>
-                                        <span
-                                            class="<?= $isCancelled ? 'cancelled-amount' : 'paid-amount' ?>"><?= e(payMoney($row['amount'] ?? 0)) ?></span>
-                                        <?php if ($isQuickSale && strtolower((string)($row['payment_mode'] ?? '')) === 'cash' && (float)($row['return_amount'] ?? 0) > 0): ?>
-                                        <small class="d-block text-muted-custom">Received:
-                                            <?= e(payMoney($row['tendered_amount'] ?? 0)) ?> · Return:
-                                            <?= e(payMoney($row['return_amount'] ?? 0)) ?></small>
-                                        <?php endif; ?>
+                                        <?php if ($isCancelled): ?><span class="text-danger fw-bold">Cancelled
+                                            <?= e(payMoney($row['cancelled_amount'] ?? 0)) ?></span>
+                                        <?php else: ?><span
+                                            class="paid-amount"><?= e(payMoney($paid)) ?></span><?php endif; ?>
                                     </td>
-                                    <td><?= e(payDate($row['payment_date'] ?? null)) ?><small
+                                    <td><?php if ($isCancelled): ?><?= e(payMoney($balance)) ?><?php elseif ($balance > 0.009): ?><span
+                                            class="balance-amount"><?= e(payMoney($balance)) ?></span><?php else: ?><span
+                                            class="paid-amount">₹0.00</span><?php endif; ?></td>
+                                    <td>
+                                        <?php if ($isCancelled): ?><?= e(payDate($row['payment_date'] ?? null)) ?><small
+                                            class="d-block text-danger">Cancelled:
+                                            <?= e(payDateTime($row['cancelled_at'] ?? null)) ?></small><small
+                                            class="d-block text-muted-custom"><?= e($row['cancel_reason'] ?? '-') ?></small>
+                                        <?php else: ?><?= e(payDate($row['last_payment_date'] ?? null)) ?><small
+                                            class="d-block text-muted-custom"><?= e($row['last_payment_mode'] ?? ($paid > 0 ? '-' : 'No payment')) ?></small><?php if (!empty($row['last_reference_no'])): ?><small
                                             class="d-block text-muted-custom">Ref:
-                                            <?= e($row['reference_no'] ?? '-') ?></small></td>
-                                    <td>
-                                        <?php if ($isCancelled): ?>
-                                        <span class="status-pill cancelled">Cancelled</span>
-                                        <small class="d-block text-muted-custom mt-1">At:
-                                            <?= e(payDateTime($row['cancelled_at'] ?? null)) ?></small>
-                                        <small class="d-block text-muted-custom">By:
-                                            <?= e($row['cancelled_by_name'] ?? '-') ?></small>
-                                        <small class="d-block text-danger fw-bold mt-1">Reason:
-                                            <?= e($row['cancel_reason'] ?? '-') ?></small>
+                                            <?= e($row['last_reference_no']) ?></small><?php endif; ?><?php endif; ?>
+                                    </td>
+                                    <td><span class="status-pill <?= e($billStatus) ?>"><?= e($statusLabel) ?></span>
+                                    </td>
+                                    <td class="no-print">
+                                        <?php if (!$isQuickSale && !$isCancelled && $balance > 0.009): ?>
+                                        <a href="proforma_payment.php?id=<?= (int)$row['bill_id'] ?>"
+                                            class="btn btn-success btn-sm rounded-pill px-3 fw-bold"><i
+                                                data-lucide="indian-rupee"></i> Pay</a>
+                                        <?php elseif (!$isQuickSale && !$isCancelled): ?>
+                                        <a href="proforma_payment.php?id=<?= (int)$row['bill_id'] ?>"
+                                            class="btn btn-outline-primary btn-sm rounded-pill px-3 fw-bold">View
+                                            Payments</a>
+                                        <?php elseif ($isQuickSale): ?>
+                                        <a href="quick-sales.php?q=<?= urlencode((string)($row['proforma_no'] ?? '')) ?>"
+                                            class="btn btn-outline-primary btn-sm rounded-pill px-3 fw-bold">View</a>
                                         <?php else: ?>
-                                        <span class="status-pill ok">Paid</span>
-                                        <?php if ($isQuickSale): ?><small class="d-block text-muted-custom mt-1">Source:
-                                            Quick Sale</small><?php endif; ?>
-                                        <small class="d-block text-muted-custom mt-1">By:
-                                            <?= e($row['received_by_name'] ?? '-') ?></small>
+                                        <a href="proforma_payment.php?id=<?= (int)($row['bill_id'] ?? 0) ?>"
+                                            class="btn btn-outline-secondary btn-sm rounded-pill px-3 fw-bold">View</a>
                                         <?php endif; ?>
                                     </td>
-
                                 </tr>
                                 <?php endforeach; ?>
                             </tbody>
                         </table>
                     </div>
 
-                    <div class="mobile-cards" id="mobileCards">
-                        <?php if (!$rows): ?>
-                        <div class="mobile-card text-center text-muted-custom">No
-                            <?= $view === 'cancelled' ? 'cancelled' : 'paid' ?> payment details found.</div>
-                        <?php endif; ?>
-
-                        <?php foreach ($rows as $row): ?>
+                    <div class="mobile-cards">
+                        <?php if (!$displayRows): ?><div class="mobile-card text-center text-muted-custom">No payment
+                            details found.</div><?php endif; ?>
+                        <?php foreach ($displayRows as $row): ?>
                         <?php
-                        $isCancelled = (int)($row['is_cancelled'] ?? 0) === 1;
-                        $isQuickSale = (string)($row['payment_source'] ?? 'proforma') === 'quick_sale';
+                        $recordType = (string)($row['record_type'] ?? 'proforma');
+                        $billStatus = (string)($row['bill_status'] ?? 'unpaid');
+                        $isQuickSale = $recordType === 'quick_sale';
+                        $isCancelled = $recordType === 'cancelled';
+                        $paid = (float)($row['paid_amount'] ?? 0);
+                        $balance = (float)($row['current_balance'] ?? 0);
+                        $statusLabel = $billStatus === 'partial' ? 'Partially Paid' : ucfirst($billStatus);
                     ?>
                         <div class="mobile-card">
                             <div class="d-flex justify-content-between gap-2">
                                 <div>
-                                    <div class="mobile-card-title"><?= e($row['payment_no'] ?? '-') ?></div>
-                                    <span
-                                        class="mobile-card-subtitle"><?= e($isQuickSale ? 'Counter Sale' : ($row['customer_name'] ?? '-')) ?><?= $isQuickSale ? '' : ' · ' . e($row['mobile'] ?? '-') ?></span>
-                                    <span class="mobile-card-subtitle"><?= $isQuickSale ? 'Quick Sale' : 'Proforma' ?>:
-                                        <?= e($row['proforma_no'] ?? '-') ?></span>
-                                    <span class="mobile-card-subtitle">Job Card:
-                                        <?= e($isQuickSale ? 'Not Applicable' : ($row['job_card_no'] ?? 'Not Created')) ?></span>
-                                    <?php if ($isQuickSale && !empty($row['quick_sale_products'])): ?><span
-                                        class="mobile-card-subtitle">Products:
-                                        <?= e($row['quick_sale_products']) ?></span><?php endif; ?>
-                                    <span class="mobile-card-subtitle">Amount: <?= e(payMoney($row['amount'] ?? 0)) ?> ·
-                                        <?= e(strtoupper((string)($row['payment_mode'] ?? '-'))) ?></span>
-                                    <?php if ($isQuickSale && strtolower((string)($row['payment_mode'] ?? '')) === 'cash' && (float)($row['return_amount'] ?? 0) > 0): ?><span
-                                        class="mobile-card-subtitle">Received:
-                                        <?= e(payMoney($row['tendered_amount'] ?? 0)) ?> · Return:
-                                        <?= e(payMoney($row['return_amount'] ?? 0)) ?></span><?php endif; ?>
-                                    <?php if ($isQuickSale && !empty($row['reference_no'])): ?><span
-                                        class="mobile-card-subtitle">UPI Ref:
-                                        <?= e($row['reference_no']) ?></span><?php endif; ?>
-                                    <span class="mobile-card-subtitle">Date:
-                                        <?= e(payDate($row['payment_date'] ?? null)) ?></span>
-                                    <?php if ($isCancelled): ?>
-                                    <span class="mobile-card-subtitle text-danger fw-bold">Cancelled:
-                                        <?= e(payDateTime($row['cancelled_at'] ?? null)) ?> ·
+                                    <div class="mobile-card-title"><?= e($row['proforma_no'] ?? '-') ?></div>
+                                    <span class="mobile-card-subtitle"><?= e($row['customer_name'] ?? '-') ?> ·
+                                        <?= e($row['mobile'] ?? '-') ?></span>
+                                    <?php if (!$isQuickSale): ?><span class="mobile-card-subtitle">Job Card:
+                                        <?= e($row['job_card_no'] ?? 'Not Created') ?></span><?php endif; ?>
+                                    <span class="mobile-card-subtitle">Total:
+                                        <?= e(payMoney($row['final_amount'] ?? 0)) ?></span>
+                                    <?php if ($isCancelled): ?><span
+                                        class="mobile-card-subtitle text-danger fw-bold">Cancelled Amount:
+                                        <?= e(payMoney($row['cancelled_amount'] ?? 0)) ?></span><span
+                                        class="mobile-card-subtitle">Reason:
                                         <?= e($row['cancel_reason'] ?? '-') ?></span>
-                                    <?php endif; ?>
+                                    <?php else: ?><span class="mobile-card-subtitle">Paid:
+                                        <?= e(payMoney($paid)) ?></span><span
+                                        class="mobile-card-subtitle <?= $balance > 0.009 ? 'text-danger fw-bold' : '' ?>">Balance:
+                                        <?= e(payMoney($balance)) ?></span><?php endif; ?>
                                 </div>
-                                <span
-                                    class="status-pill <?= $isCancelled ? 'cancelled' : 'ok' ?>"><?= $isCancelled ? 'Cancelled' : 'Paid' ?></span>
+                                <span class="status-pill <?= e($billStatus) ?>"><?= e($statusLabel) ?></span>
                             </div>
-
+                            <div class="mobile-card-actions no-print">
+                                <?php if (!$isQuickSale && !$isCancelled && $balance > 0.009): ?><a
+                                    href="proforma_payment.php?id=<?= (int)$row['bill_id'] ?>"
+                                    class="btn btn-success rounded-pill fw-bold">Make Payment</a>
+                                <?php elseif (!$isQuickSale): ?><a
+                                    href="proforma_payment.php?id=<?= (int)($row['bill_id'] ?? 0) ?>"
+                                    class="btn btn-outline-primary rounded-pill fw-bold">View Payments</a>
+                                <?php else: ?><a
+                                    href="quick-sales.php?q=<?= urlencode((string)($row['proforma_no'] ?? '')) ?>"
+                                    class="btn btn-outline-primary rounded-pill fw-bold">View Quick
+                                    Sale</a><?php endif; ?>
+                            </div>
                         </div>
                         <?php endforeach; ?>
                     </div>
-                </div>
 
+                    <?php if (!$exportPdf && $filteredCount > $perPage): ?>
+                    <div
+                        class="pagination-wrap d-flex flex-column flex-md-row align-items-center justify-content-between gap-3 mt-4 no-print">
+                        <div class="text-muted-custom fw-bold small">Page <?= number_format($page) ?> of
+                            <?= number_format($totalPages) ?></div>
+                        <nav aria-label="Payment pagination">
+                            <ul class="pagination mb-0">
+                                <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>"><a class="page-link"
+                                        href="<?= e(payBuildUrl(['page' => max(1,$page-1)])) ?>">Previous</a></li>
+                                <?php
+                            $startPage = max(1, $page - 2);
+                            $endPage = min($totalPages, $page + 2);
+                            if ($startPage > 1):
+                        ?>
+                                <li class="page-item"><a class="page-link"
+                                        href="<?= e(payBuildUrl(['page'=>1])) ?>">1</a></li>
+                                <?php if ($startPage > 2): ?><li class="page-item disabled"><span
+                                        class="page-link">…</span></li><?php endif; ?>
+                                <?php endif; ?>
+                                <?php for ($p=$startPage; $p<=$endPage; $p++): ?>
+                                <li class="page-item <?= $p === $page ? 'active' : '' ?>"><a class="page-link"
+                                        href="<?= e(payBuildUrl(['page'=>$p])) ?>"><?= $p ?></a></li>
+                                <?php endfor; ?>
+                                <?php if ($endPage < $totalPages): ?>
+                                <?php if ($endPage < $totalPages - 1): ?><li class="page-item disabled"><span
+                                        class="page-link">…</span></li><?php endif; ?>
+                                <li class="page-item"><a class="page-link"
+                                        href="<?= e(payBuildUrl(['page'=>$totalPages])) ?>"><?= $totalPages ?></a></li>
+                                <?php endif; ?>
+                                <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>"><a class="page-link"
+                                        href="<?= e(payBuildUrl(['page' => min($totalPages,$page+1)])) ?>">Next</a></li>
+                            </ul>
+                        </nav>
+                    </div>
+                    <?php endif; ?>
+                </div>
                 <?php endif; ?>
             </section>
         </main>
@@ -1569,6 +1775,16 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
         if (window.lucide && typeof window.lucide.createIcons === 'function') {
             window.lucide.createIcons();
         }
+
+        const statusFilter = document.getElementById('paymentStatusFilter');
+        const filterForm = document.getElementById('paymentFilterForm');
+        statusFilter?.addEventListener('change', function() {
+            // Status changes immediately and resets pagination to page 1.
+            const oldPage = filterForm?.querySelector('input[name="page"]');
+            if (oldPage) oldPage.remove();
+            filterForm?.submit();
+        });
+
         <?php if ($exportPdf): ?>
         window.addEventListener('load', function() {
             setTimeout(function() {

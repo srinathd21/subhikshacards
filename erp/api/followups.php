@@ -144,6 +144,35 @@ function apiRequireRolePermission(mysqli $conn, string $permission, string $mess
     }
 }
 
+function apiRequireFollowupModifyPermission(mysqli $conn): void
+{
+    $allowed = false;
+    foreach (['can_update', 'can_edit'] as $permission) {
+        try {
+            if (permission_allowed($conn, $permission, 'followups.php')) {
+                $allowed = true;
+                break;
+            }
+        } catch (Throwable $e) {
+            // Try the next permission.
+        }
+    }
+
+    if (!$allowed) {
+        apiResponse(false, 'You do not have permission to update follow-ups.');
+    }
+}
+
+function apiFollowupTerminalStatus(string $status): bool
+{
+    return in_array(strtolower(trim($status)), [
+        'completed',
+        'closed',
+        'converted_to_quotation',
+        'not_interested'
+    ], true);
+}
+
 function apiFollowupRow(mysqli $conn, int $id): ?array
 {
     if ($id <= 0 || !fuTableExists($conn, 'enquiry_followups')) {
@@ -217,7 +246,10 @@ try {
         apiResponse(false, 'Action is required.');
     }
 
-    if (in_array($action, ['create', 'update', 'save_record', 'delete', 'delete_record'], true)) {
+    if (in_array($action, [
+        'create', 'update', 'save_record', 'delete', 'delete_record',
+        'complete_reminder', 'schedule_next'
+    ], true)) {
         apiCsrf();
     }
 
@@ -236,6 +268,99 @@ try {
         }
 
         apiResponse(true, 'Follow-up loaded successfully.', ['data' => $row]);
+    }
+
+    if ($action === 'complete_reminder') {
+        apiRequireFollowupModifyPermission($conn);
+        $id = fuInt($_POST['id'] ?? 0);
+
+        if ($id <= 0) {
+            apiResponse(false, 'Invalid follow-up.');
+        }
+
+        $row = apiFollowupRow($conn, $id);
+        if (!$row) {
+            apiResponse(false, 'Follow-up not found.');
+        }
+
+        $conn->begin_transaction();
+        try {
+            $stmt = $conn->prepare("UPDATE enquiry_followups SET followup_status = 'completed', next_callback_at = NULL WHERE id = ?");
+            $stmt->bind_param('i', $id);
+            $stmt->execute();
+            $stmt->close();
+
+            $enquiryId = (int)($row['enquiry_id'] ?? 0);
+            $userId = (int)($_SESSION['user_id'] ?? 0);
+            if ($enquiryId > 0) {
+                $stmt = $conn->prepare("UPDATE enquiries SET next_callback_at = NULL, updated_by = ?, updated_at = NOW() WHERE id = ?");
+                $stmt->bind_param('ii', $userId, $enquiryId);
+                $stmt->execute();
+                $stmt->close();
+            }
+
+            $conn->commit();
+        } catch (Throwable $e) {
+            $conn->rollback();
+            throw $e;
+        }
+
+        apiResponse(true, 'Follow-up marked as completed.', ['id' => $id, 'followup_status' => 'completed']);
+    }
+
+    if ($action === 'schedule_next') {
+        apiRequireFollowupModifyPermission($conn);
+        $id = fuInt($_POST['id'] ?? 0);
+        $nextCallbackAt = fuDateTimeValue(fuPost('next_callback_at'));
+
+        if ($id <= 0) {
+            apiResponse(false, 'Invalid follow-up.');
+        }
+        if (!$nextCallbackAt) {
+            apiResponse(false, 'Next callback date and time is required.');
+        }
+        if (strtotime($nextCallbackAt) <= time()) {
+            apiResponse(false, 'Next callback must be a future date and time.');
+        }
+
+        $row = apiFollowupRow($conn, $id);
+        if (!$row) {
+            apiResponse(false, 'Follow-up not found.');
+        }
+
+        $conn->begin_transaction();
+        try {
+            $stmt = $conn->prepare("UPDATE enquiry_followups SET next_callback_at = ?, followup_status = 'callback_scheduled' WHERE id = ?");
+            $stmt->bind_param('si', $nextCallbackAt, $id);
+            $stmt->execute();
+            $stmt->close();
+
+            $enquiryId = (int)($row['enquiry_id'] ?? 0);
+            $userId = (int)($_SESSION['user_id'] ?? 0);
+            if ($enquiryId > 0) {
+                $statusId = fuStatusIdByKey($conn, 'callback_scheduled');
+                if ($statusId) {
+                    $stmt = $conn->prepare("UPDATE enquiries SET enquiry_status_id = ?, next_callback_at = ?, updated_by = ?, updated_at = NOW() WHERE id = ?");
+                    $stmt->bind_param('isii', $statusId, $nextCallbackAt, $userId, $enquiryId);
+                } else {
+                    $stmt = $conn->prepare("UPDATE enquiries SET next_callback_at = ?, updated_by = ?, updated_at = NOW() WHERE id = ?");
+                    $stmt->bind_param('sii', $nextCallbackAt, $userId, $enquiryId);
+                }
+                $stmt->execute();
+                $stmt->close();
+            }
+
+            $conn->commit();
+        } catch (Throwable $e) {
+            $conn->rollback();
+            throw $e;
+        }
+
+        apiResponse(true, 'Next callback scheduled successfully.', [
+            'id' => $id,
+            'followup_status' => 'callback_scheduled',
+            'next_callback_at' => $nextCallbackAt
+        ]);
     }
 
     if (in_array($action, ['create', 'update', 'save_record'], true)) {
@@ -262,6 +387,10 @@ try {
         $nextCallbackAt = fuDateTimeValue(fuPost('next_callback_at'));
         $followupStatus = fuPost('followup_status', 'followup_pending');
         $createdBy = (int)($_SESSION['user_id'] ?? 0);
+
+        if (apiFollowupTerminalStatus($followupStatus)) {
+            $nextCallbackAt = null;
+        }
 
         if ($enquiryId <= 0) {
             throw new RuntimeException('Please select enquiry.');
@@ -310,7 +439,12 @@ try {
             $stmt->close();
 
             $statusId = fuStatusIdByKey($conn, $followupStatus);
-            if ($statusId || $nextCallbackAt) {
+            if (strtolower($followupStatus) === 'completed') {
+                $stmt = $conn->prepare("UPDATE enquiries SET next_callback_at = NULL, updated_by = ?, updated_at = NOW() WHERE id = ?");
+                $stmt->bind_param('ii', $createdBy, $enquiryId);
+                $stmt->execute();
+                $stmt->close();
+            } elseif ($statusId || $nextCallbackAt) {
                 if ($statusId) {
                     $stmt = $conn->prepare("
                         UPDATE enquiries
@@ -335,6 +469,7 @@ try {
                 $stmt->execute();
                 $stmt->close();
             }
+
 
             apiResponse(true, 'Follow-up updated successfully.', ['id' => $id]);
         }
@@ -369,7 +504,10 @@ try {
         $stmt->close();
 
         $statusId = fuStatusIdByKey($conn, $followupStatus);
-        if ($statusId) {
+        if (strtolower($followupStatus) === 'completed') {
+            $stmt = $conn->prepare("UPDATE enquiries SET next_callback_at = NULL, updated_by = ?, updated_at = NOW() WHERE id = ?");
+            $stmt->bind_param('ii', $createdBy, $enquiryId);
+        } elseif ($statusId) {
             $stmt = $conn->prepare("
                 UPDATE enquiries
                 SET enquiry_status_id = ?,
@@ -392,6 +530,7 @@ try {
 
         $stmt->execute();
         $stmt->close();
+
 
         apiResponse(true, 'Follow-up added successfully.', ['id' => $newId]);
     }
