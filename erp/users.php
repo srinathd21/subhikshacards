@@ -238,6 +238,35 @@ $res=$conn->query($sql); while($row=$res->fetch_assoc()) $users[]=$row;
     }
     </style>
 
+
+<style id="compact-ui-overrides">
+/* Compact 100% zoom UI override - visual sizing only */
+.master-page .page-head{padding:16px 18px !important;margin-bottom:12px !important;border-radius:16px !important;}
+.master-page .page-head h1{font-size:24px !important;line-height:1.2 !important;font-weight:800 !important;}
+.master-page .page-head p{font-size:12px !important;font-weight:500 !important;}
+.master-page .master-card{padding:16px !important;border-radius:16px !important;}
+.master-page .master-title{font-size:15px !important;font-weight:750 !important;margin-bottom:12px !important;}
+.master-page .master-stat-card{min-height:auto !important;padding:12px 14px !important;gap:10px !important;}
+.master-page .master-stat-icon{width:38px !important;height:38px !important;border-radius:12px !important;}
+.master-page .master-stat-icon svg{width:19px !important;height:19px !important;}
+.master-page .master-stat-card span{font-size:10px !important;font-weight:700 !important;}
+.master-page .master-stat-card strong{font-size:18px !important;font-weight:800 !important;}
+.master-page .form-label{font-size:12px !important;font-weight:700 !important;margin-bottom:5px !important;}
+.master-page .form-control,.master-page .form-select{min-height:38px !important;font-size:13px !important;border-radius:10px !important;padding:7px 10px !important;}
+.master-page textarea.form-control{min-height:72px !important;}
+.master-page .btn{font-size:12px !important;font-weight:700 !important;padding:7px 12px !important;}
+.master-page .btn-sm{font-size:11px !important;padding:5px 9px !important;}
+.master-page .table-ui th,.master-page .table-ui td{font-size:12px !important;padding:8px 9px !important;}
+.master-page .table-ui th{font-size:10.5px !important;font-weight:750 !important;}
+.master-page .status-pill{font-size:10px !important;font-weight:700 !important;padding:4px 8px !important;}
+.master-page .small-muted{font-size:10px !important;font-weight:500 !important;}
+.master-page .modal-title{font-size:16px !important;font-weight:800 !important;}
+.master-page .modal-header{padding:14px 16px !important;}
+.master-page .modal-body{padding:16px !important;}
+.master-page .modal-footer{padding:12px 16px !important;}
+.master-page .modal-content{border-radius:16px !important;}
+@media(max-width:767.98px){.master-page .page-head{padding:14px !important}.master-page .page-head h1{font-size:21px !important}.master-page .master-card{padding:13px !important;}}
+</style><!-- compact-ui-overrides -->
 </head>
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">

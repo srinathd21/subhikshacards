@@ -1000,6 +1000,122 @@ foreach ($allMenus as $menu) {
         }
     }
     </style>
+
+<style id="compact-ui-overrides">
+/* Compact 100% zoom UI override - visual sizing only */
+.module-page .page-head{
+    padding:16px 18px !important;
+    margin-bottom:12px !important;
+    border-radius:16px !important;
+}
+.module-page .page-head h1{
+    font-size:24px !important;
+    line-height:1.2 !important;
+    font-weight:800 !important;
+    letter-spacing:-.2px !important;
+}
+.module-page .page-head p,
+.module-page .text-muted-custom{
+    font-size:12px !important;
+    font-weight:500 !important;
+}
+.module-page .module-card{
+    padding:16px !important;
+    border-radius:16px !important;
+    margin-bottom:12px !important;
+}
+.module-page .module-title,
+.module-page .section-title{
+    font-size:15px !important;
+    line-height:1.25 !important;
+    font-weight:750 !important;
+    margin-bottom:10px !important;
+}
+.module-page .stat-card{
+    min-height:auto !important;
+    padding:12px 14px !important;
+    border-radius:14px !important;
+}
+.module-page .stat-card small,
+.module-page .stat-card span{
+    font-size:10px !important;
+    font-weight:700 !important;
+}
+.module-page .stat-card strong{
+    font-size:18px !important;
+    line-height:1.15 !important;
+    font-weight:800 !important;
+}
+.module-page .stat-icon{
+    width:38px !important;
+    height:38px !important;
+    border-radius:12px !important;
+}
+.module-page .stat-icon svg{width:19px !important;height:19px !important;}
+.module-page .form-label{
+    font-size:12px !important;
+    font-weight:700 !important;
+    margin-bottom:5px !important;
+}
+.module-page .form-control,
+.module-page .form-select,
+.module-page .input-group-text{
+    min-height:38px !important;
+    font-size:13px !important;
+    border-radius:10px !important;
+    padding:7px 10px !important;
+}
+.module-page textarea.form-control{min-height:72px !important;}
+.module-page .btn{
+    font-size:12px !important;
+    font-weight:700 !important;
+    line-height:1.2 !important;
+    padding:7px 12px !important;
+}
+.module-page .btn-sm{
+    font-size:11px !important;
+    padding:5px 9px !important;
+}
+.module-page .table-ui th,
+.module-page .table-ui td,
+.module-page .table th,
+.module-page .table td{
+    font-size:12px !important;
+    padding:9px 10px !important;
+}
+.module-page .table-ui th,
+.module-page .table th{
+    font-size:10.5px !important;
+    font-weight:750 !important;
+}
+.module-page .status-pill,
+.module-page .stock-pill,
+.module-page .filter-chip,
+.module-page .sidebar-filter-pill,
+.module-page .badge-soft,
+.module-page .sidebar-url-badge{
+    font-size:10px !important;
+    font-weight:700 !important;
+    padding:4px 8px !important;
+}
+.module-page .modal-title{font-size:16px !important;font-weight:800 !important;}
+.module-page .modal-header{padding:14px 16px !important;}
+.module-page .modal-body{padding:16px !important;}
+.module-page .modal-footer{padding:12px 16px !important;}
+.module-page .modal-content{border-radius:16px !important;}
+.module-page .toast-title{font-size:13px !important;font-weight:800 !important;}
+.module-page .toast-message{font-size:12px !important;font-weight:600 !important;}
+@media(max-width:767.98px){
+    .module-page .page-head{padding:14px !important;}
+    .module-page .page-head h1{font-size:21px !important;}
+    .module-page .module-card{padding:13px !important;}
+}
+
+.sidebar-control-page .sidebar-menu-icon{width:34px !important;height:34px !important;border-radius:10px !important;}
+.sidebar-control-page .sidebar-action-btn{width:30px !important;height:30px !important;padding:0 !important;}
+.sidebar-control-page .sidebar-mobile-card{padding:12px !important;border-radius:14px !important;}
+.sidebar-control-page .sidebar-table th,.sidebar-control-page .sidebar-table td{font-size:11.5px !important;padding:8px 9px !important;}
+</style><!-- compact-ui-overrides -->
 </head>
 
 <body

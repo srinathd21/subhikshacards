@@ -1,16 +1,4 @@
 <?php
-/**
- * dashboard.php
- * Subhiksha Cards ERP - Role Based Live Dashboard
- *
- * Flow used:
- * Enquiry -> Quotation -> Proforma Bill -> Payment -> Job Card -> Tracking -> Dispatch
- *
- * Notes:
- * - Recent Activity section removed as requested.
- * - Sales team handles dispatch work in this setup.
- * - Counts are taken from actual ERP tables with safe fallbacks.
- */
 
 require_once __DIR__ . '/includes/auth.php';
 require_permission($conn, 'can_view', 'dashboard.php');
@@ -380,6 +368,7 @@ $delayedJobs = 0;
 $readyDispatch = 0;
 $dispatchedToday = 0;
 $completedJobs = 0;
+$dueTodayJobs = 0;
 
 if (dash_table_exists($conn, 'job_cards')) {
     $activeJobs = (int)dash_scalar($conn, "
@@ -387,6 +376,15 @@ if (dash_table_exists($conn, 'job_cards')) {
         FROM job_cards jc
         " . dash_join_status_filter() . "
         WHERE " . dash_active_job_where() . "
+    ", 0);
+
+    $dueTodayJobs = (int)dash_scalar($conn, "
+        SELECT COUNT(DISTINCT jc.id)
+        FROM job_cards jc
+        " . dash_join_status_filter() . "
+        WHERE " . dash_active_job_where() . "
+          AND jc.delivery_date IS NOT NULL
+          AND DATE(jc.delivery_date) = '{$today}'
     ", 0);
 
     $delayedJobs = (int)dash_scalar($conn, "
@@ -444,29 +442,6 @@ if (dash_table_exists($conn, 'job_tracking_photo_approvals')) {
 
 $whatsappFailed = dash_count($conn, 'whatsapp_logs', "status = 'failed'");
 $whatsappSentToday = dash_count($conn, 'whatsapp_logs', "DATE(COALESCE(sent_at, created_at)) = '{$today}' AND status IN ('sent','delivered','read')");
-
-$googleReviewLink = '';
-if (dash_table_exists($conn, 'system_settings')) {
-    $googleReviewLink = (string)dash_scalar($conn, "
-        SELECT COALESCE(setting_value, '')
-        FROM system_settings
-        WHERE setting_key IN ('google_review_link','google_review_url')
-        ORDER BY FIELD(setting_key, 'google_review_link', 'google_review_url')
-        LIMIT 1
-    ", '');
-}
-$reviewLinkReady = trim($googleReviewLink) !== '';
-$reviewPendingJobs = 0;
-if (dash_table_exists($conn, 'job_cards')) {
-    $reviewPendingJobs = (int)dash_scalar($conn, "
-        SELECT COUNT(DISTINCT jc.id)
-        FROM job_cards jc
-        " . dash_join_status_filter() . "
-        LEFT JOIN review_link_logs rll ON rll.job_card_id = jc.id AND rll.sent_status = 'sent'
-        WHERE " . dash_completed_job_where() . "
-          AND rll.id IS NULL
-    ", 0);
-}
 
 // -----------------------------------------------------------------------------
 // Role based KPI cards
@@ -695,13 +670,13 @@ $attentionCards = [
         'groups' => ['admin','sales'],
     ],
     [
-        'label' => 'Google Review Link',
-        'value' => $reviewLinkReady ? 'Ready' : 'Pending',
-        'sub' => $reviewLinkReady ? number_format($reviewPendingJobs) . ' jobs need review message' : 'Waiting for customer link',
-        'url' => 'google-review-settings.php',
-        'icon' => 'star',
-        'class' => $reviewLinkReady ? 'success' : 'warning',
-        'groups' => ['admin','sales'],
+        'label' => 'Due Today Jobs',
+        'value' => number_format($dueTodayJobs),
+        'sub' => 'Delivery scheduled today',
+        'url' => 'job_cards.php',
+        'icon' => 'calendar-clock',
+        'class' => $dueTodayJobs > 0 ? 'warning' : 'success',
+        'groups' => ['admin','sales','design','printing','general'],
     ],
     [
         'label' => 'WhatsApp Failed',
@@ -1480,6 +1455,286 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
             font-size: 16px
         }
     }
+
+
+    /* Dashboard compact sizing for comfortable 100% browser zoom */
+    .dashboard-page .dashboard-hero {
+        padding: 20px 22px;
+        margin-bottom: 14px;
+    }
+
+    .dashboard-page .dashboard-hero:after {
+        width: 220px;
+        height: 220px;
+        right: -72px;
+        top: -78px;
+    }
+
+    .dashboard-page .dashboard-hero h1 {
+        font-size: 26px;
+        font-weight: 800;
+        margin-bottom: 4px;
+        letter-spacing: -.2px;
+    }
+
+    .dashboard-page .dashboard-hero p {
+        font-size: 13px;
+        font-weight: 600;
+    }
+
+    .dashboard-page .dashboard-date-chip,
+    .dashboard-page .dashboard-role-chip {
+        gap: 7px;
+        padding: 8px 11px;
+        font-size: 11.5px;
+        font-weight: 700;
+    }
+
+    .dashboard-page .dash-kpi-card {
+        min-height: 102px;
+        padding: 14px 15px;
+        gap: 11px;
+    }
+
+    .dashboard-page .dash-kpi-card:after {
+        width: 88px;
+        height: 88px;
+        right: -30px;
+        bottom: -34px;
+    }
+
+    .dashboard-page .dash-kpi-icon {
+        width: 44px;
+        height: 44px;
+        border-radius: 14px;
+        box-shadow: 0 8px 18px rgba(15, 23, 42, .10);
+    }
+
+    .dashboard-page .dash-kpi-icon svg {
+        width: 20px;
+        height: 20px;
+    }
+
+    .dashboard-page .dash-kpi-label {
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: .25px;
+    }
+
+    .dashboard-page .dash-kpi-value {
+        font-size: 20px;
+        font-weight: 800;
+        margin-top: 2px;
+    }
+
+    .dashboard-page .dash-kpi-sub {
+        margin-top: 3px;
+        font-size: 10.5px;
+        font-weight: 600;
+        line-height: 1.3;
+    }
+
+    .dashboard-page .dashboard-card {
+        padding: 17px 18px;
+    }
+
+    .dashboard-page .dashboard-card-title {
+        font-size: 15.5px;
+        font-weight: 800;
+    }
+
+    .dashboard-page .dashboard-card .text-muted-custom {
+        font-size: 11.5px;
+        font-weight: 500;
+    }
+
+    .dashboard-page .quick-action-grid {
+        grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+        gap: 10px;
+    }
+
+    .dashboard-page .quick-action-btn {
+        border-radius: 15px;
+        padding: 11px 12px;
+        min-height: 86px;
+        gap: 9px;
+    }
+
+    .dashboard-page .quick-action-row .quick-action-icon,
+    .dashboard-page .quick-action-icon {
+        width: 38px;
+        height: 38px;
+        border-radius: 12px;
+    }
+
+    .dashboard-page .quick-action-icon svg {
+        width: 18px;
+        height: 18px;
+    }
+
+    .dashboard-page .quick-action-title {
+        font-size: 12.5px;
+        font-weight: 700;
+    }
+
+    .dashboard-page .quick-action-subtitle {
+        font-size: 10.5px;
+        font-weight: 500;
+        margin-top: 2px;
+        line-height: 1.3;
+    }
+
+    .dashboard-page .attention-grid {
+        gap: 10px;
+    }
+
+    .dashboard-page .attention-card {
+        border-radius: 14px;
+        padding: 11px 12px;
+        gap: 9px;
+    }
+
+    .dashboard-page .attention-icon {
+        width: 36px;
+        height: 36px;
+        border-radius: 12px;
+    }
+
+    .dashboard-page .attention-icon svg {
+        width: 18px;
+        height: 18px;
+    }
+
+    .dashboard-page .attention-card strong {
+        font-size: 18px;
+        font-weight: 800;
+    }
+
+    .dashboard-page .attention-card span {
+        font-size: 10px;
+        font-weight: 700;
+    }
+
+    .dashboard-page .attention-card small {
+        margin-top: 2px;
+        font-size: 10.5px;
+        font-weight: 500;
+        line-height: 1.25;
+    }
+
+    .dashboard-page .stage-grid {
+        gap: 10px;
+    }
+
+    .dashboard-page .stage-card {
+        border-radius: 14px;
+        padding: 11px 12px;
+    }
+
+    .dashboard-page .stage-card h6 {
+        font-size: 11.5px;
+        font-weight: 700;
+        margin-bottom: 3px;
+    }
+
+    .dashboard-page .stage-card strong {
+        font-size: 18px;
+        font-weight: 800;
+    }
+
+    .dashboard-page .stage-card p {
+        margin-top: 2px;
+        font-size: 10.5px;
+        font-weight: 500;
+    }
+
+    .dashboard-page .queue-table {
+        border-spacing: 0 7px;
+    }
+
+    .dashboard-page .queue-table td {
+        padding: 9px 10px;
+    }
+
+    .dashboard-page .queue-table td:first-child {
+        border-radius: 12px 0 0 12px;
+    }
+
+    .dashboard-page .queue-table td:last-child {
+        border-radius: 0 12px 12px 0;
+    }
+
+    .dashboard-page .queue-ref {
+        font-size: 12.5px;
+        font-weight: 700;
+    }
+
+    .dashboard-page .queue-meta {
+        font-size: 10.5px;
+        font-weight: 500;
+    }
+
+    .dashboard-page .status-pill {
+        font-size: 9.5px;
+        font-weight: 700;
+        padding: 4px 8px;
+    }
+
+    .dashboard-page .empty-box {
+        border-radius: 14px;
+        padding: 18px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+
+    .dashboard-page .btn {
+        font-size: 11.5px;
+        font-weight: 700 !important;
+    }
+
+    .dashboard-page .btn.rounded-pill {
+        padding-top: 6px;
+        padding-bottom: 6px;
+    }
+
+    .dashboard-page>.row.g-3 {
+        --bs-gutter-x: .8rem;
+        --bs-gutter-y: .8rem;
+    }
+
+    @media(max-width:767.98px) {
+        .dashboard-page .dashboard-hero {
+            padding: 16px;
+            margin-bottom: 12px;
+        }
+
+        .dashboard-page .dashboard-hero h1 {
+            font-size: 22px;
+        }
+
+        .dashboard-page .dash-kpi-card {
+            min-height: 92px;
+            padding: 12px;
+        }
+
+        .dashboard-page .dash-kpi-icon {
+            width: 40px;
+            height: 40px;
+        }
+
+        .dashboard-page .dash-kpi-value {
+            font-size: 18px;
+        }
+
+        .dashboard-page .dashboard-card {
+            padding: 14px;
+        }
+
+        .dashboard-page .quick-action-btn {
+            padding: 10px 11px;
+            border-radius: 14px;
+        }
+    }
     </style>
 </head>
 
@@ -1525,7 +1780,8 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                 <div class="row g-3 mb-3">
                     <div class="col-12">
                         <div class="card-ui dashboard-card">
-                            <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
+                            <div
+                                class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
                                 <div>
                                     <h2 class="dashboard-card-title">Follow-up Notifications</h2>
                                     <p class="text-muted-custom mb-0">
@@ -1538,7 +1794,8 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                         data-bs-toggle="modal" data-bs-target="#todayFollowupReminderModal">
                                         <i data-lucide="bell-ring" style="width:16px;height:16px"></i>
                                         Open Reminder
-                                        <span class="badge text-bg-danger ms-1"><?= number_format($dueFollowupNotificationCount) ?></span>
+                                        <span
+                                            class="badge text-bg-danger ms-1"><?= number_format($dueFollowupNotificationCount) ?></span>
                                     </button>
                                     <?php endif; ?>
                                     <a href="followups.php" class="btn btn-primary rounded-pill fw-bold px-4">
@@ -1558,7 +1815,8 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                             </div>
                                             <div>
                                                 <span class="dash-kpi-label">Today Follow-ups</span>
-                                                <span class="dash-kpi-value"><?= number_format($todayFollowupCount) ?></span>
+                                                <span
+                                                    class="dash-kpi-value"><?= number_format($todayFollowupCount) ?></span>
                                                 <span class="dash-kpi-sub">Calls / callbacks due today</span>
                                             </div>
                                         </div>
@@ -1575,7 +1833,8 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                             </div>
                                             <div>
                                                 <span class="dash-kpi-label">Overdue Follow-ups</span>
-                                                <span class="dash-kpi-value"><?= number_format($overdueFollowupCount) ?></span>
+                                                <span
+                                                    class="dash-kpi-value"><?= number_format($overdueFollowupCount) ?></span>
                                                 <span class="dash-kpi-sub">Pending follow-ups from earlier dates</span>
                                             </div>
                                         </div>
@@ -1592,7 +1851,8 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                             </div>
                                             <div>
                                                 <span class="dash-kpi-label">Upcoming Callbacks</span>
-                                                <span class="dash-kpi-value"><?= number_format($upcomingFollowupCount) ?></span>
+                                                <span
+                                                    class="dash-kpi-value"><?= number_format($upcomingFollowupCount) ?></span>
                                                 <span class="dash-kpi-sub">Scheduled after today</span>
                                             </div>
                                         </div>

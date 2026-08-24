@@ -1,1118 +1,576 @@
 <?php
 /**
- * website-colors.php
- * Subhiksha Cards ERP - Fixed aligned Website Colors page with working live preview/save/reset.
+ * reports.php
+ * Subhiksha Cards ERP - Reports Dashboard
  */
-
 require_once __DIR__ . '/includes/auth.php';
-require_permission($conn, 'can_view', 'website-colors.php');
+require_permission($conn, 'can_view', 'reports.php');
 
-$groups = [
-    'layout'  => 'Layout Colors',
-    'sidebar' => 'Sidebar Colors',
-    'brand'   => 'Brand Colors',
-    'tables'  => 'Table Colors',
-    'forms'   => 'Form Colors',
-    'status'  => 'Status Colors',
-];
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
-$controls = [
-    'layout' => [
-        ['body_bg', 'Body Background', '--body-bg'],
-        ['topbar_bg', 'Topbar Background', '--topbar-bg'],
-        ['topbar_text', 'Topbar Text', '--topbar-text'],
-        ['card_bg', 'Card Background', '--card-bg'],
-        ['card_header_bg', 'Card Header Background', '--card-header-bg'],
-        ['border_soft', 'Border Color', '--border-soft'],
-        ['text_main', 'Main Text Color', '--text-main'],
-        ['text_muted', 'Muted Text Color', '--text-muted'],
-    ],
-    'sidebar' => [
-        ['sidebar_bg_1', 'Sidebar Gradient Start', '--sidebar-bg-1'],
-        ['sidebar_bg_2', 'Sidebar Gradient Middle', '--sidebar-bg-2'],
-        ['sidebar_bg_3', 'Sidebar Gradient End', '--sidebar-bg-3'],
-        ['sidebar_text', 'Sidebar Text', '--sidebar-text'],
-        ['sidebar_active_bg_1', 'Active Background Start', '--sidebar-active-bg-1'],
-        ['sidebar_active_bg_2', 'Active Background End', '--sidebar-active-bg-2'],
-        ['sidebar_active_text', 'Active Text', '--sidebar-active-text'],
-        ['sidebar_hover_bg', 'Hover Background', '--sidebar-hover-bg'],
-        ['sidebar_hover_text', 'Hover Text', '--sidebar-hover-text'],
-        ['sidebar_submenu_bg', 'Submenu Background', '--sidebar-submenu-bg'],
-    ],
-    'brand' => [
-        ['brand_1', 'Brand Primary', '--brand-1'],
-        ['brand_2', 'Brand Secondary', '--brand-2'],
-        ['brand_text', 'Brand Button Text', '--brand-text'],
-    ],
-    'tables' => [
-        ['table_header_bg', 'Table Header Background', '--table-header-bg'],
-        ['table_header_text', 'Table Header Text', '--table-header-text'],
-        ['table_row_hover', 'Table Row Hover', '--table-row-hover'],
-    ],
-    'forms' => [
-        ['input_bg', 'Input Background', '--input-bg'],
-        ['input_border', 'Input Border', '--input-border'],
-        ['input_text', 'Input Text', '--input-text'],
-    ],
-    'status' => [
-        ['success_color', 'Success Color', '--success-color'],
-        ['warning_color', 'Warning Color', '--warning-color'],
-        ['danger_color', 'Danger Color', '--danger-color'],
-        ['info_color', 'Information Color', '--info-color'],
-    ],
-];
+if (!function_exists('e')) {
+    function e($value): string
+    {
+        return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+    }
+}
 
-function wc_theme_value(array $theme, string $key): string
+function rpt_table_exists(mysqli $conn, string $table): bool
 {
-    $fallbacks = [
-        'sidebar_bg_1'          => '#10192E',
-        'sidebar_bg_2'          => '#1E3A5F',
-        'sidebar_bg_3'          => '#315C8A',
-        'sidebar_text'          => '#FFFFFF',
-        'sidebar_active_bg_1'   => '#F59E0B',
-        'sidebar_active_bg_2'   => '#FFB84D',
-        'sidebar_active_text'   => '#FFFFFF',
-        'sidebar_hover_bg'      => '#1E3A5F',
-        'sidebar_hover_text'    => '#FFFFFF',
-        'sidebar_submenu_bg'    => '#172554',
-        'body_bg'               => '#F7F9FC',
-        'topbar_bg'             => '#FFFFFF',
-        'topbar_text'           => '#0F172A',
-        'card_bg'               => '#FFFFFF',
-        'card_header_bg'        => '#FFFFFF',
-        'border_soft'           => '#E2E8F0',
-        'text_main'             => '#0F172A',
-        'text_muted'            => '#64748B',
-        'brand_1'               => '#0F766E',
-        'brand_2'               => '#0EA5E9',
-        'brand_text'            => '#FFFFFF',
-        'table_header_bg'       => '#F1F5F9',
-        'table_header_text'     => '#334155',
-        'table_row_hover'       => '#F8FAFC',
-        'input_bg'              => '#FFFFFF',
-        'input_border'          => '#CBD5E1',
-        'input_text'            => '#0F172A',
-        'success_color'         => '#16A34A',
-        'warning_color'         => '#F59E0B',
-        'danger_color'          => '#DC2626',
-        'info_color'            => '#2563EB',
-    ];
+    try {
+        $table = $conn->real_escape_string($table);
+        $res = $conn->query("SHOW TABLES LIKE '{$table}'");
+        $ok = $res && $res->num_rows > 0;
+        if ($res) $res->free();
+        return $ok;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
 
-    if ($key === 'sidebar_bg_1') {
-        $value = (string)($theme['sidebar_bg_1'] ?? $theme['sidebar_bg'] ?? $fallbacks[$key]);
+function rpt_col_exists(mysqli $conn, string $table, string $column): bool
+{
+    static $cache = [];
+    $key = $table . '.' . $column;
+    if (array_key_exists($key, $cache)) return $cache[$key];
+    try {
+        $table = $conn->real_escape_string($table);
+        $column = $conn->real_escape_string($column);
+        $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+        $ok = $res && $res->num_rows > 0;
+        if ($res) $res->free();
+        return $cache[$key] = $ok;
+    } catch (Throwable $e) {
+        return $cache[$key] = false;
+    }
+}
+
+function rpt_money($value): string
+{
+    return '₹' . number_format((float)$value, 2);
+}
+
+function rpt_date($value): string
+{
+    return !empty($value) ? date('d-m-Y', strtotime((string)$value)) : '-';
+}
+
+function rpt_datetime($value): string
+{
+    return !empty($value) ? date('d-m-Y h:i A', strtotime((string)$value)) : '-';
+}
+
+function rpt_query_scalar(mysqli $conn, string $sql, string $types = '', array $params = [], $default = 0)
+{
+    try {
+        if ($types !== '') {
+            $stmt = $conn->prepare($sql);
+            if (!$stmt) return $default;
+            $stmt->bind_param($types, ...$params);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+        } else {
+            $res = $conn->query($sql);
+            if (!$res) return $default;
+            $row = $res->fetch_assoc();
+            $res->free();
+        }
+        if (!$row) return $default;
+        $value = array_values($row)[0] ?? $default;
+        return $value === null ? $default : $value;
+    } catch (Throwable $e) {
+        return $default;
+    }
+}
+
+function rpt_fetch_all(mysqli $conn, string $sql, string $types = '', array $params = []): array
+{
+    $rows = [];
+    try {
+        if ($types !== '') {
+            $stmt = $conn->prepare($sql);
+            if (!$stmt) return [];
+            $stmt->bind_param($types, ...$params);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            while ($row = $res->fetch_assoc()) $rows[] = $row;
+            $stmt->close();
+        } else {
+            $res = $conn->query($sql);
+            if (!$res) return [];
+            while ($row = $res->fetch_assoc()) $rows[] = $row;
+            $res->free();
+        }
+    } catch (Throwable $e) {
+        return [];
+    }
+    return $rows;
+}
+
+function rpt_status_class(string $status): string
+{
+    $status = strtolower(trim($status));
+    if (in_array($status, ['paid', 'completed', 'approved', 'delivered'], true)) return 'success';
+    if (in_array($status, ['delayed', 'rejected', 'cancelled'], true)) return 'danger';
+    if (in_array($status, ['in_progress', 'progress'], true)) return 'primary';
+    return 'warning';
+}
+
+$today = date('Y-m-d');
+$monthStart = date('Y-m-01');
+$monthEnd = date('Y-m-t');
+
+$dateFrom = trim((string)($_GET['date_from'] ?? $monthStart));
+$dateTo = trim((string)($_GET['date_to'] ?? $today));
+$reportType = trim((string)($_GET['report'] ?? 'overview'));
+$export = trim((string)($_GET['export'] ?? ''));
+
+if ($dateFrom === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateFrom)) $dateFrom = $monthStart;
+if ($dateTo === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateTo)) $dateTo = $today;
+if (strtotime($dateFrom) > strtotime($dateTo)) {
+    $tmp = $dateFrom;
+    $dateFrom = $dateTo;
+    $dateTo = $tmp;
+}
+
+$allowedReports = ['overview', 'sales', 'payments', 'job_cards', 'pending', 'delays', 'delivery'];
+if (!in_array($reportType, $allowedReports, true)) $reportType = 'overview';
+
+$whereDatePb = "DATE(pb.created_at) BETWEEN ? AND ?";
+$whereDatePay = "DATE(p.payment_date) BETWEEN ? AND ?";
+$whereDateJc = "DATE(jc.created_at) BETWEEN ? AND ?";
+
+$stats = [
+    'total_sales' => 0,
+    'total_advance' => 0,
+    'total_balance' => 0,
+    'proforma_count' => 0,
+    'payment_collected' => 0,
+    'payment_count' => 0,
+    'job_count' => 0,
+    'completed_jobs' => 0,
+    'pending_jobs' => 0,
+    'delayed_jobs' => 0,
+];
+
+if (rpt_table_exists($conn, 'proforma_bills')) {
+    $stats['total_sales'] = (float)rpt_query_scalar($conn, "SELECT COALESCE(SUM(pb.final_amount),0) FROM proforma_bills pb WHERE {$whereDatePb}", 'ss', [$dateFrom, $dateTo]);
+    $stats['total_advance'] = (float)rpt_query_scalar($conn, "SELECT COALESCE(SUM(pb.advance_amount),0) FROM proforma_bills pb WHERE {$whereDatePb}", 'ss', [$dateFrom, $dateTo]);
+    $stats['total_balance'] = (float)rpt_query_scalar($conn, "SELECT COALESCE(SUM(pb.balance_amount),0) FROM proforma_bills pb WHERE {$whereDatePb}", 'ss', [$dateFrom, $dateTo]);
+    $stats['proforma_count'] = (int)rpt_query_scalar($conn, "SELECT COUNT(*) FROM proforma_bills pb WHERE {$whereDatePb}", 'ss', [$dateFrom, $dateTo]);
+}
+
+if (rpt_table_exists($conn, 'payments')) {
+    $cancelCond = rpt_col_exists($conn, 'payments', 'status') ? " AND LOWER(COALESCE(p.status,'')) NOT IN ('cancelled','canceled')" : '';
+    $stats['payment_collected'] = (float)rpt_query_scalar($conn, "SELECT COALESCE(SUM(p.amount),0) FROM payments p WHERE {$whereDatePay}{$cancelCond}", 'ss', [$dateFrom, $dateTo]);
+    $stats['payment_count'] = (int)rpt_query_scalar($conn, "SELECT COUNT(*) FROM payments p WHERE {$whereDatePay}{$cancelCond}", 'ss', [$dateFrom, $dateTo]);
+}
+
+if (rpt_table_exists($conn, 'job_cards')) {
+    $stats['job_count'] = (int)rpt_query_scalar($conn, "SELECT COUNT(*) FROM job_cards jc WHERE {$whereDateJc}", 'ss', [$dateFrom, $dateTo]);
+    $stats['completed_jobs'] = (int)rpt_query_scalar($conn, "SELECT COUNT(*) FROM job_cards jc LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id WHERE {$whereDateJc} AND (LOWER(COALESCE(jcs.status_key,'')) = 'completed' OR LOWER(COALESCE(jcs.status_name,'')) = 'completed' OR jc.completed_at IS NOT NULL)", 'ss', [$dateFrom, $dateTo]);
+    $stats['delayed_jobs'] = (int)rpt_query_scalar($conn, "SELECT COUNT(*) FROM job_cards jc LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id WHERE {$whereDateJc} AND (jc.is_delayed = 1 OR LOWER(COALESCE(jcs.status_key,'')) = 'delayed' OR LOWER(COALESCE(jcs.status_name,'')) = 'delayed')", 'ss', [$dateFrom, $dateTo]);
+    $stats['pending_jobs'] = max(0, $stats['job_count'] - $stats['completed_jobs']);
+}
+
+$salesRows = [];
+$paymentRows = [];
+$jobRows = [];
+$pendingRows = [];
+$delayRows = [];
+$deliveryRows = [];
+$dailySalesRows = [];
+$functionRows = [];
+
+if (rpt_table_exists($conn, 'proforma_bills')) {
+    $dailySalesRows = rpt_fetch_all($conn, "
+        SELECT DATE(pb.created_at) AS report_date, COUNT(*) AS total_orders, COALESCE(SUM(pb.final_amount),0) AS total_amount
+        FROM proforma_bills pb
+        WHERE {$whereDatePb}
+        GROUP BY DATE(pb.created_at)
+        ORDER BY report_date ASC
+    ", 'ss', [$dateFrom, $dateTo]);
+
+    $functionRows = rpt_fetch_all($conn, "
+        SELECT COALESCE(ft.function_name, 'Not Set') AS function_name, COUNT(*) AS total_orders, COALESCE(SUM(pb.final_amount),0) AS total_amount
+        FROM proforma_bills pb
+        LEFT JOIN function_types ft ON ft.id = pb.function_type_id
+        WHERE {$whereDatePb}
+        GROUP BY COALESCE(ft.function_name, 'Not Set')
+        ORDER BY total_amount DESC
+        LIMIT 10
+    ", 'ss', [$dateFrom, $dateTo]);
+
+    $salesRows = rpt_fetch_all($conn, "
+        SELECT pb.id, pb.proforma_no, pb.customer_name, pb.mobile, pb.order_type, pb.total_qty, pb.final_amount, pb.advance_amount, pb.balance_amount, pb.delivery_date, pb.created_at, COALESCE(ft.function_name,'-') AS function_name, COALESCE(ps.status_name,'-') AS status_name
+        FROM proforma_bills pb
+        LEFT JOIN function_types ft ON ft.id = pb.function_type_id
+        LEFT JOIN proforma_statuses ps ON ps.id = pb.proforma_status_id
+        WHERE {$whereDatePb}
+        ORDER BY pb.id DESC
+        LIMIT 300
+    ", 'ss', [$dateFrom, $dateTo]);
+}
+
+if (rpt_table_exists($conn, 'payments')) {
+    $cancelSelect = rpt_col_exists($conn, 'payments', 'status') ? "COALESCE(p.status,'paid')" : "'paid'";
+    $paymentRows = rpt_fetch_all($conn, "
+        SELECT p.id, p.payment_no, p.payment_type, p.payment_mode, p.amount, p.payment_date, p.reference_no, p.remarks, {$cancelSelect} AS payment_status, pb.proforma_no, COALESCE(pb.customer_name, c.customer_name, '-') AS customer_name, COALESCE(pb.mobile, c.mobile, '-') AS mobile, u.username AS received_by_name
+        FROM payments p
+        LEFT JOIN proforma_bills pb ON pb.id = p.proforma_bill_id
+        LEFT JOIN customers c ON c.id = p.customer_id
+        LEFT JOIN users u ON u.id = p.received_by
+        WHERE {$whereDatePay}
+        ORDER BY p.payment_date DESC, p.id DESC
+        LIMIT 300
+    ", 'ss', [$dateFrom, $dateTo]);
+}
+
+if (rpt_table_exists($conn, 'job_cards')) {
+    $jobRows = rpt_fetch_all($conn, "
+        SELECT jc.id, jc.job_card_no, jc.customer_name, jc.mobile, jc.order_type, jc.product_name, jc.final_amount, jc.advance_amount, jc.balance_amount, jc.delivery_date, jc.created_at, jc.completed_at, jc.is_delayed, COALESCE(jcs.status_name,'-') AS status_name, COALESCE(ws.step_name,'-') AS current_step_name, COALESCE(ft.function_name,'-') AS function_name
+        FROM job_cards jc
+        LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id
+        LEFT JOIN workflow_steps ws ON ws.id = jc.current_workflow_step_id
+        LEFT JOIN function_types ft ON ft.id = jc.function_type_id
+        WHERE {$whereDateJc}
+        ORDER BY jc.id DESC
+        LIMIT 300
+    ", 'ss', [$dateFrom, $dateTo]);
+
+    $pendingRows = rpt_fetch_all($conn, "
+        SELECT jc.id, jc.job_card_no, jc.customer_name, jc.mobile, jc.product_name, jc.delivery_date, jc.created_at, COALESCE(jcs.status_name,'Pending') AS status_name, COALESCE(ws.step_name,'-') AS current_step_name
+        FROM job_cards jc
+        LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id
+        LEFT JOIN workflow_steps ws ON ws.id = jc.current_workflow_step_id
+        WHERE DATE(jc.created_at) BETWEEN ? AND ?
+          AND (jc.completed_at IS NULL)
+        ORDER BY jc.delivery_date ASC, jc.id DESC
+        LIMIT 300
+    ", 'ss', [$dateFrom, $dateTo]);
+
+    $deliveryRows = rpt_fetch_all($conn, "
+        SELECT jc.id, jc.job_card_no, jc.customer_name, jc.mobile, jc.product_name, jc.delivery_date, jc.completed_at, jc.is_delayed, COALESCE(jcs.status_name,'-') AS status_name, COALESCE(ws.step_name,'-') AS current_step_name
+        FROM job_cards jc
+        LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id
+        LEFT JOIN workflow_steps ws ON ws.id = jc.current_workflow_step_id
+        WHERE jc.delivery_date BETWEEN ? AND ?
+        ORDER BY jc.delivery_date ASC, jc.id DESC
+        LIMIT 300
+    ", 'ss', [$dateFrom, $dateTo]);
+}
+
+if (rpt_table_exists($conn, 'job_tracking')) {
+    $delayRows = rpt_fetch_all($conn, "
+        SELECT jt.id, jt.job_card_id, jt.status, jt.planned_completion_date, jt.revised_completion_date, jt.actual_completed_at, jt.delay_days, jt.delay_remarks, jc.job_card_no, jc.customer_name, jc.mobile, jc.product_name, ws.step_name, dr.reason_name
+        FROM job_tracking jt
+        LEFT JOIN job_cards jc ON jc.id = jt.job_card_id
+        LEFT JOIN workflow_steps ws ON ws.id = jt.workflow_step_id
+        LEFT JOIN delay_reasons dr ON dr.id = jt.delay_reason_id
+        WHERE (jt.is_delayed = 1 OR jt.status = 'delayed')
+          AND DATE(COALESCE(jt.delay_started_at, jt.updated_at, jt.created_at)) BETWEEN ? AND ?
+        ORDER BY COALESCE(jt.delay_started_at, jt.updated_at, jt.created_at) DESC, jt.id DESC
+        LIMIT 300
+    ", 'ss', [$dateFrom, $dateTo]);
+}
+
+$currentRows = [];
+$exportTitle = 'Report';
+if ($reportType === 'sales') { $currentRows = $salesRows; $exportTitle = 'Sales Report'; }
+elseif ($reportType === 'payments') { $currentRows = $paymentRows; $exportTitle = 'Payment Report'; }
+elseif ($reportType === 'job_cards') { $currentRows = $jobRows; $exportTitle = 'Job Card Report'; }
+elseif ($reportType === 'pending') { $currentRows = $pendingRows; $exportTitle = 'Pending Jobs Report'; }
+elseif ($reportType === 'delays') { $currentRows = $delayRows; $exportTitle = 'Delay Report'; }
+elseif ($reportType === 'delivery') { $currentRows = $deliveryRows; $exportTitle = 'Delivery Report'; }
+
+if ($export === 'csv' && $reportType !== 'overview') {
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename=' . strtolower(str_replace(' ', '_', $exportTitle)) . '_' . date('Ymd_His') . '.csv');
+    $out = fopen('php://output', 'w');
+    if ($currentRows) {
+        fputcsv($out, array_keys($currentRows[0]));
+        foreach ($currentRows as $r) fputcsv($out, $r);
     } else {
-        $value = (string)($theme[$key] ?? $fallbacks[$key] ?? '#FFFFFF');
+        fputcsv($out, ['No records found']);
     }
-
-    $value = strtoupper(trim($value));
-    return preg_match('/^#[0-9A-F]{6}$/', $value) ? $value : ($fallbacks[$key] ?? '#FFFFFF');
+    fclose($out);
+    exit;
 }
 
-$flatControls = [];
-foreach ($controls as $items) {
-    foreach ($items as $item) {
-        $flatControls[] = $item;
-    }
-}
+$queryBase = http_build_query(['date_from' => $dateFrom, 'date_to' => $dateTo]);
+$printMode = $export === 'pdf';
 ?>
 <!doctype html>
 <html lang="en">
-
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Website Colors - Subhiksha Cards</title>
+    <title>Reports - Subhiksha Cards</title>
     <?php include __DIR__ . '/includes/links.php'; ?>
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
-
     <style>
-    .website-colors-page {
-        overflow-x: hidden;
-    }
-
-    .website-colors-head {
-        padding: 24px 28px;
-        margin-bottom: 18px;
-    }
-
-    .website-colors-head h1 {
-        font-size: 30px;
-        line-height: 1.2;
-        font-weight: 900;
-        color: var(--text-main);
-    }
-
-    .website-colors-head p {
-        font-size: 15px;
-        max-width: 780px;
-    }
-
-    .website-color-summary {
-        margin-bottom: 18px;
-    }
-
-    .summary-theme-card {
-        min-height: 112px;
-        padding: 18px;
-        display: flex;
-        align-items: center;
-        gap: 14px;
-        overflow: hidden;
-    }
-
-    .summary-theme-icon {
-        width: 52px;
-        height: 52px;
-        border-radius: 16px;
-        display: grid;
-        place-items: center;
-        color: #fff;
-        flex: 0 0 auto;
-    }
-
-    .summary-theme-icon svg {
-        width: 24px;
-        height: 24px;
-    }
-
-    .summary-theme-card span,
-    .summary-theme-card small {
-        display: block;
-        color: var(--text-muted);
-        font-weight: 800;
-        font-size: 12px;
-    }
-
-    .summary-theme-card strong {
-        display: block;
-        color: var(--text-main);
-        font-size: 18px;
-        line-height: 1.25;
-        font-weight: 900;
-        margin: 2px 0;
-        word-break: break-word;
-    }
-
-    .website-color-layout {
-        align-items: flex-start;
-    }
-
-    .website-color-main-card,
-    .website-preview-card {
-        padding: 26px 28px;
-    }
-
-    .website-color-group+.website-color-group {
-        margin-top: 34px;
-    }
-
-    .website-color-group h2 {
-        font-size: 20px;
-        font-weight: 900;
-        margin: 0 0 18px;
-        color: var(--text-main);
-    }
-
-    .website-color-field {
-        border: 1px solid var(--border-soft);
-        background: color-mix(in srgb, var(--card-bg) 92%, var(--body-bg));
-        border-radius: 18px;
-        padding: 16px;
-        height: 100%;
-    }
-
-    .website-color-field label {
-        display: block;
-        color: var(--text-main);
-        font-size: 13px;
-        font-weight: 900;
-        margin-bottom: 12px;
-        line-height: 1.3;
-    }
-
-    .website-color-input-wrap {
-        display: grid;
-        grid-template-columns: 58px minmax(0, 1fr);
-        gap: 12px;
-        align-items: center;
-    }
-
-    .website-color-input-wrap input[type="color"] {
-        width: 58px;
-        height: 48px;
-        border: 1px solid var(--input-border);
-        border-radius: 14px;
-        background: var(--input-bg);
-        padding: 4px;
-        cursor: pointer;
-    }
-
-    .website-color-input-wrap .form-control {
-        height: 48px;
-        border-radius: 14px;
-        font-weight: 800;
-        text-transform: uppercase;
-        background: var(--input-bg);
-        border-color: var(--input-border);
-        color: var(--input-text);
-    }
-
-    .website-color-input-wrap .form-control.is-invalid {
-        border-color: var(--danger-color);
-    }
-
-    .website-sidebar-gradient-note {
-        margin: 0 0 18px;
-        padding: 13px 15px;
-        border-radius: 15px;
-        background: linear-gradient(135deg, var(--sidebar-bg-1, #10192E), var(--sidebar-bg-2, #1E3A5F), var(--sidebar-bg-3, #315C8A));
-        color: var(--sidebar-text, #fff);
-        font-weight: 800;
-        font-size: 13px;
-    }
-
-    .website-preview-sticky {
-        position: sticky;
-        top: 92px;
-    }
-
-    .live-pill {
-        display: inline-flex;
-        align-items: center;
-        border-radius: 999px;
-        padding: 6px 12px;
-        background: color-mix(in srgb, var(--success-color) 16%, transparent);
-        color: var(--success-color);
-        font-size: 12px;
-        font-weight: 900;
-    }
-
-    .website-mini-browser {
-        border: 1px solid var(--border-soft);
-        background: var(--card-bg);
-        border-radius: 22px;
-        overflow: hidden;
-    }
-
-    .browser-dots {
-        height: 44px;
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        padding: 0 14px;
-        border-bottom: 1px solid var(--border-soft);
-        background: var(--card-header-bg);
-    }
-
-    .browser-dots span {
-        width: 10px;
-        height: 10px;
-        border-radius: 999px;
-        background: var(--text-muted);
-        opacity: .55;
-    }
-
-    .preview-layout {
-        display: grid;
-        grid-template-columns: 118px minmax(0, 1fr);
-        min-height: 360px;
-        background: var(--body-bg);
-    }
-
-    .preview-sidebar {
-        background: var(--sidebar-bg);
-        color: var(--sidebar-text);
-        padding: 14px 10px;
-    }
-
-    .preview-logo {
-        width: 34px;
-        height: 34px;
-        border-radius: 12px;
-        margin-bottom: 14px;
-        background: linear-gradient(135deg, var(--brand-1), var(--brand-2));
-    }
-
-    .preview-menu {
-        border-radius: 10px;
-        padding: 9px 10px;
-        font-size: 11px;
-        font-weight: 900;
-        color: var(--sidebar-text);
-        margin-bottom: 7px;
-    }
-
-    .preview-menu:hover {
-        background: var(--sidebar-hover-bg);
-        color: var(--sidebar-hover-text);
-    }
-
-    .preview-menu.active {
-        color: var(--sidebar-active-text);
-        background: linear-gradient(135deg, var(--sidebar-active-bg-1), var(--sidebar-active-bg-2));
-    }
-
-    .preview-content {
-        padding: 14px;
-        display: grid;
-        align-content: start;
-        gap: 12px;
-        background: var(--body-bg);
-    }
-
-    .preview-card {
-        background: var(--card-bg);
-        border: 1px solid var(--border-soft);
-        border-radius: 16px;
-        padding: 15px;
-        color: var(--text-main);
-    }
-
-    .preview-card h3 {
-        font-size: 17px;
-        margin: 0 0 7px;
-        font-weight: 900;
-        color: var(--text-main);
-    }
-
-    .preview-card p {
-        color: var(--text-muted);
-        font-size: 12px;
-        line-height: 1.5;
-        margin-bottom: 12px;
-    }
-
-    .preview-card button {
-        border: 0;
-        background: linear-gradient(135deg, var(--brand-1), var(--brand-2));
-        color: var(--brand-text);
-        border-radius: 12px;
-        padding: 8px 12px;
-        font-size: 12px;
-        font-weight: 900;
-    }
-
-    .preview-card input {
-        width: 100%;
-        border: 1px solid var(--input-border);
-        background: var(--input-bg);
-        color: var(--input-text);
-        border-radius: 12px;
-        padding: 9px 10px;
-        font-size: 12px;
-        font-weight: 800;
-    }
-
-    .preview-table-head {
-        margin-top: 10px;
-        background: var(--table-header-bg);
-        color: var(--table-header-text);
-        border-radius: 12px;
-        padding: 9px 10px;
-        font-size: 12px;
-        font-weight: 900;
-    }
-
-    .preview-statuses {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 7px;
-    }
-
-    .preview-statuses span {
-        border-radius: 999px;
-        padding: 6px 9px;
-        color: #fff;
-        font-size: 10px;
-        font-weight: 900;
-    }
-
-    .preview-statuses .success {
-        background: var(--success-color);
-    }
-
-    .preview-statuses .warning {
-        background: var(--warning-color);
-    }
-
-    .preview-statuses .danger {
-        background: var(--danger-color);
-    }
-
-    .preview-statuses .info {
-        background: var(--info-color);
-    }
-
-    .website-density-card {
-        max-width: 420px;
-    }
-
-    @media (max-width: 1199.98px) {
-        .website-preview-sticky {
-            position: static;
-        }
-
-        .website-color-main-card,
-        .website-preview-card {
-            padding: 20px;
-        }
-    }
-
-    @media (max-width: 575px) {
-        .website-colors-head {
-            padding: 18px;
-        }
-
-        .website-colors-head h1 {
-            font-size: 24px;
-        }
-
-        .website-color-main-card,
-        .website-preview-card {
-            padding: 16px;
-        }
-
-        .summary-theme-card {
-            min-height: auto;
-        }
-
-        .website-color-input-wrap {
-            grid-template-columns: 52px minmax(0, 1fr);
-        }
-
-        .website-color-input-wrap input[type="color"] {
-            width: 52px;
-        }
-
-        .preview-layout {
-            grid-template-columns: 96px minmax(0, 1fr);
-        }
-    }
-
-    /* =========================================================
-       TOAST MESSAGE FIX
-       Shows toast for Save, Reset, Success and Error messages.
-       ========================================================= */
-    .subhiksha-toast-wrap {
-        position: fixed;
-        top: 88px;
-        right: 22px;
-        z-index: 9999;
-        display: grid;
-        gap: 12px;
-        width: min(380px, calc(100vw - 28px));
-        pointer-events: none;
-    }
-
-    .subhiksha-toast {
-        pointer-events: auto;
-        display: flex;
-        align-items: flex-start;
-        gap: 12px;
-        padding: 14px 15px;
-        border-radius: 18px;
-        background: var(--card-bg, #fff);
-        color: var(--text-main, #0f172a);
-        border: 1px solid var(--border-soft, #e2e8f0);
-        box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
-        transform: translateX(110%);
-        opacity: 0;
-        transition: .25s ease;
-        overflow: hidden;
-        position: relative;
-    }
-
-    .subhiksha-toast.show {
-        transform: translateX(0);
-        opacity: 1;
-    }
-
-    .subhiksha-toast::before {
-        content: "";
-        position: absolute;
-        inset: 0 auto 0 0;
-        width: 5px;
-        background: var(--brand-1, #0f766e);
-    }
-
-    .subhiksha-toast.success::before {
-        background: var(--success-color, #16a34a);
-    }
-
-    .subhiksha-toast.error::before {
-        background: var(--danger-color, #dc2626);
-    }
-
-    .subhiksha-toast.warning::before {
-        background: var(--warning-color, #f59e0b);
-    }
-
-    .subhiksha-toast.info::before {
-        background: var(--info-color, #2563eb);
-    }
-
-    .subhiksha-toast-icon {
-        width: 36px;
-        height: 36px;
-        border-radius: 13px;
-        display: grid;
-        place-items: center;
-        flex: 0 0 auto;
-        color: #fff;
-        background: var(--brand-1, #0f766e);
-    }
-
-    .subhiksha-toast.success .subhiksha-toast-icon {
-        background: var(--success-color, #16a34a);
-    }
-
-    .subhiksha-toast.error .subhiksha-toast-icon {
-        background: var(--danger-color, #dc2626);
-    }
-
-    .subhiksha-toast.warning .subhiksha-toast-icon {
-        background: var(--warning-color, #f59e0b);
-    }
-
-    .subhiksha-toast.info .subhiksha-toast-icon {
-        background: var(--info-color, #2563eb);
-    }
-
-    .subhiksha-toast-title {
-        font-size: 14px;
-        font-weight: 900;
-        margin-bottom: 3px;
-        color: var(--text-main, #0f172a);
-    }
-
-    .subhiksha-toast-message {
-        font-size: 12px;
-        font-weight: 700;
-        color: var(--text-muted, #64748b);
-        line-height: 1.4;
-    }
-
-    .subhiksha-toast-close {
-        margin-left: auto;
-        border: 0;
-        background: transparent;
-        color: var(--text-muted, #64748b);
-        padding: 0;
-        line-height: 1;
-        font-weight: 900;
-        font-size: 20px;
-        cursor: pointer;
-    }
-
-    @media (max-width: 575px) {
-        .subhiksha-toast-wrap {
-            top: 76px;
-            right: 14px;
-            left: 14px;
-            width: auto;
-        }
-
-        .subhiksha-toast {
-            border-radius: 16px;
-        }
-    }
+        .reports-page .page-head{padding:24px 28px;margin-bottom:18px;background:linear-gradient(135deg,rgba(37,99,235,.10),rgba(34,197,94,.10)),var(--card-bg)}
+        .reports-page .page-head h1{font-size:30px;font-weight:900;color:var(--text-main)}
+        .module-card{padding:24px}.module-title{font-size:18px;font-weight:900;color:var(--text-main);margin:0}.report-tabs{display:flex;gap:8px;flex-wrap:wrap}.report-tab{border:1px solid var(--border-soft);background:var(--card-bg);color:var(--text-main);border-radius:999px;padding:9px 14px;font-size:13px;font-weight:900;text-decoration:none}.report-tab.active{background:#2563eb;color:#fff;border-color:#2563eb}.stat-card{border:1px solid var(--border-soft);border-radius:22px;padding:18px;background:var(--card-bg);height:100%;box-shadow:0 12px 30px rgba(15,23,42,.06)}.stat-card .icon{width:42px;height:42px;border-radius:16px;display:inline-flex;align-items:center;justify-content:center;background:#eff6ff;color:#2563eb;margin-bottom:12px}.stat-card strong{display:block;font-size:24px;font-weight:950;color:var(--text-main);line-height:1.1}.stat-card span{display:block;font-size:12px;color:var(--text-muted);font-weight:900;text-transform:uppercase;margin-top:5px}.stat-card.green .icon{background:#dcfce7;color:#166534}.stat-card.orange .icon{background:#ffedd5;color:#c2410c}.stat-card.red .icon{background:#fee2e2;color:#991b1b}.stat-card.purple .icon{background:#f3e8ff;color:#7e22ce}.table-ui th{font-size:11px;text-transform:uppercase;color:var(--text-muted);white-space:nowrap}.table-ui td{vertical-align:middle!important}.status-pill{font-size:11px;font-weight:900;border-radius:999px;padding:6px 10px;display:inline-flex;align-items:center}.status-pill.success{background:#dcfce7;color:#166534}.status-pill.primary{background:#dbeafe;color:#1d4ed8}.status-pill.warning{background:#fef3c7;color:#92400e}.status-pill.danger{background:#fee2e2;color:#991b1b}.amount{font-weight:950}.amount.green{color:#166534}.amount.red{color:#991b1b}.chart-list{display:grid;gap:10px}.chart-row{border:1px solid var(--border-soft);border-radius:16px;padding:12px;background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg))}.bar-bg{height:10px;border-radius:999px;background:color-mix(in srgb,var(--border-soft) 80%,transparent);overflow:hidden;margin-top:8px}.bar-fill{height:100%;border-radius:999px;background:linear-gradient(135deg,#2563eb,#22c55e)}.filter-card{padding:18px}.mobile-report-cards{display:none}.mobile-report-card{border:1px solid var(--border-soft);border-radius:18px;padding:15px;background:var(--card-bg);margin-bottom:12px}.report-print-title{display:none}
+        @media(max-width:767.98px){.reports-page .page-head{padding:18px;border-radius:18px}.reports-page .page-head h1{font-size:24px}.module-card{padding:16px;border-radius:18px}.desktop-report-table{display:none!important}.mobile-report-cards{display:block}.stat-card strong{font-size:21px}.report-tabs{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px}.report-tab{white-space:nowrap}}
+        @media print{#sidebar,#mobileOverlay,#settingsOverlay,nav,.no-print,.filter-card,.report-tabs,.mobile-report-cards,.btn{display:none!important}.app-shell{display:block!important}#main{margin:0!important;width:100%!important}.page-section{padding:0!important}.card-ui,.module-card,.page-head{box-shadow:none!important;border:0!important}.desktop-report-table{display:block!important}.report-print-title{display:block!important}.table-responsive{overflow:visible!important}.table-ui{font-size:11px}.reports-page .page-head{padding:0 0 12px!important;background:#fff!important}}
     </style>
+
+<style id="compact-ui-overrides">
+/* Compact 100% zoom UI override - visual sizing only */
+.reports-page .page-head{padding:16px 18px !important;margin-bottom:12px !important;border-radius:16px !important;}
+.reports-page .page-head h1{font-size:24px !important;font-weight:800 !important;}
+.reports-page .page-head p{font-size:12px !important;font-weight:500 !important;}
+.reports-page .filter-card{padding:13px !important;margin-bottom:12px !important;}
+.reports-page .module-card{padding:16px !important;border-radius:16px !important;}
+.reports-page .module-title{font-size:15px !important;font-weight:750 !important;}
+.reports-page .report-tabs{gap:6px !important;}
+.reports-page .report-tab{padding:6px 10px !important;font-size:11px !important;font-weight:700 !important;}
+.reports-page .stat-card{padding:13px !important;border-radius:15px !important;box-shadow:0 8px 20px rgba(15,23,42,.05) !important;}
+.reports-page .stat-card .icon{width:36px !important;height:36px !important;border-radius:12px !important;margin-bottom:8px !important;}
+.reports-page .stat-card .icon svg{width:18px !important;height:18px !important;}
+.reports-page .stat-card strong{font-size:19px !important;font-weight:800 !important;}
+.reports-page .stat-card span{font-size:10px !important;font-weight:700 !important;margin-top:4px !important;}
+.reports-page .form-label{font-size:11.5px !important;font-weight:700 !important;margin-bottom:5px !important;}
+.reports-page .form-control,.reports-page .form-select{min-height:38px !important;font-size:12.5px !important;border-radius:10px !important;padding:7px 10px !important;}
+.reports-page .btn{font-size:11.5px !important;font-weight:700 !important;padding:7px 11px !important;}
+.reports-page .table-ui th,.reports-page .table-ui td{font-size:11.5px !important;padding:8px 9px !important;}
+.reports-page .table-ui th{font-size:10px !important;font-weight:750 !important;}
+.reports-page .status-pill{font-size:10px !important;font-weight:700 !important;padding:4px 8px !important;}
+.reports-page .amount{font-weight:800 !important;}
+.reports-page .chart-row{padding:9px 10px !important;border-radius:12px !important;font-size:12px !important;}
+.reports-page .mobile-report-card{padding:12px !important;border-radius:14px !important;}
+@media(max-width:767.98px){.reports-page .page-head{padding:14px !important}.reports-page .page-head h1{font-size:21px !important}.reports-page .module-card{padding:13px !important;}}
+</style><!-- compact-ui-overrides -->
 </head>
-
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
-    <div id="subhikshaToastWrap" class="subhiksha-toast-wrap" aria-live="polite" aria-atomic="true"></div>
-    <div id="mobileOverlay"></div>
-
-    <div class="app-shell">
-        <?php include __DIR__ . '/includes/sidebar.php'; ?>
-
-        <main id="main">
-            <?php include __DIR__ . '/includes/nav.php'; ?>
-
-            <section class="page-section website-colors-page">
-                <div class="card-ui website-colors-head">
-                    <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
-                        <div>
-                            <h1 class="mb-1">Website Colors</h1>
-                            <p class="text-muted-custom mb-0">
-                                Update the Subhiksha Cards admin panel theme. Changes preview live before saving.
-                            </p>
-                        </div>
-
-                        <div class="d-flex gap-2 flex-wrap">
-                            <button type="button" id="resetWebsitePreview"
-                                class="btn btn-outline-secondary rounded-pill px-4 fw-bold">
-                                Reset Preview
-                            </button>
-
-                            <?php if (can_edit($conn, 'website-colors.php')): ?>
-                            <button type="button" id="saveWebsiteColors"
-                                class="btn btn-primary rounded-pill px-4 fw-bold">
-                                Save Colors
-                            </button>
-                            <?php endif; ?>
-                        </div>
+<div id="mobileOverlay"></div>
+<div class="app-shell">
+    <?php include __DIR__ . '/includes/sidebar.php'; ?>
+    <main id="main">
+        <?php include __DIR__ . '/includes/nav.php'; ?>
+        <section class="page-section reports-page">
+            <div class="card-ui page-head">
+                <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
+                    <div>
+                        <h1 class="mb-1">Reports</h1>
+                        <p class="text-muted-custom mb-0">Sales, payment, job card, delivery and delay reports.</p>
+                    </div>
+                    <div class="d-flex gap-2 no-print">
+                        <?php if ($reportType !== 'overview'): ?>
+                        <a href="reports.php?<?= e($queryBase . '&report=' . urlencode($reportType) . '&export=csv') ?>" class="btn btn-outline-success rounded-pill px-4 fw-bold"><i data-lucide="file-spreadsheet" class="me-1"></i> Excel/CSV</a>
+                        <a href="reports.php?<?= e($queryBase . '&report=' . urlencode($reportType) . '&export=pdf') ?>" class="btn btn-outline-danger rounded-pill px-4 fw-bold"><i data-lucide="file-text" class="me-1"></i> PDF</a>
+                        <?php endif; ?>
                     </div>
                 </div>
+            </div>
 
-                <div class="row g-3 website-color-summary">
-                    <div class="col-12 col-md-6 col-xxl-3">
-                        <div class="card-ui summary-theme-card h-100">
-                            <div class="summary-theme-icon js-sidebar-summary-gradient">
-                                <i data-lucide="panel-left"></i>
-                            </div>
-                            <div>
-                                <span>Sidebar Gradient</span>
-                                <strong
-                                    data-summary-key="sidebar_bg_1"><?= e(wc_theme_value($theme, 'sidebar_bg_1')) ?></strong>
-                                <small data-summary-extra="sidebar_gradient">
-                                    Middle: <?= e(wc_theme_value($theme, 'sidebar_bg_2')) ?> → End:
-                                    <?= e(wc_theme_value($theme, 'sidebar_bg_3')) ?>
-                                </small>
-                            </div>
-                        </div>
+            <div class="card-ui filter-card mb-3 no-print">
+                <form method="get" class="row g-2 align-items-end">
+                    <div class="col-md-3">
+                        <label class="form-label fw-bold">From Date</label>
+                        <input type="date" name="date_from" class="form-control" value="<?= e($dateFrom) ?>">
                     </div>
-
-                    <div class="col-12 col-md-6 col-xxl-3">
-                        <div class="card-ui summary-theme-card h-100">
-                            <div class="summary-theme-icon" style="background:var(--brand-1)">
-                                <i data-lucide="palette"></i>
-                            </div>
-                            <div>
-                                <span>Brand Primary</span>
-                                <strong data-summary-key="brand_1"><?= e(wc_theme_value($theme, 'brand_1')) ?></strong>
-                                <small>Live primary color</small>
-                            </div>
-                        </div>
+                    <div class="col-md-3">
+                        <label class="form-label fw-bold">To Date</label>
+                        <input type="date" name="date_to" class="form-control" value="<?= e($dateTo) ?>">
                     </div>
-
-                    <div class="col-12 col-md-6 col-xxl-3">
-                        <div class="card-ui summary-theme-card h-100">
-                            <div class="summary-theme-icon" style="background:linear-gradient(135deg,#8b5cf6,#5b4df5)">
-                                <i data-lucide="layout-dashboard"></i>
-                            </div>
-                            <div>
-                                <span>Body BG</span>
-                                <strong data-summary-key="body_bg"><?= e(wc_theme_value($theme, 'body_bg')) ?></strong>
-                                <small>Page background</small>
-                            </div>
-                        </div>
+                    <div class="col-md-3">
+                        <label class="form-label fw-bold">Report</label>
+                        <select name="report" class="form-select">
+                            <option value="overview" <?= $reportType==='overview'?'selected':'' ?>>Overview</option>
+                            <option value="sales" <?= $reportType==='sales'?'selected':'' ?>>Sales</option>
+                            <option value="payments" <?= $reportType==='payments'?'selected':'' ?>>Payments</option>
+                            <option value="job_cards" <?= $reportType==='job_cards'?'selected':'' ?>>Job Cards</option>
+                            <option value="pending" <?= $reportType==='pending'?'selected':'' ?>>Pending Jobs</option>
+                            <option value="delays" <?= $reportType==='delays'?'selected':'' ?>>Delay Report</option>
+                            <option value="delivery" <?= $reportType==='delivery'?'selected':'' ?>>Delivery Report</option>
+                        </select>
                     </div>
-
-                    <div class="col-12 col-md-6 col-xxl-3">
-                        <div class="card-ui summary-theme-card h-100">
-                            <div class="summary-theme-icon" style="background:var(--text-main)">
-                                <i data-lucide="type"></i>
-                            </div>
-                            <div>
-                                <span>Text Main</span>
-                                <strong
-                                    data-summary-key="text_main"><?= e(wc_theme_value($theme, 'text_main')) ?></strong>
-                                <small>UI main text</small>
-                            </div>
-                        </div>
+                    <div class="col-md-3 d-flex gap-2">
+                        <button type="submit" class="btn btn-primary rounded-pill px-4 fw-bold flex-fill">Apply</button>
+                        <a href="reports.php" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Reset</a>
                     </div>
-                </div>
+                </form>
+            </div>
 
-                <div class="row g-3 website-color-layout">
-                    <div class="col-12 col-xl-8">
-                        <div class="card-ui website-color-main-card">
-                            <?php foreach ($controls as $groupKey => $items): ?>
-                            <section class="website-color-group">
-                                <h2><?= e($groups[$groupKey] ?? ucwords($groupKey)) ?></h2>
+            <div class="report-tabs mb-3 no-print">
+                <?php foreach (['overview'=>'Overview','sales'=>'Sales','payments'=>'Payments','job_cards'=>'Job Cards','pending'=>'Pending','delays'=>'Delays','delivery'=>'Delivery'] as $key => $label): ?>
+                <a class="report-tab <?= $reportType===$key?'active':'' ?>" href="reports.php?<?= e($queryBase . '&report=' . $key) ?>"><?= e($label) ?></a>
+                <?php endforeach; ?>
+            </div>
 
-                                <?php if ($groupKey === 'sidebar'): ?>
-                                <div class="website-sidebar-gradient-note">
-                                    Sidebar background uses dynamic 3 color gradient: Start Color → Middle Color → End
-                                    Color.
-                                </div>
-                                <?php endif; ?>
+            <h2 class="report-print-title"><?= e($exportTitle) ?> (<?= e(rpt_date($dateFrom)) ?> to <?= e(rpt_date($dateTo)) ?>)</h2>
 
-                                <div class="row g-3">
-                                    <?php foreach ($items as [$key, $label, $variable]): ?>
-                                    <?php $value = wc_theme_value($theme, $key); ?>
-                                    <div class="col-12 col-md-6 col-xxl-4">
-                                        <div class="website-color-field">
-                                            <label for="color_<?= e($key) ?>"><?= e($label) ?></label>
+            <div class="row g-3 mb-3">
+                <div class="col-6 col-lg-3"><div class="stat-card"><div class="icon"><i data-lucide="receipt-indian-rupee"></i></div><strong><?= e(rpt_money($stats['total_sales'])) ?></strong><span>Total Sales</span></div></div>
+                <div class="col-6 col-lg-3"><div class="stat-card green"><div class="icon"><i data-lucide="wallet"></i></div><strong><?= e(rpt_money($stats['payment_collected'])) ?></strong><span>Payment Collected</span></div></div>
+                <div class="col-6 col-lg-3"><div class="stat-card red"><div class="icon"><i data-lucide="badge-alert"></i></div><strong><?= e(rpt_money($stats['total_balance'])) ?></strong><span>Balance Pending</span></div></div>
+                <div class="col-6 col-lg-3"><div class="stat-card purple"><div class="icon"><i data-lucide="briefcase-business"></i></div><strong><?= number_format($stats['job_count']) ?></strong><span>Job Cards</span></div></div>
+            </div>
 
-                                            <div class="website-color-input-wrap">
-                                                <input type="color" id="color_<?= e($key) ?>" value="<?= e($value) ?>"
-                                                    class="js-website-color-picker" data-theme-key="<?= e($key) ?>"
-                                                    data-css-variable="<?= e($variable) ?>"
-                                                    data-original-value="<?= e($value) ?>">
-
-                                                <input type="text" value="<?= e($value) ?>"
-                                                    class="form-control js-website-color-text"
-                                                    data-theme-key="<?= e($key) ?>"
-                                                    data-css-variable="<?= e($variable) ?>"
-                                                    data-original-value="<?= e($value) ?>" maxlength="7"
-                                                    spellcheck="false">
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <?php endforeach; ?>
-                                </div>
-                            </section>
+            <?php if ($reportType === 'overview'): ?>
+            <div class="row g-3">
+                <div class="col-lg-6">
+                    <div class="card-ui module-card h-100">
+                        <h2 class="module-title mb-3">Daily Sales</h2>
+                        <?php if (!$dailySalesRows): ?>
+                        <div class="alert alert-warning rounded-4 fw-bold mb-0">No sales found.</div>
+                        <?php else: ?>
+                        <div class="chart-list">
+                            <?php $maxSales = max(1, ...array_map(function($r){ return (float)$r['total_amount']; }, $dailySalesRows)); ?>
+                            <?php foreach ($dailySalesRows as $row): $pct = min(100, round(((float)$row['total_amount'] / $maxSales) * 100)); ?>
+                            <div class="chart-row">
+                                <div class="d-flex justify-content-between gap-2"><strong><?= e(rpt_date($row['report_date'])) ?></strong><span class="amount green"><?= e(rpt_money($row['total_amount'])) ?></span></div>
+                                <small class="text-muted-custom fw-bold"><?= number_format((int)$row['total_orders']) ?> order(s)</small>
+                                <div class="bar-bg"><div class="bar-fill" style="width:<?= (int)$pct ?>%"></div></div>
+                            </div>
                             <?php endforeach; ?>
-
-                            <section class="website-color-group">
-                                <h2>Layout Density</h2>
-
-                                <div class="website-density-card">
-                                    <div class="website-color-field">
-                                        <label for="websiteDensitySelect">Density</label>
-                                        <select id="websiteDensitySelect" class="form-select"
-                                            data-original-value="<?= e($theme['layout_density'] ?? 'comfortable') ?>">
-                                            <option value="comfortable"
-                                                <?= ($theme['layout_density'] ?? 'comfortable') === 'comfortable' ? 'selected' : '' ?>>
-                                                Comfortable
-                                            </option>
-                                            <option value="compact"
-                                                <?= ($theme['layout_density'] ?? '') === 'compact' ? 'selected' : '' ?>>
-                                                Compact
-                                            </option>
-                                        </select>
-                                    </div>
-                                </div>
-                            </section>
-
-                            <div id="websiteColorMessage" class="mt-3 small fw-semibold" role="status"></div>
                         </div>
+                        <?php endif; ?>
                     </div>
-
-                    <div class="col-12 col-xl-4">
-                        <div class="card-ui website-preview-card website-preview-sticky">
-                            <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
-                                <div>
-                                    <h2 class="fs-5 fw-bold mb-1">Live Preview</h2>
-                                    <p class="text-muted-custom mb-0">This preview updates instantly.</p>
-                                </div>
-                                <span class="live-pill">Live</span>
+                </div>
+                <div class="col-lg-6">
+                    <div class="card-ui module-card h-100">
+                        <h2 class="module-title mb-3">Function-wise Sales</h2>
+                        <?php if (!$functionRows): ?>
+                        <div class="alert alert-warning rounded-4 fw-bold mb-0">No function-wise data found.</div>
+                        <?php else: ?>
+                        <div class="chart-list">
+                            <?php $maxFn = max(1, ...array_map(function($r){ return (float)$r['total_amount']; }, $functionRows)); ?>
+                            <?php foreach ($functionRows as $row): $pct = min(100, round(((float)$row['total_amount'] / $maxFn) * 100)); ?>
+                            <div class="chart-row">
+                                <div class="d-flex justify-content-between gap-2"><strong><?= e($row['function_name']) ?></strong><span class="amount green"><?= e(rpt_money($row['total_amount'])) ?></span></div>
+                                <small class="text-muted-custom fw-bold"><?= number_format((int)$row['total_orders']) ?> order(s)</small>
+                                <div class="bar-bg"><div class="bar-fill" style="width:<?= (int)$pct ?>%"></div></div>
                             </div>
-
-                            <div class="website-mini-browser">
-                                <div class="browser-dots"><span></span><span></span><span></span></div>
-
-                                <div class="preview-layout">
-                                    <aside class="preview-sidebar">
-                                        <div class="preview-logo"></div>
-                                        <div class="preview-menu active">Dashboard</div>
-                                        <div class="preview-menu">Orders</div>
-                                        <div class="preview-menu">Customers</div>
-                                        <div class="preview-menu">Reports</div>
-                                    </aside>
-
-                                    <div class="preview-content">
-                                        <div class="preview-card">
-                                            <h3>Dashboard Card</h3>
-                                            <p>Main text, muted text, card and border colors.</p>
-                                            <button type="button">Brand Button</button>
-                                        </div>
-
-                                        <div class="preview-card">
-                                            <h3>Form & Table</h3>
-                                            <input type="text" value="Input preview" readonly>
-                                            <div class="preview-table-head">Table Header</div>
-                                        </div>
-
-                                        <div class="preview-statuses">
-                                            <span class="success">Success</span>
-                                            <span class="warning">Warning</span>
-                                            <span class="danger">Danger</span>
-                                            <span class="info">Info</span>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <p class="small text-muted-custom mb-0 mt-3">
-                                Select any color on the left. The full page and this preview update immediately.
-                            </p>
+                            <?php endforeach; ?>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <div class="card-ui module-card">
+                        <h2 class="module-title mb-3">Job Status Summary</h2>
+                        <div class="row g-3">
+                            <div class="col-md-4"><div class="stat-card green"><div class="icon"><i data-lucide="check-circle-2"></i></div><strong><?= number_format($stats['completed_jobs']) ?></strong><span>Completed Jobs</span></div></div>
+                            <div class="col-md-4"><div class="stat-card orange"><div class="icon"><i data-lucide="loader"></i></div><strong><?= number_format($stats['pending_jobs']) ?></strong><span>Open / Pending Jobs</span></div></div>
+                            <div class="col-md-4"><div class="stat-card red"><div class="icon"><i data-lucide="clock-alert"></i></div><strong><?= number_format($stats['delayed_jobs']) ?></strong><span>Delayed Jobs</span></div></div>
                         </div>
                     </div>
                 </div>
-            </section>
-        </main>
+            </div>
+            <?php else: ?>
+            <div class="card-ui module-card">
+                <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3 no-print">
+                    <div>
+                        <h2 class="module-title"><?= e($exportTitle) ?></h2>
+                        <p class="text-muted-custom mb-0"><?= e(rpt_date($dateFrom)) ?> to <?= e(rpt_date($dateTo)) ?></p>
+                    </div>
+                    <input type="search" id="reportSearch" class="form-control" style="max-width:340px" placeholder="Search report...">
+                </div>
 
-        <div id="settingsOverlay"></div>
-        <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
-    </div>
+                <div class="table-responsive desktop-report-table">
+                    <table class="table-ui table" id="reportTable">
+                        <thead>
+                        <?php if ($reportType === 'sales'): ?>
+                        <tr><th>Proforma</th><th>Customer</th><th>Function</th><th>Order</th><th>Qty</th><th>Final</th><th>Advance</th><th>Balance</th><th>Delivery</th><th>Status</th></tr>
+                        <?php elseif ($reportType === 'payments'): ?>
+                        <tr><th>Payment No</th><th>Customer</th><th>Proforma</th><th>Type</th><th>Mode</th><th>Amount</th><th>Date</th><th>Reference</th><th>Status</th></tr>
+                        <?php elseif ($reportType === 'job_cards'): ?>
+                        <tr><th>Job Card</th><th>Customer</th><th>Product</th><th>Function</th><th>Order</th><th>Stage</th><th>Delivery</th><th>Amount</th><th>Status</th></tr>
+                        <?php elseif ($reportType === 'pending'): ?>
+                        <tr><th>Job Card</th><th>Customer</th><th>Product</th><th>Current Stage</th><th>Delivery</th><th>Created</th><th>Status</th></tr>
+                        <?php elseif ($reportType === 'delays'): ?>
+                        <tr><th>Job Card</th><th>Customer</th><th>Product</th><th>Stage</th><th>Planned</th><th>Delay Days</th><th>Reason</th><th>Remarks</th><th>Status</th></tr>
+                        <?php elseif ($reportType === 'delivery'): ?>
+                        <tr><th>Job Card</th><th>Customer</th><th>Product</th><th>Delivery Date</th><th>Current Stage</th><th>Completed At</th><th>Delay</th><th>Status</th></tr>
+                        <?php endif; ?>
+                        </thead>
+                        <tbody>
+                        <?php if (!$currentRows): ?>
+                        <tr><td colspan="10" class="text-center text-muted-custom py-4 fw-bold">No records found.</td></tr>
+                        <?php endif; ?>
 
-    <?php include __DIR__ . '/includes/script.php'; ?>
+                        <?php foreach ($currentRows as $row): ?>
+                            <?php if ($reportType === 'sales'): ?>
+                            <tr>
+                                <td><strong><?= e($row['proforma_no'] ?? '-') ?></strong><small class="d-block text-muted-custom"><?= e(rpt_datetime($row['created_at'] ?? null)) ?></small></td>
+                                <td><?= e($row['customer_name'] ?? '-') ?><small class="d-block text-muted-custom"><?= e($row['mobile'] ?? '-') ?></small></td>
+                                <td><?= e($row['function_name'] ?? '-') ?></td><td><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></td><td><?= number_format((float)($row['total_qty'] ?? 0), 0) ?></td>
+                                <td class="amount green"><?= e(rpt_money($row['final_amount'] ?? 0)) ?></td><td><?= e(rpt_money($row['advance_amount'] ?? 0)) ?></td><td class="amount red"><?= e(rpt_money($row['balance_amount'] ?? 0)) ?></td><td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td><td><span class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span></td>
+                            </tr>
+                            <?php elseif ($reportType === 'payments'): ?>
+                            <tr>
+                                <td><strong><?= e($row['payment_no'] ?? '-') ?></strong></td><td><?= e($row['customer_name'] ?? '-') ?><small class="d-block text-muted-custom"><?= e($row['mobile'] ?? '-') ?></small></td><td><?= e($row['proforma_no'] ?? '-') ?></td><td><?= e(ucfirst((string)($row['payment_type'] ?? '-'))) ?></td><td><?= e(ucfirst((string)($row['payment_mode'] ?? '-'))) ?></td><td class="amount green"><?= e(rpt_money($row['amount'] ?? 0)) ?></td><td><?= e(rpt_date($row['payment_date'] ?? null)) ?></td><td><?= e($row['reference_no'] ?? '-') ?></td><td><span class="status-pill <?= e(rpt_status_class((string)($row['payment_status'] ?? 'paid'))) ?>"><?= e(ucfirst((string)($row['payment_status'] ?? 'paid'))) ?></span></td>
+                            </tr>
+                            <?php elseif ($reportType === 'job_cards'): ?>
+                            <tr>
+                                <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong><small class="d-block text-muted-custom"><?= e(rpt_datetime($row['created_at'] ?? null)) ?></small></td><td><?= e($row['customer_name'] ?? '-') ?><small class="d-block text-muted-custom"><?= e($row['mobile'] ?? '-') ?></small></td><td><?= e($row['product_name'] ?? '-') ?></td><td><?= e($row['function_name'] ?? '-') ?></td><td><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></td><td><?= e($row['current_step_name'] ?? '-') ?></td><td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td><td class="amount green"><?= e(rpt_money($row['final_amount'] ?? 0)) ?></td><td><span class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span></td>
+                            </tr>
+                            <?php elseif ($reportType === 'pending'): ?>
+                            <tr>
+                                <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong></td><td><?= e($row['customer_name'] ?? '-') ?><small class="d-block text-muted-custom"><?= e($row['mobile'] ?? '-') ?></small></td><td><?= e($row['product_name'] ?? '-') ?></td><td><?= e($row['current_step_name'] ?? '-') ?></td><td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td><td><?= e(rpt_datetime($row['created_at'] ?? null)) ?></td><td><span class="status-pill warning"><?= e($row['status_name'] ?? 'Pending') ?></span></td>
+                            </tr>
+                            <?php elseif ($reportType === 'delays'): ?>
+                            <tr>
+                                <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong></td><td><?= e($row['customer_name'] ?? '-') ?><small class="d-block text-muted-custom"><?= e($row['mobile'] ?? '-') ?></small></td><td><?= e($row['product_name'] ?? '-') ?></td><td><?= e($row['step_name'] ?? '-') ?></td><td><?= e(rpt_date($row['planned_completion_date'] ?? null)) ?></td><td><span class="amount red"><?= number_format((int)($row['delay_days'] ?? 0)) ?></span></td><td><?= e($row['reason_name'] ?? '-') ?></td><td><?= e($row['delay_remarks'] ?? '-') ?></td><td><span class="status-pill danger"><?= e(ucfirst((string)($row['status'] ?? 'delayed'))) ?></span></td>
+                            </tr>
+                            <?php elseif ($reportType === 'delivery'): ?>
+                            <tr>
+                                <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong></td><td><?= e($row['customer_name'] ?? '-') ?><small class="d-block text-muted-custom"><?= e($row['mobile'] ?? '-') ?></small></td><td><?= e($row['product_name'] ?? '-') ?></td><td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td><td><?= e($row['current_step_name'] ?? '-') ?></td><td><?= e(rpt_datetime($row['completed_at'] ?? null)) ?></td><td><?= ((int)($row['is_delayed'] ?? 0) === 1) ? '<span class="status-pill danger">Delayed</span>' : '<span class="status-pill success">On Track</span>' ?></td><td><span class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span></td>
+                            </tr>
+                            <?php endif; ?>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
 
-    <script>
-    (function() {
-        const body = document.body;
-        const root = document.documentElement;
-        const hexRegex = /^#[0-9A-Fa-f]{6}$/;
-
-        function showToast(type, title, message) {
-            const wrap = document.getElementById('subhikshaToastWrap');
-            if (!wrap) return;
-
-            const toast = document.createElement('div');
-            const iconMap = {
-                success: 'check-circle-2',
-                error: 'x-circle',
-                warning: 'alert-triangle',
-                info: 'info'
-            };
-
-            toast.className = 'subhiksha-toast ' + (type || 'info');
-            toast.innerHTML =
-                '<div class="subhiksha-toast-icon"><i data-lucide="' + (iconMap[type] || 'info') + '"></i></div>' +
-                '<div class="flex-grow-1">' +
-                '<div class="subhiksha-toast-title">' + title + '</div>' +
-                '<div class="subhiksha-toast-message">' + message + '</div>' +
-                '</div>' +
-                '<button type="button" class="subhiksha-toast-close" aria-label="Close">&times;</button>';
-
-            wrap.appendChild(toast);
-
-            if (window.lucide && typeof window.lucide.createIcons === 'function') {
-                window.lucide.createIcons();
-            }
-
-            requestAnimationFrame(function() {
-                toast.classList.add('show');
-            });
-
-            const close = function() {
-                toast.classList.remove('show');
-                setTimeout(function() {
-                    toast.remove();
-                }, 260);
-            };
-
-            toast.querySelector('.subhiksha-toast-close')?.addEventListener('click', close);
-            setTimeout(close, 3800);
-        }
-
-        function normalizeHex(value) {
-            value = String(value || '').trim().toUpperCase();
-            if (value !== '' && !value.startsWith('#')) {
-                value = '#' + value;
-            }
-            return value;
-        }
-
-        function validHex(value) {
-            return hexRegex.test(value);
-        }
-
-        function setMessage(text, type) {
-            const message = document.getElementById('websiteColorMessage');
-            if (!message) return;
-            message.textContent = text;
-            message.className = 'mt-3 small fw-semibold ' + (type === 'error' ? 'text-danger' : 'text-success');
-        }
-
-        function setSummary(key, value) {
-            document.querySelectorAll('[data-summary-key="' + CSS.escape(key) + '"]').forEach(function(item) {
-                item.textContent = value;
-            });
-        }
-
-        function getRootVar(name, fallback) {
-            const value = getComputedStyle(root).getPropertyValue(name).trim();
-            return value || fallback;
-        }
-
-        function applySidebarGradient() {
-            const start = getRootVar('--sidebar-bg-1', '#10192E');
-            const middle = getRootVar('--sidebar-bg-2', '#1E3A5F');
-            const end = getRootVar('--sidebar-bg-3', '#315C8A');
-            const gradient = 'linear-gradient(180deg, ' + start + ' 0%, ' + middle + ' 48%, ' + end + ' 100%)';
-
-            root.style.setProperty('--sidebar-bg', gradient);
-
-            const sidebar = document.getElementById('sidebar');
-            if (sidebar) sidebar.style.background = gradient;
-
-            document.querySelectorAll(
-                '.preview-sidebar, .website-sidebar-gradient-note, .js-sidebar-summary-gradient').forEach(
-                function(el) {
-                    el.style.background = gradient;
-                });
-
-            setSummary('sidebar_bg_1', start + ' → ' + middle + ' → ' + end);
-
-            document.querySelectorAll('[data-summary-extra="sidebar_gradient"]').forEach(function(item) {
-                item.textContent = 'Middle: ' + middle + ' → End: ' + end;
-            });
-        }
-
-        function setLinkedControls(key, value) {
-            document.querySelectorAll('[data-theme-key="' + CSS.escape(key) + '"]').forEach(function(control) {
-                if (control.value !== value) {
-                    control.value = value;
-                }
-            });
-        }
-
-        function applyColor(key, value, cssVariable) {
-            value = normalizeHex(value);
-
-            if (!validHex(value)) {
-                return false;
-            }
-
-            root.style.setProperty(cssVariable, value);
-            setLinkedControls(key, value);
-            setSummary(key, value);
-
-            if (['sidebar_bg_1', 'sidebar_bg_2', 'sidebar_bg_3'].includes(key)) {
-                applySidebarGradient();
-            }
-
-            return true;
-        }
-
-        document.querySelectorAll('.js-website-color-picker').forEach(function(picker) {
-            picker.addEventListener('input', function() {
-                const key = picker.dataset.themeKey;
-                const variable = picker.dataset.cssVariable;
-                const value = normalizeHex(picker.value);
-
-                applyColor(key, value, variable);
-                setMessage('Preview updated. Click Save Colors to store in database.', 'success');
-            });
+                <div class="mobile-report-cards" id="mobileReportCards">
+                    <?php foreach ($currentRows as $row): ?>
+                    <div class="mobile-report-card">
+                        <?php if ($reportType === 'sales'): ?>
+                        <div class="d-flex justify-content-between gap-2"><strong><?= e($row['proforma_no'] ?? '-') ?></strong><span class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span></div>
+                        <small class="d-block text-muted-custom fw-bold"><?= e($row['customer_name'] ?? '-') ?> · <?= e($row['mobile'] ?? '-') ?></small>
+                        <div class="mt-2"><strong><?= e($row['function_name'] ?? '-') ?></strong> · <?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></div>
+                        <div class="mt-2 amount green">Final: <?= e(rpt_money($row['final_amount'] ?? 0)) ?></div><div class="amount red">Balance: <?= e(rpt_money($row['balance_amount'] ?? 0)) ?></div>
+                        <?php elseif ($reportType === 'payments'): ?>
+                        <div class="d-flex justify-content-between gap-2"><strong><?= e($row['payment_no'] ?? '-') ?></strong><span class="status-pill <?= e(rpt_status_class((string)($row['payment_status'] ?? 'paid'))) ?>"><?= e(ucfirst((string)($row['payment_status'] ?? 'paid'))) ?></span></div>
+                        <small class="d-block text-muted-custom fw-bold"><?= e($row['customer_name'] ?? '-') ?> · <?= e($row['proforma_no'] ?? '-') ?></small><div class="mt-2 amount green"><?= e(rpt_money($row['amount'] ?? 0)) ?></div><small class="text-muted-custom fw-bold"><?= e(rpt_date($row['payment_date'] ?? null)) ?> · <?= e(ucfirst((string)($row['payment_mode'] ?? '-'))) ?></small>
+                        <?php else: ?>
+                        <div class="d-flex justify-content-between gap-2"><strong><?= e($row['job_card_no'] ?? '-') ?></strong><span class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ($row['status'] ?? 'pending')))) ?>"><?= e($row['status_name'] ?? ucfirst((string)($row['status'] ?? 'pending'))) ?></span></div>
+                        <small class="d-block text-muted-custom fw-bold"><?= e($row['customer_name'] ?? '-') ?> · <?= e($row['mobile'] ?? '-') ?></small><div class="mt-2"><strong><?= e($row['product_name'] ?? '-') ?></strong></div><small class="text-muted-custom fw-bold">Stage: <?= e($row['current_step_name'] ?? ($row['step_name'] ?? '-')) ?></small><small class="d-block text-muted-custom fw-bold">Delivery: <?= e(rpt_date($row['delivery_date'] ?? ($row['planned_completion_date'] ?? null))) ?></small>
+                        <?php endif; ?>
+                    </div>
+                    <?php endforeach; ?>
+                    <?php if (!$currentRows): ?><div class="alert alert-warning rounded-4 fw-bold">No records found.</div><?php endif; ?>
+                </div>
+            </div>
+            <?php endif; ?>
+        </section>
+    </main>
+    <div id="settingsOverlay"></div>
+    <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
+</div>
+<?php include __DIR__ . '/includes/script.php'; ?>
+<script>
+(function(){
+    if(window.lucide&&typeof window.lucide.createIcons==='function'){window.lucide.createIcons();}
+    const search=document.getElementById('reportSearch');
+    if(search){
+        search.addEventListener('input',function(){
+            const value=this.value.toLowerCase().trim();
+            document.querySelectorAll('#reportTable tbody tr').forEach(function(row){row.style.display=row.textContent.toLowerCase().includes(value)?'':'none';});
+            document.querySelectorAll('#mobileReportCards .mobile-report-card').forEach(function(card){card.style.display=card.textContent.toLowerCase().includes(value)?'':'none';});
         });
-
-        document.querySelectorAll('.js-website-color-text').forEach(function(input) {
-            input.addEventListener('input', function() {
-                const key = input.dataset.themeKey;
-                const variable = input.dataset.cssVariable;
-                const value = normalizeHex(input.value);
-
-                input.value = value;
-
-                if (applyColor(key, value, variable)) {
-                    input.classList.remove('is-invalid');
-                    setMessage('Preview updated. Click Save Colors to store in database.',
-                        'success');
-                } else {
-                    input.classList.add('is-invalid');
-                    setMessage('Enter a valid HEX color like #FFC61A.', 'error');
-                }
-            });
-        });
-
-        const densitySelect = document.getElementById('websiteDensitySelect');
-        if (densitySelect) {
-            densitySelect.addEventListener('change', function() {
-                body.classList.toggle('layout-compact', densitySelect.value === 'compact');
-                setMessage('Layout preview updated. Click Save Colors to store in database.', 'success');
-            });
-        }
-
-        document.getElementById('resetWebsitePreview')?.addEventListener('click', function() {
-            document.querySelectorAll('.js-website-color-picker, .js-website-color-text').forEach(function(
-                control) {
-                const key = control.dataset.themeKey;
-                const variable = control.dataset.cssVariable;
-                const original = normalizeHex(control.dataset.originalValue || control.value);
-
-                control.value = original;
-                control.classList.remove('is-invalid');
-                applyColor(key, original, variable);
-            });
-
-            if (densitySelect) {
-                const originalDensity = densitySelect.dataset.originalValue || 'comfortable';
-                densitySelect.value = originalDensity;
-                body.classList.toggle('layout-compact', originalDensity === 'compact');
-            }
-
-            applySidebarGradient();
-            setMessage('Preview reset to database values.', 'success');
-            showToast('info', 'Preview Reset', 'Theme preview restored to the saved database colors.');
-        });
-
-        document.getElementById('saveWebsiteColors')?.addEventListener('click', async function() {
-            const saveButton = this;
-            const colors = {};
-            let hasInvalid = false;
-
-            document.querySelectorAll('.js-website-color-text').forEach(function(input) {
-                const key = input.dataset.themeKey;
-                const value = normalizeHex(input.value);
-
-                input.classList.remove('is-invalid');
-
-                if (!validHex(value)) {
-                    input.classList.add('is-invalid');
-                    hasInvalid = true;
-                    return;
-                }
-
-                colors[key] = value;
-            });
-
-            if (hasInvalid) {
-                setMessage('Please correct invalid HEX values before saving.', 'error');
-                showToast('error', 'Invalid Color', 'Please correct invalid HEX values before saving.');
-                return;
-            }
-
-            const payload = {
-                colors: colors,
-                layout_density: densitySelect ? densitySelect.value : 'comfortable'
-            };
-
-            const oldText = saveButton.textContent;
-            saveButton.disabled = true;
-            saveButton.textContent = 'Saving...';
-            showToast('info', 'Saving Colors', 'Please wait while the theme colors are saved.');
-
-            try {
-                const response = await fetch('ajax/save-website-colors.php', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Requested-With': 'XMLHttpRequest'
-                    },
-                    body: JSON.stringify(payload)
-                });
-
-                const result = await response.json();
-
-                if (!response.ok || !result.success) {
-                    throw new Error(result.message || 'Unable to save colors.');
-                }
-
-                Object.entries(colors).forEach(function([key, value]) {
-                    document.querySelectorAll('[data-theme-key="' + CSS.escape(key) + '"]')
-                        .forEach(function(control) {
-                            control.dataset.originalValue = value;
-                        });
-                });
-
-                if (densitySelect) {
-                    densitySelect.dataset.originalValue = payload.layout_density;
-                }
-
-                setMessage(result.message || 'Colors saved successfully.', 'success');
-                showToast('success', 'Colors Saved', result.message ||
-                    'Website colors saved successfully.');
-            } catch (error) {
-                setMessage(error.message ||
-                    'Unable to save colors. Check ajax/save-website-colors.php.', 'error');
-                showToast('error', 'Save Failed', error.message ||
-                    'Unable to save colors. Check ajax/save-website-colors.php.');
-            } finally {
-                saveButton.disabled = false;
-                saveButton.textContent = oldText;
-            }
-        });
-
-        applySidebarGradient();
-
-        if (window.lucide && typeof window.lucide.createIcons === 'function') {
-            window.lucide.createIcons();
-        }
-    })();
-    </script>
+    }
+    <?php if ($printMode): ?>
+    window.addEventListener('load',function(){setTimeout(function(){window.print();},400);});
+    <?php endif; ?>
+})();
+</script>
 </body>
-
 </html>
