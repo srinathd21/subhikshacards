@@ -285,12 +285,140 @@ $upiAmount = 0;
 $bankAmount = 0;
 $jobContext = null;
 $canCancel = payCanCancel($conn);
+$pendingRows = [];
+$pendingCount = 0;
+$pendingBalance = 0.0;
 
 $hasProformaPayments = payTableExists($conn, 'payments');
 $hasQuickSalePayments = payTableExists($conn, 'quick_sale_payments') && payTableExists($conn, 'quick_sales');
 
 if (!$hasProformaPayments && !$hasQuickSalePayments) {
     $error = 'No payment history table is available.';
+}
+
+/*
+ * PENDING / PARTIALLY PAID PROFORMA BILLS
+ * --------------------------------------
+ * One row per Proforma where the authoritative outstanding balance is > 0.
+ * If payment rows exist, active payments are the source of truth.
+ * Legacy Proformas with no payment rows fall back to proforma_bills.advance_amount.
+ */
+if ($error === '' && payTableExists($conn, 'proforma_bills')) {
+    try {
+        $pendingHasCancel = $hasProformaPayments && payColExists($conn, 'payments', 'is_cancelled');
+        $pendingPaymentJoin = '';
+        $pendingPaidExpr = 'COALESCE(pb.advance_amount, 0)';
+
+        if ($hasProformaPayments) {
+            $pendingActiveAmountExpr = $pendingHasCancel
+                ? 'CASE WHEN COALESCE(is_cancelled,0) = 0 THEN amount ELSE 0 END'
+                : 'amount';
+
+            $pendingPaymentJoin = "
+                LEFT JOIN (
+                    SELECT
+                        proforma_bill_id,
+                        COUNT(*) AS payment_count,
+                        COALESCE(SUM({$pendingActiveAmountExpr}), 0) AS active_paid
+                    FROM payments
+                    GROUP BY proforma_bill_id
+                ) pa ON pa.proforma_bill_id = pb.id
+            ";
+
+            $pendingPaidExpr = "CASE
+                WHEN COALESCE(pa.payment_count,0) > 0 THEN COALESCE(pa.active_paid,0)
+                ELSE COALESCE(pb.advance_amount,0)
+            END";
+        }
+
+        $pendingWhere = [];
+        $pendingParams = [];
+        $pendingTypes = '';
+
+        if ($jobCardId > 0) {
+            $pendingWhere[] = 'jc.id = ?';
+            $pendingParams[] = $jobCardId;
+            $pendingTypes .= 'i';
+        }
+
+        if ($proformaId > 0) {
+            $pendingWhere[] = 'pb.id = ?';
+            $pendingParams[] = $proformaId;
+            $pendingTypes .= 'i';
+        }
+
+        /* For unpaid bills there may be no payment_date, so use Proforma created date. */
+        if ($dateFrom !== '') {
+            $pendingWhere[] = 'DATE(pb.created_at) >= ?';
+            $pendingParams[] = $dateFrom;
+            $pendingTypes .= 's';
+        }
+
+        if ($dateTo !== '') {
+            $pendingWhere[] = 'DATE(pb.created_at) <= ?';
+            $pendingParams[] = $dateTo;
+            $pendingTypes .= 's';
+        }
+
+        if ($q !== '') {
+            $like = '%' . $q . '%';
+            $pendingWhere[] = '(pb.proforma_no LIKE ? OR pb.customer_name LIKE ? OR pb.mobile LIKE ? OR COALESCE(jc.job_card_no,\'\') LIKE ?)';
+            for ($i = 0; $i < 4; $i++) {
+                $pendingParams[] = $like;
+                $pendingTypes .= 's';
+            }
+        }
+
+        $pendingWhere[] = "GREATEST(COALESCE(pb.final_amount,0) - ({$pendingPaidExpr}), 0) > 0.009";
+        $pendingWhereSql = 'WHERE ' . implode(' AND ', $pendingWhere);
+
+        $pendingSql = "
+            SELECT
+                pb.id AS bill_id,
+                pb.proforma_no,
+                pb.customer_id,
+                pb.customer_name,
+                pb.mobile,
+                pb.order_type,
+                pb.final_amount,
+                pb.advance_amount AS stored_advance_amount,
+                pb.balance_amount AS stored_balance_amount,
+                pb.delivery_date,
+                pb.created_at AS proforma_created_at,
+                ({$pendingPaidExpr}) AS paid_amount,
+                GREATEST(COALESCE(pb.final_amount,0) - ({$pendingPaidExpr}), 0) AS current_balance,
+                jc.id AS job_card_id,
+                jc.job_card_no,
+                jcs.status_name AS job_status_name
+            FROM proforma_bills pb
+            {$pendingPaymentJoin}
+            LEFT JOIN (
+                SELECT proforma_bill_id, MAX(id) AS latest_job_card_id
+                FROM job_cards
+                GROUP BY proforma_bill_id
+            ) jx ON jx.proforma_bill_id = pb.id
+            LEFT JOIN job_cards jc ON jc.id = jx.latest_job_card_id
+            LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id
+            {$pendingWhereSql}
+            ORDER BY pb.id DESC
+            LIMIT 300
+        ";
+
+        $stmt = $conn->prepare($pendingSql);
+        if ($pendingParams) {
+            $stmt->bind_param($pendingTypes, ...$pendingParams);
+        }
+        $stmt->execute();
+        $res = $stmt->get_result();
+        while ($row = $res->fetch_assoc()) {
+            $pendingRows[] = $row;
+            $pendingBalance += (float)($row['current_balance'] ?? 0);
+        }
+        $stmt->close();
+        $pendingCount = count($pendingRows);
+    } catch (Throwable $e) {
+        $error = 'Unable to load pending payments: ' . $e->getMessage();
+    }
 }
 
 if ($error === '' && $hasProformaPayments) {
@@ -1017,7 +1145,7 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
                         <div>
                             <h1 class="mb-1">Payment History</h1>
                             <p class="text-muted-custom mb-0">
-                                <?= $jobContext ? 'Payment history for job card ' . e($jobContext['job_card_no'] ?? '-') : 'Proforma and Quick Sale payment history with cancelled Proforma payment details.' ?>
+                                <?= $jobContext ? 'Payment history for job card ' . e($jobContext['job_card_no'] ?? '-') : 'Pending Proforma collections, Proforma and Quick Sale payment history with cancelled Proforma payment details.' ?>
                             </p>
                         </div>
                         <div class="d-flex flex-column flex-sm-row gap-2 no-print">
@@ -1062,7 +1190,8 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
                         <div class="col-md-3"><strong>Customer</strong><br><?= e($jobContext['customer_name'] ?? '-') ?>
                             · <?= e($jobContext['mobile'] ?? '') ?></div>
                         <div class="col-md-3">
-                            <strong>Balance</strong><br><?= e(payMoney($jobContext['balance_amount'] ?? 0)) ?></div>
+                            <strong>Balance</strong><br><?= e(payMoney($jobContext['balance_amount'] ?? 0)) ?>
+                        </div>
                     </div>
                 </div>
                 <?php endif; ?>
@@ -1098,6 +1227,141 @@ $exportUrl = 'payments.php?' . http_build_query($exportParams);
                         </div>
                     </div>
                 </div>
+
+                <?php if ($view === 'paid' && $jobContext === null): ?>
+                <div class="card-ui module-card mb-3">
+                    <div
+                        class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
+                        <div>
+                            <h2 class="module-title">Pending Payments</h2>
+                            <p class="text-muted-custom mb-0">
+                                Unpaid and partially paid Proforma bills with balance greater than zero.
+                            </p>
+                        </div>
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <span class="status-pill" style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa">
+                                <?= number_format($pendingCount) ?> Bills
+                            </span>
+                            <span class="status-pill" style="background:#fef2f2;color:#b91c1c;border:1px solid #fecaca">
+                                Balance <?= e(payMoney($pendingBalance)) ?>
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="table-responsive desktop-table">
+                        <table class="table-ui">
+                            <thead>
+                                <tr>
+                                    <th>Proforma</th>
+                                    <th>Customer</th>
+                                    <th>Job Card</th>
+                                    <th>Total</th>
+                                    <th>Paid</th>
+                                    <th>Balance</th>
+                                    <th>Status</th>
+                                    <th class="no-print">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (!$pendingRows): ?>
+                                <tr>
+                                    <td colspan="8" class="text-center text-muted-custom py-4">No unpaid or partially
+                                        paid Proforma bills found.</td>
+                                </tr>
+                                <?php endif; ?>
+
+                                <?php foreach ($pendingRows as $pending): ?>
+                                <?php
+                                    $pendingPaid = (float)($pending['paid_amount'] ?? 0);
+                                    $pendingDue = (float)($pending['current_balance'] ?? 0);
+                                    $pendingLabel = $pendingPaid > 0.009 ? 'Partially Paid' : 'Unpaid';
+                                ?>
+                                <tr>
+                                    <td>
+                                        <a href="proforma_bill_view.php?id=<?= (int)$pending['bill_id'] ?>"
+                                            class="fw-bold text-decoration-none">
+                                            <?= e($pending['proforma_no'] ?? '-') ?>
+                                        </a>
+                                        <small
+                                            class="d-block text-muted-custom"><?= e(payDate($pending['proforma_created_at'] ?? null)) ?></small>
+                                    </td>
+                                    <td>
+                                        <strong><?= e($pending['customer_name'] ?? '-') ?></strong>
+                                        <small
+                                            class="d-block text-muted-custom"><?= e($pending['mobile'] ?? '-') ?></small>
+                                    </td>
+                                    <td>
+                                        <?php if (!empty($pending['job_card_id'])): ?>
+                                        <span class="status-pill job"><?= e($pending['job_card_no'] ?? '-') ?></span>
+                                        <small
+                                            class="d-block text-muted-custom mt-1"><?= e($pending['job_status_name'] ?? '-') ?></small>
+                                        <?php else: ?>
+                                        <span class="text-muted-custom fw-bold">Not Created</span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td><strong><?= e(payMoney($pending['final_amount'] ?? 0)) ?></strong></td>
+                                    <td><span class="paid-amount"><?= e(payMoney($pendingPaid)) ?></span></td>
+                                    <td><strong class="text-danger"><?= e(payMoney($pendingDue)) ?></strong></td>
+                                    <td>
+                                        <span class="status-pill <?= $pendingPaid > 0.009 ? '' : 'cancelled' ?>"
+                                            style="<?= $pendingPaid > 0.009 ? 'background:#fff7ed;color:#c2410c;border:1px solid #fed7aa' : 'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca' ?>">
+                                            <?= e($pendingLabel) ?>
+                                        </span>
+                                    </td>
+                                    <td class="no-print">
+                                        <a href="proforma_payment.php?id=<?= (int)$pending['bill_id'] ?>"
+                                            class="btn btn-success btn-sm rounded-pill px-3 fw-bold">
+                                            <i data-lucide="indian-rupee"></i> Pay
+                                        </a>
+                                    </td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="mobile-cards">
+                        <?php if (!$pendingRows): ?>
+                        <div class="mobile-card text-center text-muted-custom">No unpaid or partially paid Proforma
+                            bills found.</div>
+                        <?php endif; ?>
+
+                        <?php foreach ($pendingRows as $pending): ?>
+                        <?php
+                            $pendingPaid = (float)($pending['paid_amount'] ?? 0);
+                            $pendingDue = (float)($pending['current_balance'] ?? 0);
+                            $pendingLabel = $pendingPaid > 0.009 ? 'Partially Paid' : 'Unpaid';
+                        ?>
+                        <div class="mobile-card">
+                            <div class="d-flex justify-content-between gap-2">
+                                <div>
+                                    <div class="mobile-card-title"><?= e($pending['proforma_no'] ?? '-') ?></div>
+                                    <span class="mobile-card-subtitle"><?= e($pending['customer_name'] ?? '-') ?> ·
+                                        <?= e($pending['mobile'] ?? '-') ?></span>
+                                    <span class="mobile-card-subtitle">Total:
+                                        <?= e(payMoney($pending['final_amount'] ?? 0)) ?></span>
+                                    <span class="mobile-card-subtitle">Paid: <?= e(payMoney($pendingPaid)) ?></span>
+                                    <span class="mobile-card-subtitle text-danger fw-bold">Balance:
+                                        <?= e(payMoney($pendingDue)) ?></span>
+                                    <span class="mobile-card-subtitle">Job Card:
+                                        <?= e($pending['job_card_no'] ?? 'Not Created') ?></span>
+                                </div>
+                                <span class="status-pill"
+                                    style="<?= $pendingPaid > 0.009 ? 'background:#fff7ed;color:#c2410c;border:1px solid #fed7aa' : 'background:#fef2f2;color:#b91c1c;border:1px solid #fecaca' ?>">
+                                    <?= e($pendingLabel) ?>
+                                </span>
+                            </div>
+                            <div class="mobile-card-actions no-print">
+                                <a href="proforma_payment.php?id=<?= (int)$pending['bill_id'] ?>"
+                                    class="btn btn-success rounded-pill fw-bold">
+                                    <i data-lucide="indian-rupee"></i> Make Payment
+                                </a>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+                <?php endif; ?>
 
                 <div class="card-ui module-card">
                     <div

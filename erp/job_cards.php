@@ -132,7 +132,7 @@ function jcStatusIdByKey(mysqli $conn, string $statusKey): ?int
 function jcCurrentFilterQuery(array $extra = []): string
 {
     $keep = [];
-    foreach (['order_type', 'status', 'search'] as $key) {
+    foreach (['order_type', 'status', 'search', 'from_date', 'to_date', 'page'] as $key) {
         if (isset($_GET[$key]) && trim((string)$_GET[$key]) !== '') {
             $keep[$key] = trim((string)$_GET[$key]);
         }
@@ -809,6 +809,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array(($_POST['action'] ?? ''), 
 $filterOrderType = trim((string)($_GET['order_type'] ?? ''));
 $filterStatus = trim((string)($_GET['status'] ?? ''));
 $filterSearch = trim((string)($_GET['search'] ?? ''));
+$filterFromDate = trim((string)($_GET['from_date'] ?? ''));
+$filterToDate = trim((string)($_GET['to_date'] ?? ''));
+
+// Server-side pagination. Keep the page compact while preserving all filters.
+$page = max(1, (int)($_GET['page'] ?? 1));
+$perPage = 20;
+$totalRows = 0;
+$totalPages = 1;
+$offset = 0;
+
+// Only accept YYYY-MM-DD values from the date inputs.
+if ($filterFromDate !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $filterFromDate)) {
+    $filterFromDate = '';
+}
+if ($filterToDate !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $filterToDate)) {
+    $filterToDate = '';
+}
 
 $where = [];
 $params = [];
@@ -859,6 +876,18 @@ if ($filterStatus !== '') {
     $types .= 's';
 }
 
+if ($filterFromDate !== '') {
+    $where[] = "DATE(jc.created_at) >= ?";
+    $params[] = $filterFromDate;
+    $types .= 's';
+}
+
+if ($filterToDate !== '') {
+    $where[] = "DATE(jc.created_at) <= ?";
+    $params[] = $filterToDate;
+    $types .= 's';
+}
+
 if ($filterSearch !== '') {
     $where[] = "(
         jc.job_card_no LIKE ?
@@ -897,12 +926,66 @@ try {
 }
 
 $rows = [];
+$readymadeRows = 0;
+$customizedRows = 0;
+$delayedRows = 0;
 
 if (!jcTableExists($conn, 'job_cards')) {
     $message = 'job_cards table is missing.';
     $messageType = 'danger';
 } else {
     try {
+        /*
+         | Count and summary query uses the SAME role/search/status/date filters
+         | as the job-card list. This keeps summary cards correct even when
+         | only one pagination page is displayed.
+         */
+        $summarySql = "
+            SELECT
+                COUNT(*) AS total_rows,
+                COALESCE(SUM(CASE WHEN jc.order_type = 'readymade' THEN 1 ELSE 0 END), 0) AS readymade_rows,
+                COALESCE(SUM(CASE WHEN jc.order_type = 'customized' THEN 1 ELSE 0 END), 0) AS customized_rows,
+                COALESCE(SUM(CASE
+                    WHEN COALESCE(jc.is_delayed, 0) = 1
+                         OR EXISTS (
+                            SELECT 1
+                            FROM job_tracking jt_delay
+                            WHERE jt_delay.job_card_id = jc.id
+                              AND (jt_delay.status = 'delayed' OR COALESCE(jt_delay.is_delayed, 0) = 1)
+                         )
+                    THEN 1 ELSE 0
+                END), 0) AS delayed_rows
+            FROM job_cards jc
+            LEFT JOIN printing_types pt
+                ON pt.id = jc.printing_type_id
+            LEFT JOIN roles rprint
+                ON rprint.id = jc.assigned_printing_role_id
+            LEFT JOIN job_card_statuses jcs
+                ON jcs.id = jc.job_card_status_id
+            LEFT JOIN workflow_steps ws
+                ON ws.id = jc.current_workflow_step_id
+            {$whereSql}
+        ";
+
+        $summaryStmt = $conn->prepare($summarySql);
+        if ($params) {
+            $summaryStmt->bind_param($types, ...$params);
+        }
+        $summaryStmt->execute();
+        $summary = $summaryStmt->get_result()->fetch_assoc() ?: [];
+        $summaryStmt->close();
+
+        $totalRows = (int)($summary['total_rows'] ?? 0);
+        $readymadeRows = (int)($summary['readymade_rows'] ?? 0);
+        $customizedRows = (int)($summary['customized_rows'] ?? 0);
+        $delayedRows = (int)($summary['delayed_rows'] ?? 0);
+
+        $totalPages = max(1, (int)ceil($totalRows / $perPage));
+        if ($page > $totalPages) {
+            $page = $totalPages;
+        }
+        $offset = ($page - 1) * $perPage;
+
         $sql = "
             SELECT
                 jc.*,
@@ -976,14 +1059,15 @@ if (!jcTableExists($conn, 'job_cards')) {
             {$whereSql}
 
             ORDER BY jc.id DESC
-            LIMIT 500
+            LIMIT ? OFFSET ?
         ";
 
         $stmt = $conn->prepare($sql);
-
-        if ($params) {
-            $stmt->bind_param($types, ...$params);
-        }
+        $listParams = $params;
+        $listParams[] = $perPage;
+        $listParams[] = $offset;
+        $listTypes = $types . 'ii';
+        $stmt->bind_param($listTypes, ...$listParams);
 
         $stmt->execute();
         $result = $stmt->get_result();
@@ -997,27 +1081,18 @@ if (!jcTableExists($conn, 'job_cards')) {
         $message = 'Job cards query error: ' . $e->getMessage();
         $messageType = 'danger';
         $rows = [];
+        $totalRows = 0;
+        $readymadeRows = 0;
+        $customizedRows = 0;
+        $delayedRows = 0;
+        $totalPages = 1;
+        $page = 1;
+        $offset = 0;
     }
 }
 
-$totalRows = count($rows);
-$readymadeRows = 0;
-$customizedRows = 0;
-$delayedRows = 0;
-
-foreach ($rows as $row) {
-    if (($row['order_type'] ?? '') === 'readymade') {
-        $readymadeRows++;
-    }
-
-    if (($row['order_type'] ?? '') === 'customized') {
-        $customizedRows++;
-    }
-
-    if ((int)($row['is_delayed'] ?? 0) === 1 || (int)($row['delayed_steps'] ?? 0) > 0) {
-        $delayedRows++;
-    }
-}
+$showingFrom = $totalRows > 0 ? $offset + 1 : 0;
+$showingTo = $totalRows > 0 ? min($offset + count($rows), $totalRows) : 0;
 
 $pageAccessLabel = $hasAllJobCardAccess
     ? 'Showing all job cards'
@@ -1539,7 +1614,7 @@ $pageAccessLabel = $hasAllJobCardAccess
 
                 <div class="card-ui filter-card">
                     <form method="get" class="row g-3 align-items-end">
-                        <div class="col-12 col-md-3">
+                        <div class="col-12 col-md-6 col-lg-2">
                             <label class="form-label fw-bold">Order Type</label>
                             <select name="order_type" class="form-select">
                                 <option value="">All</option>
@@ -1550,7 +1625,7 @@ $pageAccessLabel = $hasAllJobCardAccess
                             </select>
                         </div>
 
-                        <div class="col-12 col-md-3">
+                        <div class="col-12 col-md-6 col-lg-2">
                             <label class="form-label fw-bold">Status</label>
                             <select name="status" class="form-select">
                                 <option value="">All Status</option>
@@ -1563,17 +1638,35 @@ $pageAccessLabel = $hasAllJobCardAccess
                             </select>
                         </div>
 
-                        <div class="col-12 col-md-4">
+                        <div class="col-12 col-md-6 col-lg-2">
+                            <label class="form-label fw-bold">From Date</label>
+                            <input type="date" name="from_date" class="form-control" value="<?= e($filterFromDate) ?>">
+                        </div>
+
+                        <div class="col-12 col-md-6 col-lg-2">
+                            <label class="form-label fw-bold">To Date</label>
+                            <input type="date" name="to_date" class="form-control" value="<?= e($filterToDate) ?>">
+                        </div>
+
+                        <div class="col-12 col-lg-3">
                             <label class="form-label fw-bold">Search</label>
                             <input type="search" name="search" class="form-control"
                                 placeholder="Job no, customer, mobile, product..." value="<?= e($filterSearch) ?>">
                         </div>
 
-                        <div class="col-12 col-md-2">
-                            <button type="submit" class="btn btn-primary rounded-pill px-4 fw-bold w-100">
+                        <div class="col-12 col-lg-1">
+                            <button type="submit" class="btn btn-primary rounded-pill px-3 fw-bold w-100">
                                 Filter
                             </button>
                         </div>
+
+                        <?php if ($filterOrderType !== '' || $filterStatus !== '' || $filterSearch !== '' || $filterFromDate !== '' || $filterToDate !== ''): ?>
+                        <div class="col-12 text-end">
+                            <a href="job_cards.php" class="btn btn-sm btn-outline-secondary rounded-pill px-3 fw-bold">
+                                Clear Filters
+                            </a>
+                        </div>
+                        <?php endif; ?>
                     </form>
                 </div>
 
@@ -1586,6 +1679,10 @@ $pageAccessLabel = $hasAllJobCardAccess
                                 Admin, Sales and Designing / Proofing can see all jobs. Printing roles see only their
                                 assigned printing type.
                             </p>
+                            <small class="text-muted-custom fw-bold d-block mt-1">
+                                Showing <?= number_format($showingFrom) ?>-<?= number_format($showingTo) ?> of
+                                <?= number_format($totalRows) ?> filtered job card(s)
+                            </small>
                         </div>
 
                         <div style="max-width:340px;width:100%">
@@ -1596,7 +1693,8 @@ $pageAccessLabel = $hasAllJobCardAccess
 
                     <?php if ($roleKey === 'screen_printing'): ?>
                     <div class="shortcut-help-bar">
-                        <span><i data-lucide="info"></i> Start: Complete Enquiry → Master Copy Received and open Printing.</span>
+                        <span><i data-lucide="info"></i> Start: Complete Enquiry → Master Copy Received and open
+                            Printing.</span>
                         <span>Complete: Complete Printing → Send to Dispatch.</span>
                     </div>
                     <?php endif; ?>
@@ -1706,34 +1804,36 @@ $pageAccessLabel = $hasAllJobCardAccess
                                         <div class="shortcut-actions">
                                             <?php if ($showScreenShortcut): ?>
                                             <form method="post" class="shortcut-form">
-                                                <input type="hidden" name="csrf_token" value="<?= e($shortcutCsrfToken) ?>">
+                                                <input type="hidden" name="csrf_token"
+                                                    value="<?= e($shortcutCsrfToken) ?>">
                                                 <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
                                                 <input type="hidden" name="action" value="readymade_screen_start">
                                                 <div class="shortcut-action-box">
-                                                    <button type="submit"
-                                                        class="btn btn-sm shortcut-btn start"
+                                                    <button type="submit" class="btn btn-sm shortcut-btn start"
                                                         <?= !empty($shortcutState['start_enabled']) ? '' : 'disabled' ?>
                                                         onclick="return confirm('Start this readymade screen printing job? This will complete stages up to Master Copy Received and open Printing.');">
                                                         <i data-lucide="play"></i> Start
                                                     </button>
-                                                    <small class="shortcut-note <?= !empty($shortcutState['started']) ? 'green' : '' ?>">
+                                                    <small
+                                                        class="shortcut-note <?= !empty($shortcutState['started']) ? 'green' : '' ?>">
                                                         <?= e($shortcutState['start_label'] ?? 'Not Started') ?>
                                                     </small>
                                                 </div>
                                             </form>
 
                                             <form method="post" class="shortcut-form">
-                                                <input type="hidden" name="csrf_token" value="<?= e($shortcutCsrfToken) ?>">
+                                                <input type="hidden" name="csrf_token"
+                                                    value="<?= e($shortcutCsrfToken) ?>">
                                                 <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
                                                 <input type="hidden" name="action" value="readymade_screen_complete">
                                                 <div class="shortcut-action-box">
-                                                    <button type="submit"
-                                                        class="btn btn-sm shortcut-btn complete"
+                                                    <button type="submit" class="btn btn-sm shortcut-btn complete"
                                                         <?= !empty($shortcutState['complete_enabled']) ? '' : 'disabled' ?>
                                                         onclick="return confirm('Complete this readymade screen printing job? This will complete stages from Printing to Send to Dispatch.');">
                                                         <i data-lucide="check"></i> Complete
                                                     </button>
-                                                    <small class="shortcut-note <?= !empty($shortcutState['completed']) ? 'done' : (!empty($shortcutState['complete_enabled']) ? 'blue' : '') ?>">
+                                                    <small
+                                                        class="shortcut-note <?= !empty($shortcutState['completed']) ? 'done' : (!empty($shortcutState['complete_enabled']) ? 'blue' : '') ?>">
                                                         <?= e($shortcutState['complete_label'] ?? 'Disabled') ?>
                                                     </small>
                                                 </div>
@@ -1814,7 +1914,8 @@ $pageAccessLabel = $hasAllJobCardAccess
                                             onclick="return confirm('Start this readymade screen printing job?');">
                                             <i data-lucide="play"></i> Start
                                         </button>
-                                        <small class="shortcut-note <?= !empty($shortcutState['started']) ? 'green' : '' ?>">
+                                        <small
+                                            class="shortcut-note <?= !empty($shortcutState['started']) ? 'green' : '' ?>">
                                             <?= e($shortcutState['start_label'] ?? 'Not Started') ?>
                                         </small>
                                     </div>
@@ -1830,7 +1931,8 @@ $pageAccessLabel = $hasAllJobCardAccess
                                             onclick="return confirm('Complete this readymade screen printing job?');">
                                             <i data-lucide="check"></i> Complete
                                         </button>
-                                        <small class="shortcut-note <?= !empty($shortcutState['completed']) ? 'done' : (!empty($shortcutState['complete_enabled']) ? 'blue' : '') ?>">
+                                        <small
+                                            class="shortcut-note <?= !empty($shortcutState['completed']) ? 'done' : (!empty($shortcutState['complete_enabled']) ? 'blue' : '') ?>">
                                             <?= e($shortcutState['complete_label'] ?? 'Disabled') ?>
                                         </small>
                                     </div>
@@ -1846,6 +1948,65 @@ $pageAccessLabel = $hasAllJobCardAccess
                         </div>
                         <?php endforeach; ?>
                     </div>
+
+                    <?php if ($totalPages > 1): ?>
+                    <nav class="mt-4 no-print" aria-label="Job Cards pagination">
+                        <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3">
+                            <small class="text-muted-custom fw-bold">
+                                Page <?= number_format($page) ?> of <?= number_format($totalPages) ?>
+                            </small>
+
+                            <ul class="pagination pagination-sm mb-0 flex-wrap">
+                                <?php
+                                    $prevQuery = jcCurrentFilterQuery(['page' => max(1, $page - 1)]);
+                                    $nextQuery = jcCurrentFilterQuery(['page' => min($totalPages, $page + 1)]);
+                                ?>
+                                <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                                    <a class="page-link" href="job_cards.php?<?= e($prevQuery) ?>">Previous</a>
+                                </li>
+
+                                <?php
+                                    $startPage = max(1, $page - 2);
+                                    $endPage = min($totalPages, $page + 2);
+                                    if ($startPage > 1):
+                                ?>
+                                <li class="page-item">
+                                    <a class="page-link"
+                                        href="job_cards.php?<?= e(jcCurrentFilterQuery(['page' => 1])) ?>">1</a>
+                                </li>
+                                <?php if ($startPage > 2): ?>
+                                <li class="page-item disabled"><span class="page-link">…</span></li>
+                                <?php endif; ?>
+                                <?php endif; ?>
+
+                                <?php for ($p = $startPage; $p <= $endPage; $p++): ?>
+                                <li class="page-item <?= $p === $page ? 'active' : '' ?>">
+                                    <a class="page-link"
+                                        href="job_cards.php?<?= e(jcCurrentFilterQuery(['page' => $p])) ?>">
+                                        <?= number_format($p) ?>
+                                    </a>
+                                </li>
+                                <?php endfor; ?>
+
+                                <?php if ($endPage < $totalPages): ?>
+                                <?php if ($endPage < $totalPages - 1): ?>
+                                <li class="page-item disabled"><span class="page-link">…</span></li>
+                                <?php endif; ?>
+                                <li class="page-item">
+                                    <a class="page-link"
+                                        href="job_cards.php?<?= e(jcCurrentFilterQuery(['page' => $totalPages])) ?>">
+                                        <?= number_format($totalPages) ?>
+                                    </a>
+                                </li>
+                                <?php endif; ?>
+
+                                <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
+                                    <a class="page-link" href="job_cards.php?<?= e($nextQuery) ?>">Next</a>
+                                </li>
+                            </ul>
+                        </div>
+                    </nav>
+                    <?php endif; ?>
                 </div>
             </section>
         </main>

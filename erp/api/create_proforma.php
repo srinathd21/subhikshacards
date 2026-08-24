@@ -2880,6 +2880,183 @@ function pb_send_whatsapp_preferred(mysqli $conn, int $id): array
     return $apiResult;
 }
 
+
+/**
+ * Send the WhatsApp payment template for an advance/full payment row that was
+ * created together with a new Proforma.
+ *
+ * Keep this aligned with proforma_payment.php:
+ * - partial/advance balance remaining => payment_received
+ * - balance becomes zero             => payment_completed_new
+ * - related_module = Payments and related_id = payment id, so the existing
+ *   Proforma Payment page can show WhatsApp Sent / Retry WhatsApp correctly.
+ */
+function pb_send_created_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId): array
+{
+    if ($proformaId <= 0 || $paymentId <= 0) {
+        return [
+            'success' => false,
+            'message' => 'Invalid Proforma/payment for WhatsApp.',
+            'mode' => 'api',
+            'payment_id' => $paymentId
+        ];
+    }
+
+    $apiFile = __DIR__ . '/../includes/whatsapp-api.php';
+    if (!is_file($apiFile)) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp API file missing.',
+            'mode' => 'api',
+            'payment_id' => $paymentId
+        ];
+    }
+
+    require_once $apiFile;
+
+    if (!function_exists('subhiksha_send_template_whatsapp')) {
+        return [
+            'success' => false,
+            'message' => 'WhatsApp template API function missing.',
+            'mode' => 'api',
+            'payment_id' => $paymentId
+        ];
+    }
+
+    try {
+        $activeP2 = apiColumnExists($conn, 'payments', 'is_cancelled')
+            ? 'COALESCE(p2.is_cancelled, 0) = 0'
+            : '1 = 1';
+        $activeP3 = apiColumnExists($conn, 'payments', 'is_cancelled')
+            ? 'COALESCE(p3.is_cancelled, 0) = 0'
+            : '1 = 1';
+
+        $stmt = $conn->prepare("
+            SELECT
+                p.*,
+                pb.proforma_no,
+                pb.customer_name,
+                pb.mobile,
+                pb.customer_id AS bill_customer_id,
+                pb.final_amount,
+                pb.advance_amount,
+                pb.balance_amount,
+                ft.function_name,
+                COALESCE((
+                    SELECT SUM(p2.amount)
+                    FROM payments p2
+                    WHERE p2.proforma_bill_id = p.proforma_bill_id
+                      AND p2.id <= p.id
+                      AND {$activeP2}
+                ), 0) AS total_paid_after_payment,
+                GREATEST(
+                    pb.final_amount - COALESCE((
+                        SELECT SUM(p3.amount)
+                        FROM payments p3
+                        WHERE p3.proforma_bill_id = p.proforma_bill_id
+                          AND p3.id <= p.id
+                          AND {$activeP3}
+                    ), 0),
+                    0
+                ) AS balance_after_payment
+            FROM payments p
+            INNER JOIN proforma_bills pb
+                ON pb.id = p.proforma_bill_id
+            LEFT JOIN function_types ft
+                ON ft.id = pb.function_type_id
+            WHERE p.id = ?
+              AND p.proforma_bill_id = ?
+            LIMIT 1
+        ");
+        $stmt->bind_param('ii', $paymentId, $proformaId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$row) {
+            return [
+                'success' => false,
+                'message' => 'Advance payment details not found for WhatsApp.',
+                'mode' => 'api',
+                'payment_id' => $paymentId
+            ];
+        }
+
+        $mobile = trim((string)($row['mobile'] ?? ''));
+        if ($mobile === '') {
+            return [
+                'success' => false,
+                'message' => 'Customer mobile number is missing.',
+                'mode' => 'api',
+                'payment_id' => $paymentId
+            ];
+        }
+
+        $balanceAfterPayment = max(0, (float)($row['balance_after_payment'] ?? 0));
+        $totalPaidAfterPayment = max(0, (float)($row['total_paid_after_payment'] ?? 0));
+
+        $templateKey = $balanceAfterPayment <= 0.00001
+            ? 'payment_completed_new'
+            : 'payment_received';
+
+        $proformaPdfUrl = $templateKey === 'payment_completed_new'
+            ? pb_whatsapp_base_url($conn) . '/proforma_bill_pdf.php?id=' . $proformaId . '&public=1&download=1'
+            : '';
+
+        $variables = [
+            'customer_name' => trim((string)($row['customer_name'] ?? 'Customer')) ?: 'Customer',
+            'proforma_no' => trim((string)($row['proforma_no'] ?? '-')) ?: '-',
+            'payment_no' => trim((string)($row['payment_no'] ?? '-')) ?: '-',
+            'paid_amount' => number_format((float)($row['amount'] ?? 0), 2, '.', ''),
+            'payment_mode' => strtoupper(trim((string)($row['payment_mode'] ?? '-')) ?: '-'),
+            'balance_amount' => number_format($balanceAfterPayment, 2, '.', ''),
+            'final_amount' => number_format((float)($row['final_amount'] ?? 0), 2, '.', ''),
+            'total_paid' => number_format($totalPaidAfterPayment, 2, '.', ''),
+            'payment_date' => !empty($row['payment_date'])
+                ? date('d-m-Y', strtotime((string)$row['payment_date']))
+                : date('d-m-Y'),
+            'reference_no' => trim((string)($row['reference_no'] ?? '-')) ?: '-',
+            'function_type' => trim((string)($row['function_name'] ?? '-')) ?: '-',
+            'proforma_pdf_link' => $proformaPdfUrl
+        ];
+
+        $meta = [
+            'related_module' => 'Payments',
+            'related_id' => $paymentId,
+            'customer_id' => !empty($row['bill_customer_id'])
+                ? (int)$row['bill_customer_id']
+                : (!empty($row['customer_id']) ? (int)$row['customer_id'] : null),
+            'sent_by' => (int)($_SESSION['user_id'] ?? 0),
+            'language_code' => 'en',
+            'extra_payload' => [
+                'type' => 'template',
+                'template_key' => $templateKey
+            ]
+        ];
+
+        $result = subhiksha_send_template_whatsapp(
+            $conn,
+            $templateKey,
+            $mobile,
+            $variables,
+            $meta
+        );
+
+        $result['template_key'] = $templateKey;
+        $result['payment_id'] = $paymentId;
+        $result['mode'] = 'api';
+
+        return $result;
+    } catch (Throwable $e) {
+        return [
+            'success' => false,
+            'message' => $e->getMessage(),
+            'mode' => 'api',
+            'payment_id' => $paymentId
+        ];
+    }
+}
+
 function pb_whatsapp_svg(): string
 {
     return '<svg viewBox="0 0 32 32" width="17" height="17" aria-hidden="true" focusable="false"><path fill="currentColor" d="M16.04 3C8.85 3 3 8.73 3 15.78c0 2.26.61 4.47 1.77 6.41L3 29l7.02-1.8a13.3 13.3 0 0 0 6.02 1.43C23.23 28.63 29 22.9 29 15.85S23.23 3 16.04 3Zm0 23.45c-1.9 0-3.76-.5-5.39-1.45l-.39-.23-4.16 1.07 1.11-4.01-.26-.41a11.05 11.05 0 0 1-1.73-5.64c0-5.84 4.85-10.6 10.82-10.6 5.96 0 10.81 4.76 10.81 10.67 0 5.84-4.85 10.6-10.81 10.6Zm5.93-7.95c-.32-.16-1.9-.92-2.2-1.03-.3-.11-.52-.16-.74.16-.22.32-.85 1.03-1.04 1.24-.19.22-.38.24-.7.08-.32-.16-1.36-.49-2.59-1.55-.96-.84-1.61-1.88-1.8-2.2-.19-.32-.02-.49.14-.65.14-.14.32-.38.49-.57.16-.19.22-.32.32-.54.11-.22.05-.41-.03-.57-.08-.16-.74-1.76-1.01-2.41-.27-.65-.54-.54-.74-.55h-.63c-.22 0-.57.08-.87.41-.3.32-1.14 1.09-1.14 2.68s1.17 3.12 1.33 3.34c.16.22 2.3 3.46 5.58 4.85.78.33 1.39.53 1.86.68.78.24 1.49.21 2.05.13.63-.09 1.9-.76 2.17-1.49.27-.73.27-1.36.19-1.49-.08-.13-.3-.21-.62-.37Z"/></svg>';
@@ -4021,6 +4198,12 @@ try {
                 pb_sync_existing_job_card_from_proforma($conn, $proformaId, $userId, $plannedDates);
             }
 
+            /*
+             * Keep the payment ids created with this new Proforma.
+             * WhatsApp is sent only AFTER the DB transaction commits.
+             */
+            $createdAdvancePaymentIds = [];
+
             if ($advanceAmount > 0 && $id <= 0) {
                 $paymentType = $balanceAmount <= 0 ? 'full' : 'advance';
                 $today = date('Y-m-d');
@@ -4070,14 +4253,42 @@ try {
                     return $paymentId;
                 };
 
-                $cashPaymentId = $saveAdvancePayment('cash', $cashAmount, $cashRef ?: $paymentRef, 'Advance cash collected from proforma bill');
+                $cashPaymentId = $saveAdvancePayment(
+                    'cash',
+                    $cashAmount,
+                    $cashRef ?: $paymentRef,
+                    'Advance cash collected from proforma bill'
+                );
                 if ($cashPaymentId > 0) {
-                    pb_save_cash_denominations($conn, $cashPaymentId, $cashDenomination, $userId);
+                    $createdAdvancePaymentIds[] = $cashPaymentId;
+                    pb_save_cash_denominations(
+                        $conn,
+                        $cashPaymentId,
+                        $cashDenomination,
+                        $userId
+                    );
                 }
 
-                $saveAdvancePayment('upi', $upiAmount, $upiRef ?: $paymentRef, 'Advance UPI collected from proforma bill');
+                $upiPaymentId = $saveAdvancePayment(
+                    'upi',
+                    $upiAmount,
+                    $upiRef ?: $paymentRef,
+                    'Advance UPI collected from proforma bill'
+                );
+                if ($upiPaymentId > 0) {
+                    $createdAdvancePaymentIds[] = $upiPaymentId;
+                }
 
-                pb_log($conn, 'collect_payment', 'Payments', $proformaId, 'Advance split payment collected. Cash: ' . number_format($cashAmount, 2, '.', '') . ', UPI: ' . number_format($upiAmount, 2, '.', ''));
+                pb_log(
+                    $conn,
+                    'collect_payment',
+                    'Payments',
+                    $proformaId,
+                    'Advance split payment collected. Cash: '
+                        . number_format($cashAmount, 2, '.', '')
+                        . ', UPI: '
+                        . number_format($upiAmount, 2, '.', '')
+                );
             }
 
 
@@ -4145,15 +4356,25 @@ try {
             }
 
             /*
-             * WhatsApp rule:
-             * - CREATE: send proforma_created after the Proforma is saved.
-             * - EDIT: never send proforma_created again.
+             * WhatsApp rule for a NEW Proforma:
+             * 1. Send proforma_created automatically.
+             * 2. For every advance/full payment row created with the Proforma,
+             *    send payment_received (or payment_completed_new when balance = 0).
+             *
+             * These are independent attempts. A Proforma WhatsApp failure must not
+             * prevent the advance payment WhatsApp from being attempted, and vice versa.
              */
             if ($isNewProforma) {
                 $whatsappResult = pb_send_whatsapp_preferred($conn, $proformaId);
+
+                /* Backward-compatible response fields used by the current UI. */
                 $responseData['whatsapp'] = $whatsappResult;
                 $responseData['whatsapp_sent'] = (bool)($whatsappResult['success'] ?? false);
                 $responseData['whatsapp_mode'] = (string)($whatsappResult['mode'] ?? '');
+
+                /* Explicit fields for the two-message creation flow. */
+                $responseData['proforma_whatsapp'] = $whatsappResult;
+                $responseData['proforma_whatsapp_sent'] = (bool)($whatsappResult['success'] ?? false);
 
                 if (!empty($whatsappResult['manual_whatsapp'])) {
                     $responseData['manual_whatsapp'] = true;
@@ -4161,11 +4382,60 @@ try {
                 }
 
                 if ($whatsappResult['success'] ?? false) {
-                    $responseMessage .= ((string)($whatsappResult['mode'] ?? '') === 'manual')
-                        ? ' Manual WhatsApp mode opened.'
-                        : ' WhatsApp message sent successfully.';
+                    $responseMessage .= ' Proforma WhatsApp sent successfully.';
                 } else {
-                    $responseMessage .= ' WhatsApp failed: ' . (string)($whatsappResult['message'] ?? 'Unknown error.');
+                    $responseMessage .= ' Proforma WhatsApp failed: '
+                        . (string)($whatsappResult['message'] ?? 'Unknown error.');
+                }
+
+                $advanceWhatsappResults = [];
+                foreach ($createdAdvancePaymentIds as $createdPaymentId) {
+                    $paymentWaResult = pb_send_created_payment_whatsapp(
+                        $conn,
+                        $proformaId,
+                        (int)$createdPaymentId
+                    );
+                    $advanceWhatsappResults[] = $paymentWaResult;
+                }
+
+                $responseData['advance_payment_whatsapp'] = $advanceWhatsappResults;
+                $responseData['advance_payment_whatsapp_attempted'] = count($advanceWhatsappResults) > 0;
+
+                if ($advanceWhatsappResults) {
+                    $advanceWhatsappAllSent = true;
+                    foreach ($advanceWhatsappResults as $paymentWaResult) {
+                        if (empty($paymentWaResult['success'])) {
+                            $advanceWhatsappAllSent = false;
+                            break;
+                        }
+                    }
+
+                    $responseData['advance_payment_whatsapp_sent'] = $advanceWhatsappAllSent;
+
+                    if ($advanceWhatsappAllSent) {
+                        $responseMessage .= count($advanceWhatsappResults) > 1
+                            ? ' Advance payment WhatsApp messages sent successfully.'
+                            : ' Advance payment WhatsApp sent successfully.';
+                    } else {
+                        $failedMessages = [];
+                        foreach ($advanceWhatsappResults as $paymentWaResult) {
+                            if (empty($paymentWaResult['success'])) {
+                                $failedMessages[] = (string)(
+                                    $paymentWaResult['message']
+                                    ?? 'Unknown payment WhatsApp error.'
+                                );
+                            }
+                        }
+
+                        $responseData['advance_payment_whatsapp_error'] =
+                            implode(' | ', array_values(array_unique($failedMessages)));
+
+                        $responseMessage .= ' Advance payment WhatsApp failed: '
+                            . $responseData['advance_payment_whatsapp_error']
+                            . '. Use Retry WhatsApp in the Proforma Payment page.';
+                    }
+                } else {
+                    $responseData['advance_payment_whatsapp_sent'] = null;
                 }
             }
 

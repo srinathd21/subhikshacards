@@ -633,6 +633,13 @@ function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId)
     return $result;
 }
 
+/*
+ * Advance payments created together with a Proforma are now logged using
+ * related_module = 'Payments' and related_id = payment id by api/create_proforma.php.
+ * Therefore this existing status/retry UI automatically shows:
+ * - WhatsApp Sent when the automatic send succeeds
+ * - Retry WhatsApp when the automatic send fails or no log exists
+ */
 function pp_last_payment_whatsapp_status(mysqli $conn, int $paymentId): array
 {
     if ($paymentId <= 0 || !pp_table_exists($conn, 'whatsapp_logs')) {
