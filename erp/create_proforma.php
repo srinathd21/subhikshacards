@@ -798,8 +798,70 @@ if ($isEditMode && $editData) {
     }
 }
 
+/*
+ * Screen Print subtype compatibility for this Create Proforma flow.
+ */
+if (cpTableExists($conn, 'printing_types') && cpTableExists($conn, 'printing_sub_types')) {
+    try {
+        $screenPrintId = 0;
+        $stmt = $conn->prepare("
+            SELECT id
+            FROM printing_types
+            WHERE printing_key = 'screen_print'
+               OR LOWER(printing_name) = 'screen print'
+            ORDER BY id ASC
+            LIMIT 1
+        ");
+        $stmt->execute();
+        $screenRow = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        $screenPrintId = (int)($screenRow['id'] ?? 0);
+
+        if ($screenPrintId > 0) {
+            $stmt = $conn->prepare("
+                UPDATE printing_sub_types
+                SET sub_type_name = 'UV Print',
+                    is_active = 1,
+                    updated_at = NOW()
+                WHERE printing_type_id = ?
+                  AND sub_type_key = 'uv_products'
+            ");
+            $stmt->bind_param('i', $screenPrintId);
+            $stmt->execute();
+            $stmt->close();
+
+            $requestedSubTypes = [
+                ['single_colour_uv_print', 'Single Colour UV Print', 30],
+                ['double_colour_uv_print', 'Double Colour UV Print', 40],
+                ['special_works', 'Special Works', 50],
+            ];
+
+            $stmt = $conn->prepare("
+                INSERT INTO printing_sub_types
+                    (printing_type_id, sub_type_name, sub_type_key, is_active, sort_order, created_at, updated_at)
+                VALUES
+                    (?, ?, ?, 1, ?, NOW(), NOW())
+                ON DUPLICATE KEY UPDATE
+                    sub_type_name = VALUES(sub_type_name),
+                    is_active = 1,
+                    sort_order = VALUES(sort_order),
+                    updated_at = NOW()
+            ");
+
+            foreach ($requestedSubTypes as $subTypeRow) {
+                [$subTypeKey, $subTypeName, $subTypeSort] = $subTypeRow;
+                $stmt->bind_param('issi', $screenPrintId, $subTypeName, $subTypeKey, $subTypeSort);
+                $stmt->execute();
+            }
+            $stmt->close();
+        }
+    } catch (Throwable $e) {
+        // SQL fallback is included with this package.
+    }
+}
+
 $printingTypes = cpFetchAll($conn, "SELECT id, printing_name, printing_key, role_key, is_for_readymade, is_for_customized FROM printing_types WHERE is_active = 1 ORDER BY sort_order ASC, id ASC");
-$printingSubTypes = cpFetchAll($conn, "SELECT id, printing_type_id, sub_type_name FROM printing_sub_types WHERE is_active = 1 ORDER BY printing_type_id ASC, sort_order ASC, id ASC");
+$printingSubTypes = cpFetchAll($conn, "SELECT id, printing_type_id, sub_type_name, sub_type_key FROM printing_sub_types WHERE is_active = 1 ORDER BY printing_type_id ASC, sort_order ASC, id ASC");
 $readymadeSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order, is_final_step FROM workflow_steps WHERE order_type = 'readymade' AND is_active = 1 ORDER BY sort_order ASC");
 $customizedSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order, is_final_step FROM workflow_steps WHERE order_type = 'customized' AND is_active = 1 ORDER BY sort_order ASC");
 
@@ -1913,7 +1975,63 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         .module-page .page-head h1{font-size:20px;}
     }
 
-</style>
+
+    .custom-option-input { animation: cpFieldReveal .16s ease; }
+    @keyframes cpFieldReveal {
+        from { opacity:0; transform:translateY(-3px); }
+        to { opacity:1; transform:translateY(0); }
+    }
+    .special-works-box {
+        border:1px solid #f59e0b;
+        border-radius:12px;
+        padding:10px 12px;
+        background:rgba(245,158,11,.07);
+    }
+    .held-drafts-modal {
+        border-radius:18px;
+        overflow:hidden;
+        box-shadow:0 24px 70px rgba(15,23,42,.24);
+    }
+    .held-draft-info {
+        display:flex;
+        align-items:center;
+        border:1px solid var(--border-soft);
+        border-radius:12px;
+        padding:9px 11px;
+        font-size:11px;
+        font-weight:650;
+        color:var(--text-muted);
+        background:color-mix(in srgb,var(--card-bg) 95%,#2563eb 5%);
+    }
+    .held-draft-row {
+        display:grid;
+        grid-template-columns:minmax(0,1fr) auto;
+        gap:12px;
+        align-items:center;
+        border:1px solid var(--border-soft);
+        border-radius:14px;
+        padding:11px 12px;
+        margin-bottom:9px;
+        background:var(--card-bg);
+    }
+    .held-draft-name { font-size:13px; font-weight:800; color:var(--text-main); }
+    .held-draft-meta { margin-top:2px; font-size:10.5px; font-weight:550; color:var(--text-muted); }
+    .held-draft-actions { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+    .held-empty {
+        border:1px dashed var(--border-soft);
+        border-radius:14px;
+        padding:24px 14px;
+        text-align:center;
+        color:var(--text-muted);
+        font-size:12px;
+        font-weight:650;
+    }
+    @media(max-width:767.98px){
+        .held-draft-row{grid-template-columns:1fr}
+        .held-draft-actions{justify-content:flex-start}
+    }
+
+    </style>
 </head>
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -1931,8 +2049,22 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                 <?= $isEditMode ? 'Update existing proforma bill details without changing the order flow.' : 'Convert quotation to sales order, collect advance, create job card and initialize tracking.' ?>
                             </p>
                         </div>
-                        <a href="proforma_bills.php" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Back to
-                            Proforma Bills</a>
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <?php if (!$isEditMode): ?>
+                            <button type="button" class="btn btn-outline-primary rounded-pill px-3 fw-bold"
+                                id="heldDraftsBtn">
+                                <i data-lucide="archive-restore" class="me-1"></i> Held Drafts
+                                <span class="badge text-bg-primary ms-1" id="heldDraftCount">0</span>
+                            </button>
+                            <button type="button" class="btn btn-warning rounded-pill px-3 fw-bold"
+                                id="holdAndNewBtn">
+                                <i data-lucide="pause-circle" class="me-1"></i> Hold & New
+                            </button>
+                            <?php endif; ?>
+                            <a href="proforma_bills.php" class="btn btn-outline-secondary rounded-pill px-3 fw-bold">
+                                Back to Proforma Bills
+                            </a>
+                        </div>
                     </div>
                 </div>
 
@@ -2119,14 +2251,39 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                     </div>
 
                                     <div class="col-md-3 custom-only-field">
-                                        <label class="form-label fw-bold">Card Size</label>
-                                        <input type="text" name="size_text" id="size_text" class="form-control"
-                                            placeholder="Eg: 14 x 9.5">
+                                        <label class="form-label fw-bold">Card Size <span class="text-danger">*</span></label>
+                                        <select name="size_text" id="size_text" class="form-select">
+                                            <option value="">Select Card Size</option>
+                                            <option value="22 x 8.5">22 x 8.5</option>
+                                            <option value="19 x 7">19 x 7</option>
+                                            <option value="11 x 17">11 x 17</option>
+                                            <option value="14 x 9.5">14 x 9.5</option>
+                                            <option value="11 x 8.25">11 x 8.25</option>
+                                            <option value="custom">Custom</option>
+                                        </select>
+                                        <div class="custom-option-input hide-field mt-2" id="customCardSizeWrap">
+                                            <input type="text" name="custom_size_text" id="custom_size_text"
+                                                class="form-control" maxlength="100" placeholder="Enter custom card size">
+                                            <small class="text-muted-custom">Required only when Custom is selected.</small>
+                                        </div>
                                     </div>
                                     <div class="col-md-3 custom-only-field">
-                                        <label class="form-label fw-bold">GSM / Thickness</label>
-                                        <input type="text" name="gsm_thickness" id="gsm_thickness" class="form-control"
-                                            placeholder="Eg: 300 GSM">
+                                        <label class="form-label fw-bold">GSM / Thickness <span class="text-danger">*</span></label>
+                                        <select name="gsm_thickness" id="gsm_thickness" class="form-select">
+                                            <option value="">Select GSM</option>
+                                            <option value="80 GSM">80 GSM</option>
+                                            <option value="100 GSM">100 GSM</option>
+                                            <option value="170 GSM">170 GSM</option>
+                                            <option value="220 GSM">220 GSM</option>
+                                            <option value="250 GSM">250 GSM</option>
+                                            <option value="300 GSM">300 GSM</option>
+                                            <option value="custom">Custom</option>
+                                        </select>
+                                        <div class="custom-option-input hide-field mt-2" id="customGsmWrap">
+                                            <input type="text" name="custom_gsm_thickness" id="custom_gsm_thickness"
+                                                class="form-control" maxlength="100" placeholder="Enter custom GSM / thickness">
+                                            <small class="text-muted-custom">Required only when Custom is selected.</small>
+                                        </div>
                                     </div>
                                     <div
                                         class="col-md-3 custom-only-field lamination-required-wrap d-flex align-items-end">
@@ -2160,29 +2317,30 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                             <option value="">Select</option>
                                             <option value="regular">Regular Scoring</option>
                                             <option value="special">Special Scoring</option>
+                                            <option value="die_cutting">Die Cutting</option>
                                         </select>
                                     </div>
 
 
                                     <div class="col-12 customized-field hide-field">
                                         <label class="form-label fw-bold">Product Requirement / Description</label>
-                                        <textarea id="custom_item_description" class="form-control" rows="2"
+                                        <textarea name="custom_item_description" id="custom_item_description" class="form-control" rows="2"
                                             placeholder="Enter this product's customized production requirement"></textarea>
                                     </div>
 
                                     <div class="col-md-3 customized-field hide-field">
                                         <label class="form-label fw-bold">Plate / Additional Charge</label>
-                                        <input type="number" step="0.01" min="0" id="custom_item_plate_charge"
+                                        <input type="number" step="0.01" min="0" name="custom_item_plate_charge" id="custom_item_plate_charge"
                                             class="form-control" value="0" placeholder="This product only">
                                     </div>
                                     <div class="col-md-3 customized-field hide-field">
                                         <label class="form-label fw-bold">Printing Charge</label>
-                                        <input type="number" step="0.01" min="0" id="custom_item_printing_charge"
+                                        <input type="number" step="0.01" min="0" name="custom_item_printing_charge" id="custom_item_printing_charge"
                                             class="form-control" value="0" placeholder="This product only">
                                     </div>
                                     <div class="col-md-3 customized-field hide-field">
                                         <label class="form-label fw-bold">Package Charge</label>
-                                        <input type="number" step="0.01" min="0" id="custom_item_package_charge"
+                                        <input type="number" step="0.01" min="0" name="custom_item_package_charge" id="custom_item_package_charge"
                                             class="form-control" value="0" placeholder="This product only">
                                     </div>
                                     <div class="col-md-3 customized-field hide-field">
@@ -2297,6 +2455,20 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                             <option value="">Not Applicable</option>
                                         </select>
                                     </div>
+                                    <div class="col-12 readymade-field hide-field" id="specialWorksDescriptionWrap">
+                                        <div class="special-works-box">
+                                            <label class="form-label fw-bold">
+                                                Special Works Description <span class="text-danger">*</span>
+                                            </label>
+                                            <textarea name="special_works_description" id="special_works_description"
+                                                class="form-control" rows="2"
+                                                placeholder="Enter complete Special Works requirement"></textarea>
+                                            <small class="text-muted-custom">
+                                                Required when Screen Print Sub-Type is Special Works.
+                                            </small>
+                                        </div>
+                                    </div>
+
                                     <div class="col-md-4 readymade-field d-flex align-items-end">
                                         <div class="form-check form-switch mb-2">
                                             <input class="form-check-input" type="checkbox" name="finishing_required"
@@ -2564,6 +2736,35 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                     </div>
                 </form>
 
+                <?php if (!$isEditMode): ?>
+                <div class="modal fade" id="heldDraftsModal" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+                        <div class="modal-content border-0 held-drafts-modal">
+                            <div class="modal-header">
+                                <div>
+                                    <h5 class="modal-title fw-bold mb-1">Held Proforma Drafts</h5>
+                                    <p class="text-muted-custom mb-0">
+                                        Restore an unfinished customer entry, or delete it after it is no longer needed.
+                                    </p>
+                                </div>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="held-draft-info mb-3">
+                                    <i data-lucide="info" class="me-2"></i>
+                                    Held drafts are saved in this browser on this computer. They are not submitted to the database.
+                                </div>
+                                <div id="heldDraftList"></div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-outline-secondary rounded-pill px-4"
+                                    data-bs-dismiss="modal">Close</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
+
                 <div class="modal fade" id="advancePaymentModal" tabindex="-1" aria-hidden="true">
                     <div class="modal-dialog modal-dialog-centered cash-denom-dialog">
                         <div class="modal-content border-0 cash-denom-modal-content">
@@ -2758,7 +2959,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     }
 
     const isEditPage = !!editData;
-    const draftKey = 'subhiksha_create_proforma_draft_v4';
+    const draftKey = 'subhiksha_create_proforma_draft_v5';
+    const heldDraftsKey = 'subhiksha_create_proforma_held_drafts_v1';
+    const maxHeldDrafts = 10;
 
     function collectFormDraft() {
         const form = document.getElementById('proformaForm');
@@ -2819,6 +3022,16 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             });
         });
 
+        if (typeof proformaItems !== 'undefined') {
+            try {
+                const restoredItems = JSON.parse(String(data.items_json || '[]'));
+                if (Array.isArray(restoredItems)) {
+                    proformaItems = restoredItems;
+                    editingProductIndex = -1;
+                }
+            } catch (e) {}
+        }
+
         ['quotation_id', 'function_type_id', 'proforma_status_id', 'product_id', 'order_type', 'printing_type_id',
             'printing_sub_type_id', 'lamination_type', 'printing_side', 'screening_type', 'payment_mode'
         ].forEach(refreshSelect);
@@ -2826,8 +3039,166 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         toggleFunctionFields();
         toggleOrderType(false);
         toggleLamination();
+        syncCustomOptionFields();
+        toggleSpecialWorksDescription();
+        renderProformaItems();
         calculate();
         renderWorkflowSteps();
+    }
+
+    function getHeldDrafts() {
+        try {
+            const rows = JSON.parse(localStorage.getItem(heldDraftsKey) || '[]');
+            return Array.isArray(rows) ? rows : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function setHeldDrafts(rows) {
+        try {
+            localStorage.setItem(heldDraftsKey, JSON.stringify(Array.isArray(rows) ? rows.slice(0, maxHeldDrafts) : []));
+        } catch (e) {}
+        updateHeldDraftCount();
+    }
+
+    function updateHeldDraftCount() {
+        const badge = document.getElementById('heldDraftCount');
+        if (badge) badge.textContent = String(getHeldDrafts().length);
+    }
+
+    function heldDraftFunctionName() {
+        return String(document.getElementById('function_type_id')?.selectedOptions?.[0]?.textContent || '').trim();
+    }
+
+    function holdCurrentProformaAndStartNew() {
+        if (isEditPage) return;
+
+        if (typeof syncItemsJson === 'function') syncItemsJson();
+
+        const data = collectFormDraft();
+        const customerName = String(getValue('customer_name') || '').trim();
+        const mobile = String(getValue('mobile') || '').trim();
+        const quotationId = String(getValue('quotation_id') || '').trim();
+
+        let itemCount = 0;
+        try {
+            const rows = JSON.parse(String(data.items_json || '[]'));
+            itemCount = Array.isArray(rows) ? rows.length : 0;
+        } catch (e) {}
+
+        const hasMeaningfulData =
+            customerName !== '' ||
+            mobile !== '' ||
+            quotationId !== '' ||
+            itemCount > 0 ||
+            String(getValue('product_id') || '').trim() !== '' ||
+            String(getValue('function_type_id') || '').trim() !== '';
+
+        if (!hasMeaningfulData) {
+            showActionToast('Enter customer or order details before using Hold & New.', 'warning', 'Nothing to Hold');
+            return;
+        }
+
+        const rows = getHeldDrafts();
+        rows.unshift({
+            id: 'held_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+            saved_at: new Date().toISOString(),
+            customer_name: customerName || 'Unnamed Customer',
+            mobile: mobile,
+            function_name: heldDraftFunctionName(),
+            item_count: itemCount,
+            form: data
+        });
+
+        setHeldDrafts(rows);
+        clearFormDraft();
+        showActionToast('Current entry is held. Opening a clean form for the next customer.', 'success', 'Draft Held');
+
+        setTimeout(() => {
+            window.location.href = 'create_proforma.php';
+        }, 500);
+    }
+
+    function formatHeldDraftTime(value) {
+        const dt = value ? new Date(value) : null;
+        if (!dt || Number.isNaN(dt.getTime())) return '-';
+        return dt.toLocaleString('en-IN', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    }
+
+    function renderHeldDrafts() {
+        const wrap = document.getElementById('heldDraftList');
+        if (!wrap) return;
+
+        const rows = getHeldDrafts();
+        updateHeldDraftCount();
+
+        if (!rows.length) {
+            wrap.innerHTML = '<div class="held-empty">No held Proforma drafts found.</div>';
+            return;
+        }
+
+        const esc = value => String(value ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#039;');
+
+        wrap.innerHTML = rows.map((row, index) => {
+            const meta = [
+                row.mobile ? 'Mobile: ' + esc(row.mobile) : '',
+                row.function_name ? esc(row.function_name) : '',
+                (parseInt(row.item_count || 0, 10) || 0) + ' product(s)',
+                formatHeldDraftTime(row.saved_at)
+            ].filter(Boolean).join(' • ');
+
+            return `
+                <div class="held-draft-row">
+                    <div>
+                        <div class="held-draft-name">${esc(row.customer_name || 'Unnamed Customer')}</div>
+                        <div class="held-draft-meta">${meta}</div>
+                    </div>
+                    <div class="held-draft-actions">
+                        <button type="button" class="btn btn-primary btn-sm rounded-pill px-3"
+                            data-restore-held="${index}">Restore</button>
+                        <button type="button" class="btn btn-outline-danger btn-sm rounded-pill px-3"
+                            data-delete-held="${index}">Delete</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function restoreHeldDraft(index) {
+        const rows = getHeldDrafts();
+        const row = rows[index];
+        if (!row || !row.form) return;
+
+        try {
+            localStorage.setItem(draftKey, JSON.stringify(row.form));
+        } catch (e) {
+            showActionToast('Unable to restore this held draft.', 'danger', 'Restore Failed');
+            return;
+        }
+
+        rows.splice(index, 1);
+        setHeldDrafts(rows);
+        window.location.href = 'create_proforma.php?restored=1';
+    }
+
+    function deleteHeldDraft(index) {
+        const rows = getHeldDrafts();
+        if (!rows[index]) return;
+        rows.splice(index, 1);
+        setHeldDrafts(rows);
+        renderHeldDrafts();
     }
 
     function showToastOnLoad() {
@@ -3133,6 +3504,116 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         }
     }
 
+    const cardSizeOptions = ['22 x 8.5', '19 x 7', '11 x 17', '14 x 9.5', '11 x 8.25'];
+    const gsmOptions = ['80 GSM', '100 GSM', '170 GSM', '220 GSM', '250 GSM', '300 GSM'];
+
+    function normalizeCardSize(value) {
+        return String(value || '').trim().toLowerCase().replace(/\s*x\s*/g, ' x ').replace(/\s+/g, ' ');
+    }
+
+    function normalizeGsm(value) {
+        const raw = String(value || '').trim();
+        if (!raw) return '';
+        const numberOnly = raw.replace(/gsm/ig, '').trim();
+        return /^\d+(?:\.\d+)?$/.test(numberOnly) ? numberOnly + ' GSM' : raw;
+    }
+
+    function syncCustomOptionFields() {
+        const isCustomized = (getValue('order_type') || 'readymade') === 'customized';
+
+        const sizeSelect = document.getElementById('size_text');
+        const sizeWrap = document.getElementById('customCardSizeWrap');
+        const sizeCustom = document.getElementById('custom_size_text');
+        const sizeIsCustom = isCustomized && sizeSelect?.value === 'custom';
+        sizeWrap?.classList.toggle('hide-field', !sizeIsCustom);
+        if (sizeCustom) {
+            sizeCustom.disabled = !sizeIsCustom;
+            sizeCustom.required = sizeIsCustom;
+        }
+
+        const gsmSelect = document.getElementById('gsm_thickness');
+        const gsmWrap = document.getElementById('customGsmWrap');
+        const gsmCustom = document.getElementById('custom_gsm_thickness');
+        const gsmIsCustom = isCustomized && gsmSelect?.value === 'custom';
+        gsmWrap?.classList.toggle('hide-field', !gsmIsCustom);
+        if (gsmCustom) {
+            gsmCustom.disabled = !gsmIsCustom;
+            gsmCustom.required = gsmIsCustom;
+        }
+    }
+
+    function getResolvedCardSize() {
+        const selected = String(getValue('size_text') || '').trim();
+        return selected === 'custom' ? String(getValue('custom_size_text') || '').trim() : selected;
+    }
+
+    function getResolvedGsm() {
+        const selected = String(getValue('gsm_thickness') || '').trim();
+        return selected === 'custom' ? String(getValue('custom_gsm_thickness') || '').trim() : selected;
+    }
+
+    function setResolvedCardSize(value) {
+        const raw = String(value || '').trim();
+        const normalized = normalizeCardSize(raw);
+        const match = cardSizeOptions.find(option => normalizeCardSize(option) === normalized);
+
+        if (!raw) {
+            setValue('size_text', '');
+            setValue('custom_size_text', '');
+        } else if (match) {
+            setValue('size_text', match);
+            setValue('custom_size_text', '');
+        } else {
+            setValue('size_text', 'custom');
+            setValue('custom_size_text', raw);
+        }
+
+        syncCustomOptionFields();
+    }
+
+    function setResolvedGsm(value) {
+        const raw = String(value || '').trim();
+        const normalized = normalizeGsm(raw).toLowerCase();
+        const match = gsmOptions.find(option => normalizeGsm(option).toLowerCase() === normalized);
+
+        if (!raw) {
+            setValue('gsm_thickness', '');
+            setValue('custom_gsm_thickness', '');
+        } else if (match) {
+            setValue('gsm_thickness', match);
+            setValue('custom_gsm_thickness', '');
+        } else {
+            setValue('gsm_thickness', 'custom');
+            setValue('custom_gsm_thickness', raw);
+        }
+
+        syncCustomOptionFields();
+    }
+
+    function selectedPrintingSubTypeKey() {
+        const selectedId = String(getValue('printing_sub_type_id') || '').trim();
+        if (!selectedId) return '';
+        const row = printingSubTypes.find(item => String(item.id) === selectedId);
+        return String(row?.sub_type_key || '').trim().toLowerCase();
+    }
+
+    function isSpecialWorksSelected() {
+        return (getValue('order_type') || 'readymade') === 'readymade' &&
+            selectedPrintingSubTypeKey() === 'special_works';
+    }
+
+    function toggleSpecialWorksDescription() {
+        const wrap = document.getElementById('specialWorksDescriptionWrap');
+        const input = document.getElementById('special_works_description');
+        const show = isSpecialWorksSelected();
+
+        wrap?.classList.toggle('hide-field', !show);
+        if (input) {
+            input.disabled = !show;
+            input.required = show;
+        }
+    }
+
     function isMulticolorOffsetOption(opt) {
         if (!opt || !opt.value) return false;
         const label = (opt.textContent || '').toLowerCase();
@@ -3155,8 +3636,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
 
         const size = document.getElementById('size_text');
         const gsm = document.getElementById('gsm_thickness');
-        if (size && (forceDefaults || !size.value)) size.value = '22x8.5';
-        if (gsm && (forceDefaults || !gsm.value)) gsm.value = '300';
+        if (size && (forceDefaults || !size.value)) setResolvedCardSize('22 x 8.5');
+        if (gsm && (forceDefaults || !gsm.value)) setResolvedGsm('300 GSM');
+        syncCustomOptionFields();
 
         const multiId = findMulticolorOffsetPrintingTypeId();
         const printingType = document.getElementById('printing_type_id');
@@ -3215,7 +3697,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         syncCurrentProductRequiredState();
         updatePrintingTypeOptions();
         applyCustomizedDefaults(forceDefaults);
+        syncCustomOptionFields();
         updateScreenSubTypeVisibility();
+        toggleSpecialWorksDescription();
         toggleLamination();
 
         ['extra_card_charge', 'packing_charge', 'printing_charge'].forEach(id => {
@@ -3315,6 +3799,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         if (current) sub.value = current;
         updateScreenSubTypeVisibility();
         refreshSelect('printing_sub_type_id');
+        toggleSpecialWorksDescription();
     }
 
     function toggleLamination() {
@@ -3628,8 +4113,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         setValue('printing_type_id', editData.item_printing_type_id || '');
         updatePrintingTypeOptions();
         setValue('printing_sub_type_id', editData.item_printing_sub_type_id || '');
-        setValue('size_text', editData.item_size_text || '');
-        setValue('gsm_thickness', editData.item_gsm_thickness || '');
+        setResolvedCardSize(editData.item_size_text || '');
+        setResolvedGsm(editData.item_gsm_thickness || '');
         setValue('lamination_type', editData.item_lamination_type || '');
         setValue('printing_side', editData.item_printing_side || '');
         setValue('screening_type', editData.item_screening_type || '');
@@ -3858,8 +4343,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             product_name: productName,
             printing_type_id: getValue('printing_type_id'),
             printing_sub_type_id: getValue('printing_sub_type_id'),
-            size_text: getValue('size_text'),
-            gsm_thickness: getValue('gsm_thickness'),
+            size_text: getResolvedCardSize(),
+            gsm_thickness: getResolvedGsm(),
             printing_side: getValue('printing_side'),
             lamination_type: laminationRequired ? (getValue('lamination_type') || 'none') : 'none',
             print_type: 'first_print',
@@ -4199,8 +4684,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             item.printing_type_id = String(multiId || getValue('printing_type_id') || '');
             item.printing_sub_type_id = '';
             item.finishing_required = 0;
-            item.size_text = String(getValue('size_text') || '').trim();
-            item.gsm_thickness = String(getValue('gsm_thickness') || '').trim();
+            item.size_text = String(getResolvedCardSize() || '').trim();
+            item.gsm_thickness = String(getResolvedGsm() || '').trim();
             item.lamination_required = document.getElementById('lamination_required')?.checked ? 1 : 0;
             item.lamination_type = item.lamination_required ? String(getValue('lamination_type') || '').trim() : '';
             item.printing_side = String(getValue('printing_side') || '').trim();
@@ -4266,8 +4751,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
 
         if ((getValue('order_type') || 'readymade') === 'customized') {
             setValue('custom_item_description', '');
-            setValue('size_text', '');
-            setValue('gsm_thickness', '');
+            setResolvedCardSize('22 x 8.5');
+            setResolvedGsm('300 GSM');
             setValue('printing_side', '');
             setValue('screening_type', '');
 
@@ -4351,8 +4836,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                     item.size_text ? 'Size: ' + item.size_text : '',
                     item.gsm_thickness ? 'GSM: ' + item.gsm_thickness : '',
                     item.printing_side ? (item.printing_side === 'double' ? 'Double Side' : 'Single Side') : '',
-                    item.screening_type ? (item.screening_type === 'special' ? 'Special Scoring' :
-                        'Regular Scoring') : '',
+                    item.screening_type ? (
+                        item.screening_type === 'special' ? 'Special Scoring' :
+                        (item.screening_type === 'die_cutting' ? 'Die Cutting' : 'Regular Scoring')
+                    ) : '',
                     item.lamination_required ?
                     'Lamination: ' + (item.lamination_type || '-') :
                     'No Lamination'
@@ -4468,8 +4955,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
 
         if ((getValue('order_type') || 'readymade') === 'customized') {
             setValue('custom_item_description', item.description || '');
-            setValue('size_text', item.size_text || '');
-            setValue('gsm_thickness', item.gsm_thickness || '');
+            setResolvedCardSize(item.size_text || '');
+            setResolvedGsm(item.gsm_thickness || '');
             setValue('printing_side', item.printing_side || '');
             setValue('screening_type', item.screening_type || '');
 
@@ -4557,8 +5044,19 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         'custom_item_package_charge'
     ].forEach(id => document.getElementById(id)?.addEventListener(
         'input', calculate));
-    ['qty', 'size_text', 'gsm_thickness'].forEach(id => document.getElementById(id)?.addEventListener('input',
+    ['qty', 'custom_size_text', 'custom_gsm_thickness'].forEach(id => document.getElementById(id)?.addEventListener('input',
         schedulePriceLookup));
+
+    ['size_text', 'gsm_thickness'].forEach(id => document.getElementById(id)?.addEventListener('change', () => {
+        syncCustomOptionFields();
+        schedulePriceLookup();
+        saveFormDraft();
+    }));
+
+    document.getElementById('printing_sub_type_id')?.addEventListener('change', () => {
+        toggleSpecialWorksDescription();
+        saveFormDraft();
+    });
     ['printing_type_id', 'printing_sub_type_id', 'printing_side', 'lamination_type'].forEach(id => document
         .getElementById(id)?.addEventListener('change', schedulePriceLookup));
     document.getElementById('quotation_id')?.addEventListener('change', loadQuotation);
@@ -4609,6 +5107,29 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         clearPricingSelection('Select product, printing type and quantity to fetch automatic pricing.');
         calculate();
     });
+    document.getElementById('holdAndNewBtn')?.addEventListener('click', holdCurrentProformaAndStartNew);
+
+    document.getElementById('heldDraftsBtn')?.addEventListener('click', function() {
+        renderHeldDrafts();
+        const modalEl = document.getElementById('heldDraftsModal');
+        if (modalEl && window.bootstrap) {
+            bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        }
+    });
+
+    document.getElementById('heldDraftList')?.addEventListener('click', function(event) {
+        const restoreBtn = event.target.closest('[data-restore-held]');
+        if (restoreBtn) {
+            restoreHeldDraft(parseInt(restoreBtn.dataset.restoreHeld || '-1', 10));
+            return;
+        }
+
+        const deleteBtn = event.target.closest('[data-delete-held]');
+        if (deleteBtn) {
+            deleteHeldDraft(parseInt(deleteBtn.dataset.deleteHeld || '-1', 10));
+        }
+    });
+
     document.getElementById('proformaForm')?.addEventListener('reset', () => {
         clearFormDraft();
         setTimeout(() => {
@@ -4642,6 +5163,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         refreshSelect('printing_sub_type_id');
     }
     toggleLamination();
+    syncCustomOptionFields();
+    toggleSpecialWorksDescription();
+    updateHeldDraftCount();
     updateSelectedProductStockInfo();
     renderProformaItems();
     calculate();
@@ -4941,6 +5465,43 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             });
             setTimeout(() => target?.focus(), 250);
             return;
+        }
+
+        if (submitOrderType === 'customized') {
+            syncCustomOptionFields();
+
+            if (getValue('size_text') === 'custom' && !String(getValue('custom_size_text') || '').trim()) {
+                showActionToast('Please enter the Custom Card Size.', 'danger', 'Card Size');
+                document.getElementById('custom_size_text')?.focus();
+                return;
+            }
+
+            if (getValue('gsm_thickness') === 'custom' && !String(getValue('custom_gsm_thickness') || '').trim()) {
+                showActionToast('Please enter the Custom GSM / Thickness.', 'danger', 'GSM / Thickness');
+                document.getElementById('custom_gsm_thickness')?.focus();
+                return;
+            }
+        }
+
+        if (isSpecialWorksSelected()) {
+            const specialWorksDescription = String(getValue('special_works_description') || '').trim();
+
+            if (!specialWorksDescription) {
+                showActionToast('Please enter the Special Works Description.', 'danger', 'Special Works');
+                document.getElementById('special_works_description')?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center'
+                });
+                setTimeout(() => document.getElementById('special_works_description')?.focus(), 250);
+                return;
+            }
+
+            const commonDescription = String(getValue('description') || '').trim();
+            if (!commonDescription) {
+                setValue('description', specialWorksDescription);
+            } else if (!commonDescription.includes(specialWorksDescription)) {
+                setValue('description', commonDescription + '\nSpecial Works: ' + specialWorksDescription);
+            }
         }
 
         if (['readymade', 'printing_only'].includes(getValue('order_type') || 'readymade')) {
