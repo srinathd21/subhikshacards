@@ -3380,6 +3380,242 @@ if ($message !== '' && $toastTitle === 'Info') {
             border-radius: 18px;
         }
     }
+
+    /* Compact Job Card View UI */
+    .module-page {
+        width: 100%;
+        max-width: 1180px;
+        margin-left: auto;
+        margin-right: auto;
+    }
+
+    .module-page .page-head {
+        padding: 16px 18px;
+        margin-bottom: 12px;
+        border-radius: 16px;
+    }
+
+    .module-page .page-head h1 {
+        font-size: 24px;
+        line-height: 1.15;
+        font-weight: 800;
+    }
+
+    .module-page .page-head p {
+        font-size: 12px;
+        font-weight: 500;
+    }
+
+    .module-page .page-head .btn {
+        font-size: 12px;
+        font-weight: 700 !important;
+        padding: 7px 14px !important;
+    }
+
+    .module-card {
+        padding: 16px;
+        border-radius: 16px;
+    }
+
+    .module-title {
+        font-size: 15px;
+        font-weight: 800;
+    }
+
+    .amount-card {
+        padding: 9px 12px;
+        border-radius: 12px;
+        min-height: 62px;
+    }
+
+    .amount-card small {
+        font-size: 10px;
+        font-weight: 700;
+    }
+
+    .amount-card strong {
+        margin-top: 2px;
+        font-size: 16px;
+        font-weight: 800;
+    }
+
+    .info-card {
+        border-radius: 14px;
+        padding: 11px 12px;
+        min-height: 72px;
+    }
+
+    .info-card small {
+        font-size: 9.5px;
+        font-weight: 700;
+        margin-bottom: 3px;
+    }
+
+    .info-card strong,
+    .info-card span {
+        font-size: 13px;
+        line-height: 1.35;
+        font-weight: 750;
+    }
+
+    .order-badge,
+    .status-pill,
+    .stage-lock-note {
+        font-size: 10px;
+        font-weight: 700;
+        padding: 5px 9px;
+    }
+
+    .job-items-card {
+        border-radius: 14px;
+    }
+
+    .job-items-head {
+        padding: 11px 13px;
+        gap: 10px;
+    }
+
+    .job-items-table {
+        min-width: 700px;
+    }
+
+    .job-items-table th,
+    .job-items-table td {
+        padding: 8px 10px;
+    }
+
+    .job-items-table th {
+        font-size: 9.5px;
+        font-weight: 750;
+    }
+
+    .job-items-table td {
+        font-size: 11px;
+    }
+
+    .job-items-summary span {
+        padding: 4px 8px;
+        font-size: 10px;
+        font-weight: 700;
+    }
+
+    .timeline {
+        gap: 9px;
+    }
+
+    .timeline-item {
+        border-radius: 14px;
+        padding: 10px;
+    }
+
+    .timeline-title {
+        font-size: 13px;
+        font-weight: 800;
+    }
+
+    .timeline-meta {
+        font-size: 10.5px;
+        font-weight: 600;
+    }
+
+    .timeline-item .info-card {
+        padding: 8px 10px;
+        border-radius: 10px;
+        min-height: auto;
+    }
+
+    .timeline-item .info-card small {
+        font-size: 9px;
+    }
+
+    .timeline-item .info-card strong,
+    .timeline-item .info-card span {
+        font-size: 11.5px;
+        font-weight: 700;
+    }
+
+    .progress-wrap {
+        height: 8px;
+    }
+
+    .stage-update-form.compact-update-form {
+        padding: 10px !important;
+        border-radius: 12px;
+    }
+
+    .compact-update-form .form-label,
+    .module-page .form-label {
+        font-size: 11px;
+        font-weight: 700;
+        margin-bottom: 4px;
+    }
+
+    .module-page .form-control,
+    .module-page .form-select {
+        min-height: 34px;
+        padding: 6px 9px;
+        font-size: 12px;
+        border-radius: 9px;
+    }
+
+    .module-page .btn {
+        font-size: 11px;
+        font-weight: 700;
+        padding: 6px 10px;
+    }
+
+    .module-page .btn-sm {
+        font-size: 10px;
+        padding: 5px 8px;
+    }
+
+    .approval-box {
+        border-radius: 12px;
+        padding: 10px 12px;
+    }
+
+    .approval-mini {
+        border-radius: 9px;
+        padding: 6px 8px;
+    }
+
+    .approval-mini strong,
+    .approval-mini span {
+        font-size: 11px;
+        font-weight: 700;
+    }
+
+    @media (max-width: 1199.98px) {
+        .module-page {
+            max-width: 100%;
+        }
+    }
+
+    @media (max-width: 767.98px) {
+        .module-page {
+            max-width: 100%;
+        }
+
+        .module-page .page-head {
+            padding: 14px;
+        }
+
+        .module-page .page-head h1 {
+            font-size: 21px;
+        }
+
+        .module-card {
+            padding: 13px;
+        }
+
+        .info-card {
+            min-height: auto;
+        }
+
+        .amount-card {
+            min-height: auto;
+        }
+    }
     </style>
 </head>
 
@@ -3579,12 +3815,14 @@ if ($message !== '' && $toastTitle === 'Info') {
                             <div>
                                 <h2 class="module-title mb-1">Products in this Job Card</h2>
                                 <p class="text-muted-custom mb-0">
-                                    All products created under the same Job Card ID. Workflow/status remains common for the complete Job Card.
+                                    All products created under the same Job Card ID. Workflow/status remains common for
+                                    the complete Job Card.
                                 </p>
                             </div>
 
                             <div class="job-items-summary">
-                                <span><?= number_format($jobItemCount) ?> Product<?= $jobItemCount === 1 ? '' : 's' ?></span>
+                                <span><?= number_format($jobItemCount) ?>
+                                    Product<?= $jobItemCount === 1 ? '' : 's' ?></span>
                                 <span>Total Qty: <?= number_format($jobItemTotalQty, 2) ?></span>
                                 <span>Product Total: <?= e(jcvMoney($jobItemProductTotal)) ?></span>
                             </div>

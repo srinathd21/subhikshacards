@@ -175,7 +175,12 @@ function pp_save_cash_denominations(mysqli $conn, int $paymentId, array $payload
 {
     if ($paymentId <= 0) return;
 
-    pp_ensure_cash_denomination_table($conn);
+    /* Avoid DDL inside an active payment transaction when the table is already ready. */
+    if (!pp_table_exists($conn, 'payment_cash_denominations')
+        || !pp_col_exists($conn, 'payment_cash_denominations', 'amount')
+        || !pp_col_exists($conn, 'payment_cash_denominations', 'created_by')) {
+        pp_ensure_cash_denomination_table($conn);
+    }
 
     $stmt = $conn->prepare("DELETE FROM payment_cash_denominations WHERE payment_id = ?");
     $stmt->bind_param('i', $paymentId);
@@ -476,6 +481,32 @@ function pp_payment_whatsapp_api_ready(): bool
     return function_exists('subhiksha_send_whatsapp') || function_exists('subhiksha_send_template_whatsapp');
 }
 
+
+function pp_split_payment_meta(string $remarks): array
+{
+    $remarks = trim($remarks);
+    if ($remarks === '') return [];
+
+    if (!preg_match('/\\[SPLIT_META:GROUP=([A-Za-z0-9_-]+);PART=([12]);CASH=([0-9.]+);UPI=([0-9.]+);RETURN=([0-9.]+)\\]/', $remarks, $m)) {
+        return [];
+    }
+
+    return [
+        'group' => (string)$m[1],
+        'part' => (int)$m[2],
+        'cash' => (float)$m[3],
+        'upi' => (float)$m[4],
+        'return' => (float)$m[5],
+    ];
+}
+
+function pp_clean_payment_remarks($remarks): string
+{
+    $remarks = (string)$remarks;
+    $remarks = preg_replace('/\\s*\\[SPLIT_META:[^\\]]+\\]\\s*/', ' ', $remarks);
+    return trim(preg_replace('/\\s{2,}/', ' ', (string)$remarks));
+}
+
 function pp_payment_whatsapp_row(mysqli $conn, int $proformaId, int $paymentId): ?array
 {
     if ($proformaId <= 0 || $paymentId <= 0) {
@@ -593,12 +624,21 @@ function pp_send_payment_whatsapp(mysqli $conn, int $proformaId, int $paymentId)
         ];
     }
 
+    $splitMeta = pp_split_payment_meta((string)($row['remarks'] ?? ''));
+    $displayPaidAmount = (float)($row['amount'] ?? 0);
+    $displayPaymentMode = strtoupper((string)($row['payment_mode'] ?? '-'));
+
+    if ($splitMeta && (int)($splitMeta['part'] ?? 0) === 2) {
+        $displayPaidAmount = round((float)$splitMeta['cash'] + (float)$splitMeta['upi'], 2);
+        $displayPaymentMode = 'CASH + UPI';
+    }
+
     $variables = [
         'customer_name' => trim((string)($row['customer_name'] ?? 'Customer')) ?: 'Customer',
         'proforma_no' => trim((string)($row['proforma_no'] ?? '-')) ?: '-',
         'payment_no' => trim((string)($row['payment_no'] ?? '-')) ?: '-',
-        'paid_amount' => pp_payment_whatsapp_money($row['amount'] ?? 0),
-        'payment_mode' => strtoupper((string)($row['payment_mode'] ?? '-')),
+        'paid_amount' => pp_payment_whatsapp_money($displayPaidAmount),
+        'payment_mode' => $displayPaymentMode,
         'balance_amount' => pp_payment_whatsapp_money($balanceAfterPayment),
         'final_amount' => pp_payment_whatsapp_money($row['final_amount'] ?? 0),
         'total_paid' => pp_payment_whatsapp_money($totalPaidAfterPayment),
@@ -731,24 +771,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
         }
 
         if ($action === 'collect_payment') {
-            $tenderedAmount = round((float)str_replace(',', '', (string)($_POST['amount'] ?? '0')), 2);
-            $paymentMode = trim((string)($_POST['payment_mode'] ?? 'cash'));
+            $useCash = !empty($_POST['use_cash']);
+            $useUpi = !empty($_POST['use_upi']);
+            $cashTendered = round((float)str_replace(',', '', (string)($_POST['cash_amount'] ?? '0')), 2);
+            $upiAmount = round((float)str_replace(',', '', (string)($_POST['upi_amount'] ?? '0')), 2);
             $paymentDate = trim((string)($_POST['payment_date'] ?? date('Y-m-d')));
-            $referenceNo = trim((string)($_POST['reference_no'] ?? ''));
+            $upiReference = trim((string)($_POST['upi_reference'] ?? ''));
             $remarks = trim((string)($_POST['remarks'] ?? ''));
 
-            $allowedModes = ['cash', 'upi'];
-            if (!in_array($paymentMode, $allowedModes, true)) $paymentMode = 'cash';
-            if ($tenderedAmount <= 0) throw new RuntimeException('Amount received must be greater than zero.');
-            if ($paymentDate === '') $paymentDate = date('Y-m-d');
-
-            $cashDenominationPayload = null;
-            if ($paymentMode === 'cash') {
-                $cashDenominationPayload = pp_cash_denomination_payload();
-                if (abs((float)$cashDenominationPayload['total'] - $tenderedAmount) > 0.009) {
-                    throw new RuntimeException('Cash denomination total must match the cash received. Denomination total: ' . pp_money($cashDenominationPayload['total']) . ', Cash received: ' . pp_money($tenderedAmount));
-                }
+            if (!$useCash && !$useUpi) {
+                throw new RuntimeException('Select Cash, UPI or both.');
             }
+            if ($useCash && $cashTendered <= 0) {
+                throw new RuntimeException('Cash Received must be greater than zero.');
+            }
+            if ($useUpi && $upiAmount <= 0) {
+                throw new RuntimeException('UPI Amount must be greater than zero.');
+            }
+            if ($paymentDate === '') $paymentDate = date('Y-m-d');
 
             $stmt = $conn->prepare("SELECT id, customer_id, final_amount, advance_amount, balance_amount FROM proforma_bills WHERE id = ? LIMIT 1");
             $stmt->bind_param('i', $id);
@@ -758,57 +798,178 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
 
             if (!$bill) throw new RuntimeException('Proforma bill not found.');
 
-            /*
-             * Recalculate before collecting so the advance payment already recorded
-             * in payment history is always deducted from the current balance.
-             */
+            /* Always calculate against the current active payment ledger. */
             $currentTotals = pp_payment_totals_from_db($conn, $id);
-            $balance = (float)$currentTotals['balance_amount'];
-            if ($balance <= 0) throw new RuntimeException('This proforma bill is already fully paid.');
+            $balance = round((float)$currentTotals['balance_amount'], 2);
+            if ($balance <= 0.009) {
+                throw new RuntimeException('This proforma bill is already fully paid.');
+            }
+
+            if ($useUpi && $upiAmount > $balance + 0.009) {
+                throw new RuntimeException('UPI Amount cannot exceed the current balance. Excess/Return is allowed only through Cash.');
+            }
 
             /*
-             * The customer may hand over more than the balance due. Only the
-             * balance is posted as payment; the excess is returned as change.
+             * Split rule (same behavior as Quick Sale):
+             * - UPI is applied first and can never exceed the balance.
+             * - Cash fills the remaining amount.
+             * - Any cash above the remaining balance is returned to the customer.
+             * - Partial payment is still allowed on Proforma payments.
              */
-            $amount = round(min($tenderedAmount, $balance), 2);
-            $returnAmount = round(max(0, $tenderedAmount - $amount), 2);
+            $upiApplied = $useUpi ? round(min($upiAmount, $balance), 2) : 0.0;
+            $remainingAfterUpi = round(max(0, $balance - $upiApplied), 2);
+            $cashApplied = $useCash ? round(min($cashTendered, $remainingAfterUpi), 2) : 0.0;
+            $returnAmount = $useCash ? round(max(0, $cashTendered - $cashApplied), 2) : 0.0;
+            $totalApplied = round($cashApplied + $upiApplied, 2);
 
-            $paymentNo = pp_next_no($conn);
-            $paymentType = ($amount >= $balance) ? 'full' : 'balance';
+            if ($totalApplied <= 0.009) {
+                throw new RuntimeException('Payment amount must be greater than zero.');
+            }
+            if ($useCash && $useUpi && $cashApplied <= 0.009) {
+                throw new RuntimeException('UPI already covers the balance. Unselect Cash or reduce UPI Amount.');
+            }
+
+            $cashDenominationPayload = null;
+            if ($useCash) {
+                $cashDenominationPayload = pp_cash_denomination_payload();
+                if (abs((float)$cashDenominationPayload['total'] - $cashTendered) > 0.009) {
+                    throw new RuntimeException(
+                        'Cash denomination total must match Cash Received. Denomination total: ' .
+                        pp_money($cashDenominationPayload['total']) . ', Cash received: ' . pp_money($cashTendered)
+                    );
+                }
+            }
+
+            if ($useCash) {
+                /* Prepare denomination storage before the DB transaction to avoid DDL auto-commit. */
+                pp_ensure_cash_denomination_table($conn);
+            }
+
             $customerId = !empty($bill['customer_id']) ? (int)$bill['customer_id'] : null;
             $userId = (int)($_SESSION['user_id'] ?? 0);
-
-            if ($returnAmount > 0.009) {
-                $returnAudit = 'Customer paid ' . pp_money($tenderedAmount)
-                    . '; Applied ' . pp_money($amount)
-                    . '; Return ' . pp_money($returnAmount);
-                $remarks = trim($remarks) !== ''
-                    ? trim($remarks) . ' | ' . $returnAudit
-                    : $returnAudit;
+            $isSplit = $useCash && $useUpi;
+            $splitGroup = '';
+            if ($isSplit) {
+                try {
+                    $splitGroup = date('YmdHis') . '_' . bin2hex(random_bytes(4));
+                } catch (Throwable $e) {
+                    $splitGroup = str_replace('.', '', uniqid('sp_', true));
+                }
             }
 
-            if (pp_payment_return_columns_ready($conn)) {
-                $stmt = $conn->prepare("INSERT INTO payments (customer_id, proforma_bill_id, payment_no, payment_type, payment_mode, amount, tendered_amount, return_amount, payment_date, reference_no, remarks, received_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
-                $stmt->bind_param('iisssdddsssi', $customerId, $id, $paymentNo, $paymentType, $paymentMode, $amount, $tenderedAmount, $returnAmount, $paymentDate, $referenceNo, $remarks, $userId);
-            } else {
-                $stmt = $conn->prepare("INSERT INTO payments (customer_id, proforma_bill_id, payment_no, payment_type, payment_mode, amount, payment_date, reference_no, remarks, received_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
-                $stmt->bind_param('iisssdsssi', $customerId, $id, $paymentNo, $paymentType, $paymentMode, $amount, $paymentDate, $referenceNo, $remarks, $userId);
+            $createdPaymentIds = [];
+            $whatsappPaymentId = 0;
+
+            $conn->begin_transaction();
+            try {
+                $insertPaymentRow = function (
+                    string $mode,
+                    float $appliedAmount,
+                    float $tendered,
+                    float $returned,
+                    string $reference,
+                    string $rowRemarks,
+                    bool $completesBalance
+                ) use ($conn, $customerId, $id, $paymentDate, $userId): int {
+                    $paymentNo = pp_next_no($conn);
+                    $paymentType = $completesBalance ? 'full' : 'balance';
+
+                    if (pp_payment_return_columns_ready($conn)) {
+                        $stmt = $conn->prepare("INSERT INTO payments (customer_id, proforma_bill_id, payment_no, payment_type, payment_mode, amount, tendered_amount, return_amount, payment_date, reference_no, remarks, received_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
+                        $stmt->bind_param('iisssdddsssi', $customerId, $id, $paymentNo, $paymentType, $mode, $appliedAmount, $tendered, $returned, $paymentDate, $reference, $rowRemarks, $userId);
+                    } else {
+                        $stmt = $conn->prepare("INSERT INTO payments (customer_id, proforma_bill_id, payment_no, payment_type, payment_mode, amount, payment_date, reference_no, remarks, received_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
+                        $stmt->bind_param('iisssdsssi', $customerId, $id, $paymentNo, $paymentType, $mode, $appliedAmount, $paymentDate, $reference, $rowRemarks, $userId);
+                    }
+                    $stmt->execute();
+                    $paymentId = (int)$stmt->insert_id;
+                    $stmt->close();
+
+                    if ($paymentId <= 0) {
+                        throw new RuntimeException('Unable to save payment.');
+                    }
+                    return $paymentId;
+                };
+
+                $baseRemarks = $remarks;
+                $splitSummary = $isSplit
+                    ? 'Split payment: Cash ' . pp_money($cashApplied) . ' + UPI ' . pp_money($upiApplied)
+                    : '';
+                if ($returnAmount > 0.009) {
+                    $returnAudit = 'Cash received ' . pp_money($cashTendered)
+                        . '; Applied ' . pp_money($cashApplied)
+                        . '; Return ' . pp_money($returnAmount);
+                    $baseRemarks = $baseRemarks !== '' ? $baseRemarks . ' | ' . $returnAudit : $returnAudit;
+                }
+
+                $runningApplied = 0.0;
+
+                if ($useCash && $cashApplied > 0.009) {
+                    $runningApplied = round($runningApplied + $cashApplied, 2);
+                    $cashCompletes = $runningApplied >= $balance - 0.009 && !$useUpi;
+                    $cashRemarks = $baseRemarks;
+                    if ($isSplit) {
+                        $meta = '[SPLIT_META:GROUP=' . $splitGroup
+                            . ';PART=1;CASH=' . number_format($cashApplied, 2, '.', '')
+                            . ';UPI=' . number_format($upiApplied, 2, '.', '')
+                            . ';RETURN=' . number_format($returnAmount, 2, '.', '') . ']';
+                        $cashRemarks = trim(($cashRemarks !== '' ? $cashRemarks . ' | ' : '') . $splitSummary . ' | Cash part ' . $meta);
+                    }
+
+                    $cashPaymentId = $insertPaymentRow(
+                        'cash',
+                        $cashApplied,
+                        $cashTendered,
+                        $returnAmount,
+                        '',
+                        $cashRemarks,
+                        $cashCompletes
+                    );
+                    $createdPaymentIds[] = $cashPaymentId;
+                    if (is_array($cashDenominationPayload)) {
+                        pp_save_cash_denominations($conn, $cashPaymentId, $cashDenominationPayload);
+                    }
+                    $whatsappPaymentId = $cashPaymentId;
+                }
+
+                if ($useUpi && $upiApplied > 0.009) {
+                    $runningApplied = round($runningApplied + $upiApplied, 2);
+                    $upiCompletes = $runningApplied >= $balance - 0.009;
+                    $upiRemarks = $baseRemarks;
+                    if ($isSplit) {
+                        $meta = '[SPLIT_META:GROUP=' . $splitGroup
+                            . ';PART=2;CASH=' . number_format($cashApplied, 2, '.', '')
+                            . ';UPI=' . number_format($upiApplied, 2, '.', '')
+                            . ';RETURN=' . number_format($returnAmount, 2, '.', '') . ']';
+                        $upiRemarks = trim(($upiRemarks !== '' ? $upiRemarks . ' | ' : '') . $splitSummary . ' | UPI part ' . $meta);
+                    }
+
+                    $upiPaymentId = $insertPaymentRow(
+                        'upi',
+                        $upiApplied,
+                        $upiApplied,
+                        0.0,
+                        $upiReference,
+                        $upiRemarks,
+                        $upiCompletes
+                    );
+                    $createdPaymentIds[] = $upiPaymentId;
+                    /* For split payment, WhatsApp is sent once from the final UPI row. */
+                    $whatsappPaymentId = $upiPaymentId;
+                }
+
+                pp_sync_bill_and_job_amounts_from_payments($conn, $id);
+                $conn->commit();
+            } catch (Throwable $e) {
+                $conn->rollback();
+                throw $e;
             }
-            $stmt->execute();
-            $paymentId = (int)$stmt->insert_id;
-            $stmt->close();
 
-            if ($paymentMode === 'cash' && is_array($cashDenominationPayload)) {
-                pp_save_cash_denominations($conn, $paymentId, $cashDenominationPayload);
+            if ($whatsappPaymentId <= 0) {
+                throw new RuntimeException('Payment saved but WhatsApp payment reference could not be resolved.');
             }
 
-            /*
-             * Rebuild Paid + Balance from all active payment rows.
-             * This includes the original advance and this new payment.
-             */
-            pp_sync_bill_and_job_amounts_from_payments($conn, $id);
-
-            $waResult = pp_send_payment_whatsapp($conn, $id, $paymentId);
+            $waResult = pp_send_payment_whatsapp($conn, $id, $whatsappPaymentId);
             if (!empty($waResult['success'])) {
                 pp_redirect($id, 'payment_collected_wa_sent', '', [
                     'return_amount' => $returnAmount > 0.009 ? number_format($returnAmount, 2, '.', '') : ''
@@ -816,7 +977,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
             }
 
             pp_redirect($id, 'payment_collected_wa_failed', '', [
-                'payment_id' => $paymentId,
+                'payment_id' => $whatsappPaymentId,
                 'wa_err' => (string)($waResult['message'] ?? 'Unknown WhatsApp error.'),
                 'return_amount' => $returnAmount > 0.009 ? number_format($returnAmount, 2, '.', '') : ''
             ]);
@@ -1299,6 +1460,290 @@ if ($bill && pp_table_exists($conn, 'payments')) {
             font-size: 12px
         }
     }
+
+
+    /* Professional compact 100% zoom UI + split payment */
+    .payment-page {
+        max-width: 1240px;
+        width: 100%;
+        margin-left: auto;
+        margin-right: auto;
+    }
+
+    .payment-page .page-head {
+        padding: 15px 18px !important;
+        margin-bottom: 12px !important;
+        border-radius: 16px !important;
+    }
+
+    .payment-page .page-head h1 {
+        font-size: 23px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+    }
+
+    .payment-page .page-head p,
+    .payment-page .text-muted-custom {
+        font-size: 11px !important;
+        font-weight: 500 !important;
+    }
+
+    .payment-page .page-head .btn,
+    .payment-page .module-card .btn {
+        font-size: 11px !important;
+        font-weight: 700 !important;
+        padding: 6px 10px !important;
+        min-height: 30px !important;
+    }
+
+    .payment-page .module-card {
+        padding: 14px !important;
+        border-radius: 15px !important;
+        margin-bottom: 12px !important;
+    }
+
+    .payment-page .section-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+        margin-bottom: 9px !important;
+    }
+
+    .payment-page .row.g-3 {
+        --bs-gutter-x: .7rem;
+        --bs-gutter-y: .7rem;
+    }
+
+    .payment-page .info-box {
+        border-radius: 12px !important;
+        padding: 9px 10px !important;
+        min-height: 62px;
+    }
+
+    .payment-page .info-box small {
+        font-size: 9px !important;
+        font-weight: 700 !important;
+        margin-bottom: 2px !important;
+    }
+
+    .payment-page .info-box strong {
+        font-size: 13px !important;
+        font-weight: 750 !important;
+        line-height: 1.25 !important;
+    }
+
+    .payment-page .payment-form {
+        border-radius: 14px !important;
+        padding: 13px !important;
+    }
+
+    .payment-page .form-label {
+        font-size: 11px !important;
+        font-weight: 700 !important;
+        margin-bottom: 4px !important;
+    }
+
+    .payment-page .form-control,
+    .payment-page .form-select,
+    .payment-page .input-group-text {
+        min-height: 34px !important;
+        font-size: 12px !important;
+        padding: 6px 9px !important;
+        border-radius: 9px !important;
+    }
+
+    .payment-page textarea.form-control {
+        min-height: 56px !important;
+    }
+
+    .payment-page .payment-mode-grid {
+        grid-template-columns: repeat(2, minmax(160px, 1fr));
+        gap: 9px;
+    }
+
+    .payment-page .payment-mode-card {
+        min-height: 64px !important;
+        padding: 10px 11px !important;
+        border-radius: 13px !important;
+        gap: 8px !important;
+    }
+
+    .payment-page .payment-mode-card .mode-head {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+    }
+
+    .payment-page .payment-mode-card input {
+        width: 18px !important;
+        height: 18px !important;
+        margin-top: 1px !important;
+    }
+
+    .payment-page .payment-mode-card strong {
+        font-size: 13px !important;
+        font-weight: 800 !important;
+    }
+
+    .payment-page .payment-mode-card span,
+    .payment-page .payment-mode-card .mode-note {
+        font-size: 10px !important;
+        font-weight: 600 !important;
+        margin-top: 1px !important;
+    }
+
+    .payment-detail-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(220px, 1fr));
+        gap: 10px;
+    }
+
+    .payment-detail-box {
+        border: 1px solid var(--border-soft);
+        border-radius: 12px;
+        padding: 10px;
+        background: var(--card-bg);
+    }
+
+    .payment-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(120px, 1fr));
+        gap: 8px;
+    }
+
+    .payment-summary-box {
+        border: 1px solid var(--border-soft);
+        border-radius: 11px;
+        padding: 8px 10px;
+        background: var(--card-bg);
+    }
+
+    .payment-summary-box small {
+        display: block;
+        font-size: 9px;
+        font-weight: 700;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        margin-bottom: 2px;
+    }
+
+    .payment-summary-box strong {
+        display: block;
+        font-size: 14px;
+        font-weight: 800;
+        color: var(--text-main);
+    }
+
+    .payment-summary-box.return-box {
+        border-color: rgba(245, 158, 11, .36);
+        background: rgba(245, 158, 11, .08);
+    }
+
+    .payment-summary-box.return-box strong {
+        color: #9a3412;
+    }
+
+    .payment-validation-message {
+        border-radius: 10px;
+        padding: 7px 9px;
+        font-size: 10.5px;
+        font-weight: 700;
+    }
+
+    .payment-validation-message.ok {
+        background: #dcfce7;
+        color: #166534;
+    }
+
+    .payment-validation-message.bad {
+        background: #fee2e2;
+        color: #991b1b;
+    }
+
+    .payment-page .table-view th {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+        padding: 7px 8px !important;
+    }
+
+    .payment-page .table-view td {
+        font-size: 10.5px !important;
+        padding: 7px 8px !important;
+    }
+
+    .payment-page .table-view td strong {
+        font-weight: 750 !important;
+    }
+
+    .payment-page .status-badge {
+        padding: 4px 7px !important;
+        font-size: 9px !important;
+        font-weight: 700 !important;
+    }
+
+    .status-badge.split-grouped {
+        background: #e0f2fe;
+        color: #0369a1;
+    }
+
+    .payment-page .table-view .form-control-sm {
+        min-height: 28px !important;
+        font-size: 10px !important;
+        padding: 4px 7px !important;
+    }
+
+    .denom-modal-compact .modal-dialog {
+        max-width: 560px !important;
+    }
+
+    .denom-modal-compact .modal-title {
+        font-size: 14px !important;
+        font-weight: 800 !important;
+    }
+
+    .denom-modal-compact .modal-body {
+        padding: 11px 13px !important;
+    }
+
+    .denom-line {
+        font-size: 11px !important;
+        margin-bottom: 5px !important;
+    }
+
+    .denom-line input,
+    .denom-line .denom-amount {
+        min-height: 31px !important;
+        font-size: 11px !important;
+    }
+
+    @media (max-width: 991.98px) {
+        .payment-page {
+            max-width: 100%;
+        }
+
+        .payment-summary-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+
+    @media (max-width: 767.98px) {
+        .payment-page .page-head {
+            padding: 13px !important;
+        }
+
+        .payment-page .page-head h1 {
+            font-size: 20px !important;
+        }
+
+        .payment-page .module-card {
+            padding: 12px !important;
+        }
+
+        .payment-detail-grid,
+        .payment-mode-grid,
+        .payment-summary-grid {
+            grid-template-columns: 1fr !important;
+        }
+    }
     </style>
 </head>
 
@@ -1392,83 +1837,100 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                     <form method="post" class="payment-form" id="paymentForm">
                         <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                         <input type="hidden" name="action" value="collect_payment">
-                        <input type="hidden" name="payment_mode" id="payment_mode" value="cash">
 
-                        <div class="row g-3 align-items-end">
+                        <div class="row g-3">
                             <div class="col-md-4">
-                                <label class="form-label fw-bold">Customer Paid / Amount Received</label>
-                                <input type="number" step="0.01" min="0.01" name="amount" id="paymentAmount"
-                                    class="form-control"
-                                    value="<?= e(number_format((float)$bill['balance_amount'], 2, '.', '')) ?>"
-                                    required>
-                                <small class="text-muted-custom fw-bold">Excess cash is allowed and shown as Return
-                                    Amount.</small>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label fw-bold">Payment Date</label>
-                                <input type="date" name="payment_date" class="form-control"
+                                <label class="form-label fw-bold">Payment Date *</label>
+                                <input type="date" name="payment_date" id="payment_date" class="form-control"
                                     value="<?= e(date('Y-m-d')) ?>" required>
                             </div>
-
-                            <div class="col-md-4">
-                                <label class="form-label fw-bold" id="referenceLabel">UPI Reference / Remarks</label>
-                                <input type="text" name="reference_no" id="referenceNo" class="form-control"
-                                    placeholder="Optional reference">
-                            </div>
-
-                            <div class="col-12">
-                                <div class="payment-calculation-grid" aria-live="polite">
-                                    <div class="payment-calculation-box">
-                                        <small>Balance Due</small>
-                                        <strong
-                                            id="paymentBalanceDue"><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong>
-                                    </div>
-                                    <div class="payment-calculation-box">
-                                        <small>Applied to Bill</small>
-                                        <strong
-                                            id="paymentAppliedAmount"><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong>
-                                    </div>
-                                    <div class="payment-calculation-box return-box">
-                                        <small>Return Amount</small>
-                                        <strong id="paymentReturnAmount">₹0.00</strong>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="col-12">
-                                <label class="form-label fw-bold">Payment Mode</label>
+                            <div class="col-md-8">
+                                <label class="form-label fw-bold">Payment Mode *</label>
                                 <div class="payment-mode-grid">
-                                    <label class="payment-mode-card active" data-mode="cash" for="mode_cash">
-                                        <input type="checkbox" id="mode_cash" checked>
-                                        <span>
-                                            <strong>Cash</strong>
-                                            <span>Denomination required</span>
+                                    <label class="payment-mode-card active" id="cashModeCard" for="use_cash">
+                                        <span class="mode-head">
+                                            <input type="checkbox" id="use_cash" name="use_cash" value="1" checked>
+                                            <span>
+                                                <strong>Cash</strong>
+                                                <span class="mode-note">Cash denomination is mandatory.</span>
+                                            </span>
                                         </span>
                                     </label>
-                                    <label class="payment-mode-card" data-mode="upi" for="mode_upi">
-                                        <input type="checkbox" id="mode_upi">
-                                        <span>
-                                            <strong>UPI</strong>
-                                            <span>Reference optional</span>
+                                    <label class="payment-mode-card" id="upiModeCard" for="use_upi">
+                                        <span class="mode-head">
+                                            <input type="checkbox" id="use_upi" name="use_upi" value="1">
+                                            <span>
+                                                <strong>UPI</strong>
+                                                <span class="mode-note">Can be used alone or split with Cash.</span>
+                                            </span>
                                         </span>
                                     </label>
                                 </div>
-                                <small class="text-muted-custom fw-bold mt-2 d-block">Only Cash and UPI payments are
-                                    allowed on this page.</small>
+                            </div>
+                        </div>
+
+                        <div class="payment-detail-grid mt-3">
+                            <div class="payment-detail-box" id="cashPaymentBox">
+                                <label class="form-label fw-bold">Cash Received *</label>
+                                <div class="input-group">
+                                    <span class="input-group-text">₹</span>
+                                    <input type="number" min="0.01" step="0.01" name="cash_amount" id="cash_amount"
+                                        class="form-control"
+                                        value="<?= e(number_format((float)$bill['balance_amount'], 2, '.', '')) ?>"
+                                        placeholder="Cash received">
+                                </div>
+                                <div class="d-flex justify-content-between align-items-center gap-2 mt-2 flex-wrap">
+                                    <small class="text-muted-custom fw-semibold">Excess Cash is allowed and is shown as
+                                        Return Amount.</small>
+                                    <button type="button" id="openCashDenomBtn"
+                                        class="btn btn-outline-primary btn-sm rounded-pill px-3 fw-bold">Enter Cash
+                                        Denomination</button>
+                                </div>
                             </div>
 
-                            <div class="col-12">
-                                <label class="form-label fw-bold">Remarks</label>
-                                <textarea name="remarks" class="form-control" rows="2"
-                                    placeholder="Payment remarks"></textarea>
+                            <div class="payment-detail-box d-none" id="upiPaymentBox">
+                                <label class="form-label fw-bold">UPI Amount *</label>
+                                <div class="input-group">
+                                    <span class="input-group-text">₹</span>
+                                    <input type="number" min="0.01" step="0.01" name="upi_amount" id="upi_amount"
+                                        class="form-control" placeholder="UPI amount" disabled>
+                                </div>
+                                <label class="form-label fw-bold mt-2">UPI Reference</label>
+                                <input type="text" name="upi_reference" id="upi_reference" class="form-control"
+                                    placeholder="Optional UPI transaction ID" disabled>
                             </div>
-                            <div class="col-12 d-flex flex-wrap justify-content-end gap-2">
-                                <button type="button" id="openCashDenomBtn"
-                                    class="btn btn-outline-primary rounded-pill px-4 fw-bold">Enter Cash
-                                    Denomination</button>
-                                <button type="submit" class="btn btn-success rounded-pill px-4 fw-bold">Save
-                                    Payment</button>
+                        </div>
+
+                        <div class="payment-summary-grid mt-3" aria-live="polite">
+                            <div class="payment-summary-box">
+                                <small>Balance Due</small>
+                                <strong id="paymentBalanceDue"><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong>
                             </div>
+                            <div class="payment-summary-box">
+                                <small>Total Received</small>
+                                <strong id="paymentReceived">₹0.00</strong>
+                            </div>
+                            <div class="payment-summary-box">
+                                <small>Applied to Bill</small>
+                                <strong id="paymentAppliedAmount">₹0.00</strong>
+                            </div>
+                            <div class="payment-summary-box return-box">
+                                <small>Return Amount</small>
+                                <strong id="paymentReturnAmount">₹0.00</strong>
+                            </div>
+                        </div>
+
+                        <div id="paymentValidationMessage" class="payment-validation-message mt-2"></div>
+
+                        <div class="mt-3">
+                            <label class="form-label fw-bold">Remarks</label>
+                            <textarea name="remarks" class="form-control" rows="2"
+                                placeholder="Payment remarks"></textarea>
+                        </div>
+
+                        <div class="d-flex flex-wrap justify-content-end gap-2 mt-3">
+                            <button type="submit" class="btn btn-success rounded-pill px-4 fw-bold">Save
+                                Payment</button>
                         </div>
                     </form>
 
@@ -1575,10 +2037,15 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                                     <td><?= e(pp_date($pay['payment_date'] ?? null)) ?></td>
                                     <td><?= e($pay['reference_no'] ?? '-') ?></td>
                                     <td><?= e($pay['received_by_name'] ?? '-') ?></td>
-                                    <td><?= e($pay['remarks'] ?? '-') ?></td>
+                                    <td><?= e(pp_clean_payment_remarks($pay['remarks'] ?? '-') ?: '-') ?></td>
                                     <td>
-                                        <?php $waInfo = $pay['wa_status_info'] ?? ['status' => 'not_sent', 'label' => 'Not Sent']; ?>
-                                        <?php if (($waInfo['status'] ?? '') === 'sent'): ?>
+                                        <?php
+                                            $splitMeta = pp_split_payment_meta((string)($pay['remarks'] ?? ''));
+                                            $waInfo = $pay['wa_status_info'] ?? ['status' => 'not_sent', 'label' => 'Not Sent'];
+                                        ?>
+                                        <?php if ($splitMeta && (int)($splitMeta['part'] ?? 0) === 1): ?>
+                                        <span class="status-badge split-grouped">Split Grouped</span>
+                                        <?php elseif (($waInfo['status'] ?? '') === 'sent'): ?>
                                         <span class="status-badge">WhatsApp Sent</span>
                                         <?php else: ?>
                                         <div class="d-flex flex-column gap-1 align-items-start">
@@ -1681,24 +2148,28 @@ if ($bill && pp_table_exists($conn, 'payments')) {
             return;
         }
 
-        const modeInput = document.getElementById('payment_mode');
-        const cashCheck = document.getElementById('mode_cash');
-        const upiCheck = document.getElementById('mode_upi');
-        const cashCard = document.querySelector('.payment-mode-card[data-mode="cash"]');
-        const upiCard = document.querySelector('.payment-mode-card[data-mode="upi"]');
-        const amountInput = document.getElementById('paymentAmount');
-        const referenceLabel = document.getElementById('referenceLabel');
-        const referenceNo = document.getElementById('referenceNo');
+        const cashCheck = document.getElementById('use_cash');
+        const upiCheck = document.getElementById('use_upi');
+        const cashModeCard = document.getElementById('cashModeCard');
+        const upiModeCard = document.getElementById('upiModeCard');
+        const cashPaymentBox = document.getElementById('cashPaymentBox');
+        const upiPaymentBox = document.getElementById('upiPaymentBox');
+        const cashAmountInput = document.getElementById('cash_amount');
+        const upiAmountInput = document.getElementById('upi_amount');
+        const upiReferenceInput = document.getElementById('upi_reference');
+        const paymentDateInput = document.getElementById('payment_date');
         const openCashBtn = document.getElementById('openCashDenomBtn');
         const modalEl = document.getElementById('cashDenominationModal');
         const denomInputs = [...document.querySelectorAll('.cash-denom-count')];
         const denomTarget = document.getElementById('denomTarget');
-        const denomTotal = document.getElementById('denomTotal');
+        const denomTotalEl = document.getElementById('denomTotal');
         const denomReturn = document.getElementById('denomReturn');
         const denomError = document.getElementById('denomError');
         const saveDenomBtn = document.getElementById('saveDenomBtn');
+        const receivedAmountEl = document.getElementById('paymentReceived');
         const appliedAmountEl = document.getElementById('paymentAppliedAmount');
         const returnAmountEl = document.getElementById('paymentReturnAmount');
+        const validationEl = document.getElementById('paymentValidationMessage');
         const balanceDue = <?= json_encode(round((float)($bill['balance_amount'] ?? 0), 2)) ?>;
         let fallbackBackdrop = null;
 
@@ -1709,25 +2180,8 @@ if ($bill && pp_table_exists($conn, 'payments')) {
             });
         }
 
-        function amountValue() {
-            return Math.round((parseFloat(amountInput?.value || '0') || 0) * 100) / 100;
-        }
-
-        function paymentAmounts() {
-            const tendered = Math.max(0, amountValue());
-            const applied = Math.round(Math.min(tendered, balanceDue) * 100) / 100;
-            const returned = Math.round(Math.max(0, tendered - applied) * 100) / 100;
-
-            if (appliedAmountEl) appliedAmountEl.textContent = money(applied);
-            if (returnAmountEl) returnAmountEl.textContent = money(returned);
-            if (denomTarget) denomTarget.textContent = money(tendered);
-            if (denomReturn) denomReturn.textContent = money(returned);
-
-            return {
-                tendered,
-                applied,
-                returned
-            };
+        function numericValue(input) {
+            return Math.round((parseFloat(input?.value || '0') || 0) * 100) / 100;
         }
 
         function denominationTotal() {
@@ -1739,30 +2193,143 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                 const rowTotal = count * value;
                 total += rowTotal;
                 const rowTotalEl = input.closest('.denom-line')?.querySelector('.denom-row-total');
-                if (rowTotalEl) {
-                    rowTotalEl.textContent = rowTotal.toFixed(2);
-                }
+                if (rowTotalEl) rowTotalEl.textContent = rowTotal.toFixed(2);
             });
             total = Math.round(total * 100) / 100;
-            if (denomTotal) {
-                denomTotal.textContent = money(total);
-            }
-            paymentAmounts();
+            if (denomTotalEl) denomTotalEl.textContent = money(total);
             return total;
         }
 
-        function showError(message) {
-            if (!denomError) {
-                return;
+        function calculatePayment() {
+            const useCash = cashCheck?.checked === true;
+            const useUpi = upiCheck?.checked === true;
+            const cashTendered = useCash ? Math.max(0, numericValue(cashAmountInput)) : 0;
+            const upiAmount = useUpi ? Math.max(0, numericValue(upiAmountInput)) : 0;
+
+            let upiApplied = 0;
+            let cashApplied = 0;
+            let applied = 0;
+            let returned = 0;
+            let valid = false;
+            let message = '';
+
+            if (balanceDue <= 0) {
+                message = 'This Proforma is already fully paid.';
+            } else if (!useCash && !useUpi) {
+                message = 'Select Cash, UPI or both.';
+            } else if (useCash && cashTendered <= 0) {
+                message = 'Enter Cash Received.';
+            } else if (useUpi && upiAmount <= 0) {
+                message = 'Enter UPI Amount.';
+            } else if (upiAmount > balanceDue + 0.009) {
+                message = 'UPI Amount cannot exceed Balance Due. Excess/Return is allowed only through Cash.';
+            } else {
+                upiApplied = useUpi ? Math.min(upiAmount, balanceDue) : 0;
+                const remainingAfterUpi = Math.max(0, Math.round((balanceDue - upiApplied) * 100) / 100);
+                cashApplied = useCash ? Math.min(cashTendered, remainingAfterUpi) : 0;
+                returned = useCash ? Math.max(0, Math.round((cashTendered - cashApplied) * 100) / 100) : 0;
+                applied = Math.round((cashApplied + upiApplied) * 100) / 100;
+
+                if (useCash && useUpi && cashApplied <= 0.009) {
+                    message = 'UPI already covers the balance. Unselect Cash or reduce UPI Amount.';
+                } else if (applied <= 0.009) {
+                    message = 'Enter a payment amount.';
+                } else {
+                    valid = true;
+                    const remaining = Math.max(0, Math.round((balanceDue - applied) * 100) / 100);
+                    if (remaining <= 0.009) {
+                        message = returned > 0.009 ?
+                            'This payment clears the bill. Return ' + money(returned) + ' to the customer.' :
+                            'This payment clears the bill.';
+                    } else {
+                        message = 'Partial payment: ' + money(applied) + '. Remaining balance after save: ' + money(
+                            remaining) + '.';
+                    }
+                }
             }
+
+            const received = Math.round((cashTendered + upiAmount) * 100) / 100;
+            if (receivedAmountEl) receivedAmountEl.textContent = money(received);
+            if (appliedAmountEl) appliedAmountEl.textContent = money(applied);
+            if (returnAmountEl) returnAmountEl.textContent = money(returned);
+            if (denomTarget) denomTarget.textContent = money(cashTendered);
+            if (denomReturn) denomReturn.textContent = money(returned);
+
+            if (validationEl) {
+                validationEl.textContent = message;
+                validationEl.classList.toggle('ok', valid);
+                validationEl.classList.toggle('bad', !valid);
+            }
+
+            return {
+                useCash,
+                useUpi,
+                cashTendered,
+                upiAmount,
+                cashApplied,
+                upiApplied,
+                received,
+                applied,
+                returned,
+                valid,
+                message
+            };
+        }
+
+        function syncPaymentModeUi() {
+            const useCash = cashCheck?.checked === true;
+            const useUpi = upiCheck?.checked === true;
+
+            cashModeCard?.classList.toggle('active', useCash);
+            upiModeCard?.classList.toggle('active', useUpi);
+
+            if (cashPaymentBox) {
+                cashPaymentBox.classList.toggle('d-none', !useCash);
+                cashPaymentBox.style.display = useCash ? '' : 'none';
+            }
+            if (upiPaymentBox) {
+                upiPaymentBox.classList.toggle('d-none', !useUpi);
+                upiPaymentBox.style.display = useUpi ? '' : 'none';
+            }
+
+            if (cashAmountInput) {
+                cashAmountInput.disabled = !useCash;
+                if (!useCash) cashAmountInput.value = '';
+            }
+            if (upiAmountInput) {
+                upiAmountInput.disabled = !useUpi;
+                if (!useUpi) upiAmountInput.value = '';
+            }
+            if (upiReferenceInput) {
+                upiReferenceInput.disabled = !useUpi;
+                if (!useUpi) upiReferenceInput.value = '';
+            }
+            if (openCashBtn) openCashBtn.style.display = useCash ? 'inline-flex' : 'none';
+
+            if (!useCash) {
+                denomInputs.forEach(input => input.value = '0');
+                denominationTotal();
+            }
+
+            /* Convenient single-mode defaults, same style as Quick Sale. */
+            if (balanceDue > 0 && useCash && !useUpi && numericValue(cashAmountInput) <= 0) {
+                cashAmountInput.value = balanceDue.toFixed(2);
+            }
+            if (balanceDue > 0 && useUpi && !useCash && numericValue(upiAmountInput) <= 0) {
+                upiAmountInput.value = balanceDue.toFixed(2);
+            }
+
+            calculatePayment();
+        }
+
+        function showError(message) {
+            if (!denomError) return;
             denomError.textContent = message || '';
             denomError.classList.toggle('d-none', !message);
         }
 
         function fallbackShowModal() {
-            if (!modalEl) {
-                return;
-            }
+            if (!modalEl) return;
             modalEl.classList.add('show', 'modal-fallback');
             modalEl.style.display = 'block';
             modalEl.removeAttribute('aria-hidden');
@@ -1776,9 +2343,7 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         }
 
         function fallbackHideModal() {
-            if (!modalEl) {
-                return;
-            }
+            if (!modalEl) return;
             modalEl.classList.remove('show', 'modal-fallback');
             modalEl.style.display = 'none';
             modalEl.setAttribute('aria-hidden', 'true');
@@ -1790,13 +2355,18 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         }
 
         function openDenominationModal() {
-            if (amountValue() <= 0) {
-                alert('Please enter payment amount first.');
-                amountInput?.focus();
+            if (!cashCheck?.checked) {
+                alert('Select Cash payment first.');
+                return;
+            }
+            if (numericValue(cashAmountInput) <= 0) {
+                alert('Enter Cash Received before denomination.');
+                cashAmountInput?.focus();
                 return;
             }
             showError('');
             denominationTotal();
+            calculatePayment();
             if (window.bootstrap && bootstrap.Modal && modalEl) {
                 bootstrap.Modal.getOrCreateInstance(modalEl).show();
             } else {
@@ -1811,49 +2381,15 @@ if ($bill && pp_table_exists($conn, 'payments')) {
             fallbackHideModal();
         }
 
-        function selectMode(mode, openCash) {
-            const isCash = mode === 'cash';
-            modeInput.value = isCash ? 'cash' : 'upi';
-            cashCheck.checked = isCash;
-            upiCheck.checked = !isCash;
-            cashCard?.classList.toggle('active', isCash);
-            upiCard?.classList.toggle('active', !isCash);
-            if (referenceLabel) {
-                referenceLabel.textContent = isCash ? 'Cash Remarks / Reference' : 'UPI Reference';
-            }
-            if (referenceNo) {
-                referenceNo.placeholder = isCash ? 'Optional cash reference / remarks' :
-                    'UPI transaction ID optional';
-            }
-            if (openCashBtn) {
-                openCashBtn.style.display = isCash ? 'inline-flex' : 'none';
-            }
-            if (isCash && openCash) {
-                openDenominationModal();
-            }
-        }
-
-        cashCard?.addEventListener('click', function(e) {
-            e.preventDefault();
-            selectMode('cash', true);
-        });
-        upiCard?.addEventListener('click', function(e) {
-            e.preventDefault();
-            selectMode('upi', false);
-        });
-        cashCheck?.addEventListener('change', function() {
-            selectMode('cash', true);
-        });
-        upiCheck?.addEventListener('change', function() {
-            selectMode('upi', false);
-        });
-        openCashBtn?.addEventListener('click', function() {
-            selectMode('cash', true);
-        });
-        amountInput?.addEventListener('input', denominationTotal);
-        denomInputs.forEach(function(input) {
-            input.addEventListener('input', denominationTotal);
-        });
+        cashCheck?.addEventListener('change', syncPaymentModeUi);
+        upiCheck?.addEventListener('change', syncPaymentModeUi);
+        cashAmountInput?.addEventListener('input', calculatePayment);
+        upiAmountInput?.addEventListener('input', calculatePayment);
+        openCashBtn?.addEventListener('click', openDenominationModal);
+        denomInputs.forEach(input => input.addEventListener('input', function() {
+            denominationTotal();
+            calculatePayment();
+        }));
 
         document.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function(btn) {
             btn.addEventListener('click', function() {
@@ -1862,10 +2398,10 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         });
 
         saveDenomBtn?.addEventListener('click', function() {
-            const expected = paymentAmounts().tendered;
+            const expected = numericValue(cashAmountInput);
             const total = denominationTotal();
             if (Math.abs(total - expected) > 0.009) {
-                showError('Denomination total ' + money(total) + ' must match payment amount ' + money(
+                showError('Denomination total ' + money(total) + ' must match Cash Received ' + money(
                     expected) + '.');
                 return;
             }
@@ -1874,23 +2410,36 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         });
 
         form.addEventListener('submit', function(e) {
-            const amounts = paymentAmounts();
-            if (modeInput.value === 'cash') {
-                const expected = amounts.tendered;
+            const payment = calculatePayment();
+            if (!payment.valid) {
+                e.preventDefault();
+                alert(payment.message);
+                return false;
+            }
+            if (!String(paymentDateInput?.value || '').trim()) {
+                e.preventDefault();
+                alert('Please select Payment Date.');
+                paymentDateInput?.focus();
+                return false;
+            }
+            if (payment.useCash) {
                 const total = denominationTotal();
-                if (Math.abs(total - expected) > 0.009) {
+                if (Math.abs(total - payment.cashTendered) > 0.009) {
                     e.preventDefault();
-                    showError('Denomination total ' + money(total) + ' must match payment amount ' + money(
-                        expected) + '.');
+                    showError('Denomination total ' + money(total) + ' must match Cash Received ' + money(
+                        payment.cashTendered) + '.');
                     openDenominationModal();
                     return false;
                 }
             }
 
-            let confirmMessage = 'Apply ' + money(amounts.applied) + ' to this bill?';
-            if (amounts.returned > 0.009) {
-                confirmMessage += '\n\nCustomer paid ' + money(amounts.tendered) +
-                    '. Return ' + money(amounts.returned) + ' to the customer.';
+            let confirmMessage = 'Apply ' + money(payment.applied) + ' to this Proforma bill?';
+            if (payment.useCash && payment.useUpi) {
+                confirmMessage += '\n\nSplit: Cash ' + money(payment.cashApplied) + ' + UPI ' + money(
+                    payment.upiApplied) + '.';
+            }
+            if (payment.returned > 0.009) {
+                confirmMessage += '\nReturn ' + money(payment.returned) + ' to the customer.';
             }
             if (!confirm(confirmMessage)) {
                 e.preventDefault();
@@ -1898,8 +2447,9 @@ if ($bill && pp_table_exists($conn, 'payments')) {
             }
         });
 
-        selectMode('cash', false);
+        syncPaymentModeUi();
         denominationTotal();
+        calculatePayment();
     })();
     </script>
 </body>
