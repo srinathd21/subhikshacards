@@ -70,6 +70,27 @@ if (!function_exists('qs_money')) {
     }
 }
 
+if (!function_exists('qs_action_svg')) {
+    function qs_action_svg(string $icon): string
+    {
+        $common = 'class="quick-action-svg" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false"';
+
+        if ($icon === 'whatsapp') {
+            return '<svg ' . $common . ' viewBox="0 0 32 32"><path fill="currentColor" d="M16.04 3C8.85 3 3 8.73 3 15.78c0 2.26.61 4.47 1.77 6.41L3 29l7.02-1.8a13.3 13.3 0 0 0 6.02 1.43C23.23 28.63 29 22.9 29 15.85S23.23 3 16.04 3Zm0 23.45c-1.9 0-3.76-.5-5.39-1.45l-.39-.23-4.16 1.07 1.11-4.01-.26-.41a11.05 11.05 0 0 1-1.73-5.64c0-5.84 4.85-10.6 10.82-10.6 5.96 0 10.81 4.76 10.81 10.67 0 5.84-4.85 10.6-10.81 10.6Zm5.93-7.95c-.32-.16-1.9-.92-2.2-1.03-.3-.11-.52-.16-.74.16-.22.32-.85 1.03-1.04 1.24-.19.22-.38.24-.7.08-.32-.16-1.36-.49-2.59-1.55-.96-.84-1.61-1.88-1.8-2.2-.19-.32-.02-.49.14-.65.14-.14.32-.38.49-.57.16-.19.22-.32.32-.54.11-.22.05-.41-.03-.57-.08-.16-.74-1.76-1.01-2.41-.27-.65-.54-.54-.74-.55h-.63c-.22 0-.57.08-.87.41-.3.32-1.14 1.09-1.14 2.68s1.17 3.12 1.33 3.34c.16.22 2.3 3.46 5.58 4.85.78.33 1.39.53 1.86.68.78.24 1.49.21 2.05.13.63-.09 1.9-.76 2.17-1.49.27-.73.27-1.36.19-1.49-.08-.13-.3-.21-.62-.37Z"/></svg>';
+        }
+
+        $paths = [
+            'eye' => '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/>',
+            'invoice' => '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/>',
+            'edit' => '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+            'delete' => '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+        ];
+
+        $path = $paths[$icon] ?? $paths['invoice'];
+        return '<svg ' . $common . ' fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' . $path . '</svg>';
+    }
+}
+
 if (!function_exists('qs_table_exists')) {
     function qs_table_exists(mysqli $conn, string $table): bool
     {
@@ -269,6 +290,143 @@ if (
     }
 }
 
+
+$editQuickSaleId = max(0, (int)($_GET['edit'] ?? 0));
+$editQuickSale = null;
+$editQuickSaleItems = [];
+$editQuickSalePayment = [
+    'cash_tendered' => 0.0,
+    'cash_applied' => 0.0,
+    'upi_amount' => 0.0,
+    'payment_date' => date('Y-m-d'),
+    'upi_reference' => '',
+    'remarks' => '',
+];
+$editQuickSaleDenominations = [];
+
+if ($editQuickSaleId > 0) {
+    try {
+        $stmt = $conn->prepare("
+            SELECT
+                qs.id,
+                qs.sale_no,
+                qs.customer_name,
+                qs.mobile,
+                qs.address,
+                qs.total_amount
+            FROM quick_sales qs
+            WHERE qs.id = ?
+            LIMIT 1
+        ");
+        $stmt->bind_param('i', $editQuickSaleId);
+        $stmt->execute();
+        $editQuickSale = $stmt->get_result()->fetch_assoc() ?: null;
+        $stmt->close();
+
+        if (!$editQuickSale) {
+            throw new RuntimeException('Quick Sale not found.');
+        }
+
+        $stmt = $conn->prepare("
+            SELECT
+                qsi.product_id,
+                qsi.product_name,
+                qsi.qty,
+                qsi.rate,
+                qsi.amount,
+                COALESCE(ps.on_hand_stock, 0) AS current_on_hand_stock,
+                COALESCE(ps.reserved_stock, 0) AS reserved_stock
+            FROM quick_sale_items qsi
+            LEFT JOIN product_stock ps ON ps.product_id = qsi.product_id
+            WHERE qsi.quick_sale_id = ?
+            ORDER BY qsi.id ASC
+        ");
+        $stmt->bind_param('i', $editQuickSaleId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        while ($row = $res->fetch_assoc()) {
+            $onHand = (float)($row['current_on_hand_stock'] ?? 0);
+            $reserved = (float)($row['reserved_stock'] ?? 0);
+
+            $editQuickSaleItems[] = [
+                'product_id' => (int)($row['product_id'] ?? 0),
+                'product_name' => (string)($row['product_name'] ?? ''),
+                'is_new_product' => 0,
+                'qty' => (float)($row['qty'] ?? 0),
+                'rate' => (float)($row['rate'] ?? 0),
+                'amount' => (float)($row['amount'] ?? 0),
+                /*
+                 * Current stock already includes this sale. If the row is kept
+                 * unchanged after edit, final stock remains this value because
+                 * the API first restores the old sale and then applies the edit.
+                 */
+                'projected_on_hand_stock' => $onHand,
+                'projected_available_stock' => $onHand - $reserved,
+                'original_qty' => (float)($row['qty'] ?? 0),
+            ];
+        }
+        $stmt->close();
+
+        if (qs_table_exists($conn, 'quick_sale_payments')) {
+            $stmt = $conn->prepare("
+                SELECT
+                    COALESCE(SUM(CASE WHEN payment_mode = 'cash' THEN tendered_amount ELSE 0 END), 0) AS cash_tendered,
+                    COALESCE(SUM(CASE WHEN payment_mode = 'cash' THEN amount ELSE 0 END), 0) AS cash_applied,
+                    COALESCE(SUM(CASE WHEN payment_mode = 'upi' THEN amount ELSE 0 END), 0) AS upi_amount,
+                    COALESCE(MAX(payment_date), CURDATE()) AS payment_date,
+                    COALESCE(MAX(CASE WHEN payment_mode = 'upi' THEN reference_no END), '') AS upi_reference,
+                    COALESCE(MAX(remarks), '') AS remarks
+                FROM quick_sale_payments
+                WHERE quick_sale_id = ?
+            ");
+            $stmt->bind_param('i', $editQuickSaleId);
+            $stmt->execute();
+            $paymentRow = $stmt->get_result()->fetch_assoc() ?: [];
+            $stmt->close();
+
+            $editQuickSalePayment = [
+                'cash_tendered' => (float)($paymentRow['cash_tendered'] ?? 0),
+                'cash_applied' => (float)($paymentRow['cash_applied'] ?? 0),
+                'upi_amount' => (float)($paymentRow['upi_amount'] ?? 0),
+                'payment_date' => (string)($paymentRow['payment_date'] ?? date('Y-m-d')),
+                'upi_reference' => (string)($paymentRow['upi_reference'] ?? ''),
+                'remarks' => (string)($paymentRow['remarks'] ?? ''),
+            ];
+
+            if (qs_table_exists($conn, 'quick_sale_cash_denominations')) {
+                $stmt = $conn->prepare("
+                    SELECT
+                        d.denomination_type,
+                        d.denomination_value,
+                        SUM(d.denomination_count) AS denomination_count
+                    FROM quick_sale_cash_denominations d
+                    INNER JOIN quick_sale_payments p ON p.id = d.quick_sale_payment_id
+                    WHERE p.quick_sale_id = ?
+                      AND p.payment_mode = 'cash'
+                    GROUP BY d.denomination_type, d.denomination_value
+                ");
+                $stmt->bind_param('i', $editQuickSaleId);
+                $stmt->execute();
+                $res = $stmt->get_result();
+
+                while ($row = $res->fetch_assoc()) {
+                    $type = strtolower((string)($row['denomination_type'] ?? 'note'));
+                    $value = (int)round((float)($row['denomination_value'] ?? 0));
+                    $field = 'cash_' . ($type === 'coin' ? 'coin' : 'note') . '_' . $value;
+                    $editQuickSaleDenominations[$field] = (int)($row['denomination_count'] ?? 0);
+                }
+                $stmt->close();
+            }
+        }
+    } catch (Throwable $e) {
+        $editQuickSale = null;
+        $editQuickSaleItems = [];
+        $successMessage = '';
+        $_GET['edit_error'] = $e->getMessage();
+    }
+}
+
 $products = [];
 try {
     $sql = "
@@ -371,6 +529,7 @@ try {
 }
 
 $successMessage = trim((string)($_GET['message'] ?? ''));
+$editError = trim((string)($_GET['edit_error'] ?? ''));
 
 $quickSaleSidebarReady = false;
 try {
@@ -996,6 +1155,52 @@ try {
 .module-page .item-actions .btn{width:30px !important;height:30px !important;padding:0 !important;}
 .module-page .denom-total-box{padding:8px 9px !important;font-size:11px !important;}
 
+
+.quick-action-svg {
+    display: block !important;
+    width: 14px !important;
+    height: 14px !important;
+    flex: 0 0 14px !important;
+    pointer-events: none !important;
+}
+
+.btn-whatsapp-icon .quick-action-svg {
+    width: 16px !important;
+    height: 16px !important;
+}
+
+.edit-sale-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border: 1px solid #93c5fd;
+    background: #eff6ff;
+    color: #1e3a8a;
+    border-radius: 12px;
+    padding: 9px 11px;
+}
+
+.edit-sale-banner strong {
+    display: block;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.edit-sale-banner span {
+    display: block;
+    margin-top: 2px;
+    font-size: 10.5px;
+    font-weight: 600;
+}
+
+@media (max-width: 767.98px) {
+    .edit-sale-banner {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}
+
 /* Recent Quick Sales - extra compact table/action UI */
 .module-page .module-card .section-title {
     font-size: 14px !important;
@@ -1085,7 +1290,147 @@ try {
     }
 }
 
+
+/* Quick Sale action icons - match the supplied reference page */
+.module-page .quick-sale-actions {
+    gap: 7px !important;
+}
+
+.module-page .quick-sale-actions .btn {
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+    max-width: 36px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-shadow: none !important;
+    background: #fff !important;
+}
+
+.module-page .quick-sale-actions .quick-action-svg {
+    width: 16px !important;
+    height: 16px !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-invoice {
+    border: 1px solid #667085 !important;
+    color: #667085 !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-invoice:hover {
+    background: #f8fafc !important;
+    color: #344054 !important;
+    border-color: #344054 !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-edit {
+    border: 1.5px solid #0d6efd !important;
+    color: #0d6efd !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-edit:hover {
+    background: #eff6ff !important;
+    color: #0b5ed7 !important;
+    border-color: #0b5ed7 !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-whatsapp {
+    background: #198754 !important;
+    border: 1px solid #198754 !important;
+    color: #fff !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-whatsapp:hover {
+    background: #157347 !important;
+    border-color: #157347 !important;
+    color: #fff !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-delete {
+    border: 1px solid #dc3545 !important;
+    color: #dc3545 !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-delete:hover {
+    background: #fff5f5 !important;
+    border-color: #bb2d3b !important;
+    color: #bb2d3b !important;
+}
+
 </style><!-- compact-ui-overrides -->
+<style>
+
+/* FINAL Quick Sale action icon override - exact reference style */
+.module-page .quick-sale-actions {
+    gap: 7px !important;
+    white-space: nowrap !important;
+}
+
+.module-page .quick-sale-actions .btn {
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+    max-width: 36px !important;
+    border-radius: 50% !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-shadow: none !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-invoice {
+    background: #fff !important;
+    border: 1px solid #344054 !important;
+    color: #1f2937 !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-invoice:hover {
+    background: #f8fafc !important;
+    border-color: #111827 !important;
+    color: #111827 !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-whatsapp {
+    background: #198754 !important;
+    border: 1px solid #198754 !important;
+    color: #fff !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-whatsapp:hover {
+    background: #157347 !important;
+    border-color: #157347 !important;
+    color: #fff !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-edit {
+    background: #fff !important;
+    border: 1.5px solid #0d6efd !important;
+    color: #0d6efd !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-delete {
+    background: #fff !important;
+    border: 1px solid #dc3545 !important;
+    color: #dc3545 !important;
+}
+
+.module-page .quick-sale-actions .quick-action-svg {
+    width: 16px !important;
+    height: 16px !important;
+    display: block !important;
+    flex: 0 0 16px !important;
+}
+
+.module-page .quick-sale-actions .qs-ref-whatsapp .quick-action-svg {
+    width: 18px !important;
+    height: 18px !important;
+}
+
+</style>
 </head>
 
 <body class="<?= qs_e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -1156,7 +1501,25 @@ try {
 
                     <form id="quickSaleForm" autocomplete="off" novalidate>
                         <input type="hidden" name="csrf_token" value="<?= qs_e($csrfToken) ?>">
+                        <input type="hidden" name="action" value="<?= $editQuickSale ? 'update_sale' : 'create' ?>">
+                        <input type="hidden" name="quick_sale_id" value="<?= $editQuickSale ? (int)$editQuickSale['id'] : 0 ?>">
                         <input type="hidden" name="items_json" id="items_json" value="[]">
+
+                        <?php if ($editQuickSale): ?>
+                        <div class="edit-sale-banner mb-3">
+                            <div>
+                                <strong>Editing <?= qs_e($editQuickSale['sale_no'] ?? 'Quick Sale') ?></strong>
+                                <span>Customer, Venue, Products, Quantity, Price and Payment can be corrected in the same Quick Sale fields.</span>
+                            </div>
+                            <a href="quick-sale.php" class="btn btn-outline-secondary rounded-pill px-3 fw-bold">
+                                Cancel Edit
+                            </a>
+                        </div>
+                        <?php elseif ($editError !== ''): ?>
+                        <div class="alert alert-danger rounded-4 fw-bold py-2 px-3 mb-3">
+                            <?= qs_e($editError) ?>
+                        </div>
+                        <?php endif; ?>
 
                         <div class="customer-panel">
                             <div class="section-title mb-2">Customer Details</div>
@@ -1464,7 +1827,7 @@ try {
                                 Clear
                             </button>
                             <button type="submit" id="saveBtn" class="btn btn-success rounded-pill px-5 fw-bold">
-                                Save Quick Sale & Generate Invoice
+                                <?= $editQuickSale ? 'Update Quick Sale & Generate Invoice' : 'Save Quick Sale & Generate Invoice' ?>
                             </button>
                         </div>
                     </form>
@@ -1549,22 +1912,22 @@ try {
                                     <td class="text-end">
                                         <div class="d-inline-flex align-items-center justify-content-end gap-1 quick-sale-actions">
                                             <a href="quick_sale_invoice_pdf.php?id=<?= (int)$sale['id'] ?>"
-                                                target="_blank" class="btn btn-action-icon btn-outline-primary"
+                                                target="_blank" class="btn btn-action-icon qs-ref-invoice"
                                                 title="View Invoice" aria-label="View Invoice">
-                                                <i class="bi bi-file-earmark-pdf"></i>
+                                                <?= qs_action_svg('invoice') ?>
                                             </a>
-                                            <button type="button" class="btn btn-whatsapp-icon btn-success js-quick-wa"
+                                            <button type="button" class="btn btn-whatsapp-icon qs-ref-whatsapp js-quick-wa"
                                                 data-id="<?= (int)$sale['id'] ?>" title="Send WhatsApp" aria-label="Send WhatsApp">
-                                                <i class="bi bi-whatsapp"></i>
+                                                <?= qs_action_svg('whatsapp') ?>
                                             </button>
-                                            <a href="quick-sales.php?edit=<?= (int)$sale['id'] ?>"
-                                                class="btn btn-action-icon btn-outline-warning" title="Edit" aria-label="Edit">
-                                                <i class="bi bi-pencil"></i>
+                                            <a href="quick-sale.php?edit=<?= (int)$sale['id'] ?>"
+                                                class="btn btn-action-icon qs-ref-edit" title="Edit" aria-label="Edit">
+                                                <?= qs_action_svg('edit') ?>
                                             </a>
-                                            <button type="button" class="btn btn-delete-icon btn-outline-danger js-quick-delete"
+                                            <button type="button" class="btn btn-delete-icon qs-ref-delete js-quick-delete"
                                                 data-id="<?= (int)$sale['id'] ?>" data-sale-no="<?= qs_e($sale['sale_no'] ?? '') ?>"
                                                 title="Delete" aria-label="Delete">
-                                                <i class="bi bi-trash3"></i>
+                                                <?= qs_action_svg('delete') ?>
                                             </button>
                                         </div>
                                     </td>
@@ -1585,7 +1948,24 @@ try {
 
     <script>
     (function() {
+        const editMode = <?= $editQuickSale ? 'true' : 'false' ?>;
+        const editPayload = <?= json_encode($editQuickSale ? [
+            'sale' => $editQuickSale,
+            'items' => $editQuickSaleItems,
+            'payment' => $editQuickSalePayment,
+            'denominations' => $editQuickSaleDenominations,
+        ] : null, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
         const items = [];
+        const editOriginalQtyMap = {};
+        if (editPayload?.items) {
+            editPayload.items.forEach(row => {
+                const productId = parseInt(row.product_id || 0, 10);
+                if (productId > 0) {
+                    editOriginalQtyMap[productId] =
+                        (editOriginalQtyMap[productId] || 0) + (parseFloat(row.original_qty || row.qty || 0) || 0);
+                }
+            });
+        }
         let lastSaleTotal = 0;
         let fallbackBackdrop = null;
 
@@ -2333,7 +2713,13 @@ try {
                     <td class="text-end">
                         <div class="item-actions">
                             <button type="button" class="btn btn-outline-danger" data-remove="${index}" title="Remove">
-                                <i class="fa fa-trash"></i>
+                                
+                                <svg class="quick-action-svg" width="14" height="14" viewBox="0 0 24 24"
+                                    fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                    stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M3 6h18"/><path d="M8 6V4h8v2"/>
+                                    <path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
+                                </svg>
                             </button>
                         </div>
                     </td>
@@ -2364,9 +2750,18 @@ try {
                 return false;
             }
 
-            const onHand = current.is_new ? 0 : (parseFloat(opt?.dataset?.onHand || 0) || 0);
+            const currentOnHand = current.is_new ? 0 : (parseFloat(opt?.dataset?.onHand || 0) || 0);
             const reserved = current.is_new ? 0 : (parseFloat(opt?.dataset?.reserved || 0) || 0);
-            const available = current.is_new ? 0 : (parseFloat(opt?.dataset?.available || 0) || 0);
+            const originalQty = current.product_id > 0
+                ? (parseFloat(editOriginalQtyMap[current.product_id] || 0) || 0)
+                : 0;
+            /*
+             * In edit mode the current DB stock already includes the old sale.
+             * The API restores old quantity before applying edited items, so add
+             * that original quantity back to the client-side baseline.
+             */
+            const onHand = currentOnHand + originalQty;
+            const available = onHand - reserved;
             const projectedOnHand = onHand - qty;
             const projectedAvailable = available - qty;
 
@@ -2522,7 +2917,7 @@ try {
                                 ? '<br>WhatsApp: ' + escapeHtml(data.whatsapp_message)
                                 : '')),
                         'success',
-                        'Quick Sale Saved'
+                        editMode ? 'Quick Sale Updated' : 'Quick Sale Saved'
                     );
 
                     setTimeout(() => {
@@ -2820,6 +3215,64 @@ try {
                 }
             });
         });
+
+
+        function loadEditSaleIntoFields() {
+            if (!editMode || !editPayload?.sale) return;
+
+            const sale = editPayload.sale || {};
+            const payment = editPayload.payment || {};
+            const denominations = editPayload.denominations || {};
+
+            if (customerNameInput) customerNameInput.value = String(sale.customer_name || '');
+            if (customerMobileInput) customerMobileInput.value = String(sale.mobile || '');
+            if (customerVenueInput) customerVenueInput.value = String(sale.address || '');
+
+            items.splice(0, items.length);
+            (editPayload.items || []).forEach(row => {
+                items.push({
+                    product_id: parseInt(row.product_id || 0, 10) || 0,
+                    product_name: String(row.product_name || ''),
+                    is_new_product: 0,
+                    qty: parseFloat(row.qty || 0) || 0,
+                    rate: parseFloat(row.rate || 0) || 0,
+                    amount: parseFloat(row.amount || 0) || 0,
+                    projected_on_hand_stock: parseFloat(row.projected_on_hand_stock || 0) || 0,
+                    projected_available_stock: parseFloat(row.projected_available_stock || 0) || 0
+                });
+            });
+
+            const cashTendered = parseFloat(payment.cash_tendered || 0) || 0;
+            const upiAmount = parseFloat(payment.upi_amount || 0) || 0;
+
+            if (cashCheck) cashCheck.checked = cashTendered > 0.009;
+            if (upiCheck) upiCheck.checked = upiAmount > 0.009;
+
+            if (cashAmountInput) cashAmountInput.value = cashTendered > 0 ? cashTendered.toFixed(2) : '';
+            if (upiAmountInput) upiAmountInput.value = upiAmount > 0 ? upiAmount.toFixed(2) : '';
+            if (upiReferenceInput) upiReferenceInput.value = String(payment.upi_reference || '');
+            if (paymentDateInput) paymentDateInput.value = String(payment.payment_date || '');
+            const remarks = document.getElementById('payment_remarks');
+            if (remarks) remarks.value = String(payment.remarks || '');
+
+            denomInputs.forEach(input => {
+                input.value = parseInt(denominations[input.name] || 0, 10) || 0;
+            });
+
+            renderItems();
+            syncPaymentModeUi();
+            denominationTotal();
+            calculatePayment();
+
+            showToast(
+                'Loaded ' + escapeHtml(String(sale.sale_no || 'Quick Sale')) +
+                ' into the Quick Sale fields. Make the corrections and click Update Quick Sale.',
+                'warning',
+                'Edit Mode'
+            );
+        }
+
+        loadEditSaleIntoFields();
 
         const pageToast = document.getElementById('pageToast');
         if (pageToast && window.bootstrap) {
