@@ -1300,7 +1300,7 @@ if ($autoOpenWhatsappId > 0) {
             border-radius: 20px !important;
         }
 
-        .mobile-card > .d-flex.justify-content-between {
+        .mobile-card>.d-flex.justify-content-between {
             align-items: flex-start !important;
             gap: 12px !important;
         }
@@ -1411,6 +1411,7 @@ if ($autoOpenWhatsappId > 0) {
     }
 
     @media(max-width:767.98px) {
+
         .mobile-card-actions .btn-action-icon,
         .mobile-card-actions .btn-delete-icon,
         .proforma-mobile-card .proforma-mobile-actions .btn-action-icon,
@@ -1432,8 +1433,382 @@ if ($autoOpenWhatsappId > 0) {
             height: 18px !important;
         }
     }
-
     </style>
+
+    <style>
+    /* ========================================================================
+   Compact module UI - tuned for comfortable use at 100% browser zoom.
+   UI sizing only: no PHP, SQL, workflow, filters, pagination or API logic.
+   ======================================================================== */
+    #main .page-section {
+        font-size: 12.5px;
+    }
+
+    #main .page-section .page-head {
+        padding: 16px 18px !important;
+        margin-bottom: 12px !important;
+        border-radius: 16px !important;
+    }
+
+    #main .page-section .page-head h1 {
+        font-size: 22px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+        letter-spacing: -.15px !important;
+        margin-bottom: 3px !important;
+    }
+
+    #main .page-section .page-head p,
+    #main .page-section .page-head .text-muted-custom {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
+    }
+
+    #main .page-section .module-card {
+        padding: 14px 15px !important;
+        border-radius: 16px !important;
+        margin-bottom: 12px !important;
+    }
+
+    #main .page-section .module-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+        line-height: 1.2 !important;
+    }
+
+    #main .page-section .stat-card,
+    #main .page-section .kpi-card {
+        min-height: 86px !important;
+        padding: 12px 13px !important;
+        border-radius: 14px !important;
+        gap: 10px !important;
+    }
+
+    #main .page-section .stat-icon {
+        width: 40px !important;
+        height: 40px !important;
+        min-width: 40px !important;
+        border-radius: 12px !important;
+    }
+
+    #main .page-section .stat-icon svg,
+    #main .page-section .stat-icon i {
+        width: 19px !important;
+        height: 19px !important;
+    }
+
+    #main .page-section .stat-card span,
+    #main .page-section .stat-card small,
+    #main .page-section .kpi-card small {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        letter-spacing: .2px !important;
+    }
+
+    #main .page-section .stat-card strong,
+    #main .page-section .kpi-card strong {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+    }
+
+    #main .page-section .filter-card {
+        padding: 12px !important;
+        border-radius: 14px !important;
+    }
+
+    #main .page-section .form-label,
+    #main .page-section label.fw-bold {
+        font-size: 11px !important;
+        font-weight: 700 !important;
+        margin-bottom: 4px !important;
+    }
+
+    #main .page-section .form-control,
+    #main .page-section .form-select,
+    #main .page-section .select2-container--bootstrap-5 .select2-selection {
+        min-height: 38px !important;
+        font-size: 12px !important;
+        border-radius: 10px !important;
+    }
+
+    #main .page-section .form-control,
+    #main .page-section .form-select {
+        padding-top: .38rem !important;
+        padding-bottom: .38rem !important;
+    }
+
+    #main .page-section textarea.form-control {
+        min-height: 68px !important;
+    }
+
+    #main .page-section .btn:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
+        font-size: 11.5px !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+    }
+
+    #main .page-section .btn.rounded-pill:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
+        padding-top: 6px !important;
+        padding-bottom: 6px !important;
+    }
+
+    #main .page-section .table-ui,
+    #main .page-section table {
+        font-size: 11.5px !important;
+    }
+
+    #main .page-section .table-ui th,
+    #main .page-section table th {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        padding: 8px 9px !important;
+        line-height: 1.25 !important;
+    }
+
+    #main .page-section .table-ui td,
+    #main .page-section table td {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        padding: 8px 9px !important;
+        line-height: 1.3 !important;
+    }
+
+    #main .page-section table td strong,
+    #main .page-section .customer-name,
+    #main .page-section .job-no,
+    #main .page-section .mobile-card-title,
+    #main .page-section .product-names,
+    #main .page-section .amount-text,
+    #main .page-section .balance-text,
+    #main .page-section .paid-amount,
+    #main .page-section .balance-amount {
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .status-pill,
+    #main .page-section .stock-pill,
+    #main .page-section .badge-pill,
+    #main .page-section .order-badge,
+    #main .page-section .filter-tab {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+        padding: 4px 7px !important;
+    }
+
+    #main .page-section .mobile-card,
+    #main .page-section .mobile-products .card-ui {
+        padding: 12px !important;
+        border-radius: 14px !important;
+        margin-bottom: 9px !important;
+    }
+
+    #main .page-section .mobile-card-title {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .mobile-card-subtitle,
+    #main .page-section .muted-small,
+    #main .page-section .small-muted,
+    #main .page-section .meta {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
+    }
+
+    #main .page-section .view-info-card,
+    #main .page-section .amount-box,
+    #main .page-section .profile-box,
+    #main .page-section .summary-item,
+    #main .page-section .hist-row {
+        border-radius: 13px !important;
+        padding: 11px !important;
+    }
+
+    #main .page-section .view-info-card small,
+    #main .page-section .amount-box small,
+    #main .page-section .summary-item small,
+    #main .page-section .section-label {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .view-info-card span,
+    #main .page-section .view-info-card strong,
+    #main .page-section .amount-box strong,
+    #main .page-section .summary-item strong {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .pagination-wrap,
+    #main .page-section nav[aria-label*="Pagination"i] {
+        font-size: 11px !important;
+    }
+
+    #main .page-section .pagination .page-link,
+    #main .page-section .product-pagination .page-link-ui {
+        min-width: 32px !important;
+        min-height: 32px !important;
+        padding: 5px 8px !important;
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Customer Management compact sizing */
+    #main .customer-page .stats-grid {
+        gap: 10px !important;
+        margin-bottom: 12px !important;
+    }
+
+    #main .customer-page .stat-box {
+        padding: 11px 12px !important;
+        border-radius: 14px !important;
+    }
+
+    #main .customer-page .stat-box small {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .customer-page .stat-box strong {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        margin-top: 2px !important;
+    }
+
+    #main .customer-page .workspace {
+        gap: 12px !important;
+    }
+
+    #main .customer-page .pane {
+        border-radius: 16px !important;
+    }
+
+    #main .customer-page .pane-head,
+    #main .customer-page .pane-body {
+        padding: 13px 14px !important;
+    }
+
+    #main .customer-page .customer-name,
+    #main .customer-page .profile-name {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .customer-page .profile-grid,
+    #main .customer-page .summary-grid {
+        gap: 9px !important;
+    }
+
+    #main .customer-page .tabs {
+        margin: 12px 0 9px !important;
+        gap: 5px !important;
+    }
+
+    #main .customer-page .tabs button {
+        padding: 5px 9px !important;
+        font-size: 10px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Product master images and rows */
+    #main .module-page .product-thumb,
+    #main .module-page .placeholder-thumb {
+        width: 42px !important;
+        height: 42px !important;
+    }
+
+    /* Job Card shortcut controls */
+    #main .module-page .shortcut-action-box {
+        padding: 10px !important;
+        border-radius: 13px !important;
+    }
+
+    #main .module-page .shortcut-btn {
+        min-height: 34px !important;
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .module-page .shortcut-note,
+    #main .module-page .shortcut-help-bar {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+    }
+
+    /* Keep icon-only actions compact */
+    #main .page-section .btn-action-icon,
+    #main .page-section .btn-delete-icon,
+    #main .page-section .btn-whatsapp-icon,
+    #main .customer-page .actions .btn {
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        max-width: 32px !important;
+        padding: 0 !important;
+    }
+
+    #main .page-section .btn-action-icon svg,
+    #main .page-section .btn-delete-icon svg,
+    #main .page-section .btn-whatsapp-icon svg,
+    #main .customer-page .actions .btn svg {
+        width: 14px !important;
+        height: 14px !important;
+    }
+
+    /* Reduce heavy utility weight only inside module content */
+    #main .page-section .fw-bold,
+    #main .page-section strong {
+        font-weight: 700 !important;
+    }
+
+    /* Compact modal typography without changing modal workflow */
+    #main~.modal .modal-title,
+    .modal .modal-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+    }
+
+    .modal .modal-header,
+    .modal .modal-footer {
+        padding-top: 11px !important;
+        padding-bottom: 11px !important;
+    }
+
+    .modal .modal-body {
+        font-size: 12px !important;
+    }
+
+    @media (max-width: 767.98px) {
+        #main .page-section .page-head {
+            padding: 14px !important;
+        }
+
+        #main .page-section .page-head h1 {
+            font-size: 20px !important;
+        }
+
+        #main .page-section .module-card {
+            padding: 12px !important;
+        }
+
+        #main .page-section .stat-card,
+        #main .page-section .kpi-card {
+            min-height: 76px !important;
+            padding: 10px 11px !important;
+        }
+
+        #main .page-section .stat-icon {
+            width: 36px !important;
+            height: 36px !important;
+            min-width: 36px !important;
+        }
+    }
+    </style>
+
 </head>
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -1632,15 +2007,16 @@ if ($autoOpenWhatsappId > 0) {
                                             data-sub-total="<?= e($row['sub_total']) ?>"
                                             data-discount-amount="<?= e($row['discount_amount']) ?>"
                                             data-final-amount="<?= e($row['final_amount']) ?>"
-                                            data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
+                                            data-remarks="<?= e($row['remarks']) ?>"><i
+                                                data-lucide="pencil"></i></button>
 
 
                                         <?php endif; ?>
 
                                         <?php if ($canSendWhatsapp): ?>
                                         <?php if ($canSendWhatsapp): ?>
-                                <?= qtWhatsappPreviewButton($row) ?>
-                                <?php endif; ?>
+                                        <?= qtWhatsappPreviewButton($row) ?>
+                                        <?php endif; ?>
                                         <?php endif; ?>
 
                                         <?php if (!$cancelled && $canDelete): ?>
@@ -1650,7 +2026,8 @@ if ($autoOpenWhatsappId > 0) {
                                             <input type="hidden" name="action" value="cancel_record">
                                             <input type="hidden" name="id" value="<?= e($row['id']) ?>">
                                             <button title="Cancel" aria-label="Cancel" type="submit"
-                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i data-lucide="x-circle"></i></button>
+                                                class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i
+                                                    data-lucide="x-circle"></i></button>
                                         </form>
                                         <?php endif; ?>
                                     </td>
@@ -1739,7 +2116,9 @@ if ($autoOpenWhatsappId > 0) {
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="cancel_record">
                                     <input type="hidden" name="id" value="<?= e($row['id']) ?>">
-                                    <button title="Cancel" aria-label="Cancel" type="submit" class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i data-lucide="x-circle"></i></button>
+                                    <button title="Cancel" aria-label="Cancel" type="submit"
+                                        class="btn btn-sm btn-outline-danger rounded-circle fw-bold btn-action-icon"><i
+                                            data-lucide="x-circle"></i></button>
                                 </form>
                                 <?php endif; ?>
                             </div>
@@ -2117,8 +2496,8 @@ if ($autoOpenWhatsappId > 0) {
                             data-bs-dismiss="modal">
                             Cancel
                         </button>
-                        <button type="button" class="btn btn-whatsapp-icon btn-action-icon rounded-circle" id="waSendBtn"
-                            title="Send WhatsApp">
+                        <button type="button" class="btn btn-whatsapp-icon btn-action-icon rounded-circle"
+                            id="waSendBtn" title="Send WhatsApp">
                             <?= qtWhatsappSvg() ?>
                         </button>
                     </div>

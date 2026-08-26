@@ -164,7 +164,6 @@ if (!empty($_GET['error'])) {
     <?php include __DIR__ . '/includes/links.php'; ?>
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
     <style>
-
     .toast-ui {
         border: 0;
         border-radius: 18px;
@@ -371,6 +370,326 @@ if (!empty($_GET['error'])) {
         }
     }
     </style>
+
+    <style id="compact-stock-ui-overrides">
+    /* Compact 100% zoom UI - visual sizing only */
+    .module-page {
+        font-size: 12.5px;
+    }
+
+    .module-page .page-head-card {
+        padding: 15px 18px !important;
+        margin-bottom: 12px !important;
+        border-radius: 16px !important;
+    }
+
+    .module-page .page-head-card h1 {
+        font-size: 23px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+        margin-bottom: 3px !important;
+    }
+
+    .module-page .page-head-card p {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
+    }
+
+    .module-page .stock-action-buttons {
+        gap: 6px !important;
+    }
+
+    .module-page .stock-action-buttons .btn {
+        font-size: 11.5px !important;
+        font-weight: 700 !important;
+        padding: 7px 10px !important;
+        min-height: 34px !important;
+        border-radius: 9px !important;
+    }
+
+    .module-page .stock-action-buttons .btn i {
+        width: 13px !important;
+        height: 13px !important;
+    }
+
+    .module-page .row.g-3.mb-3 {
+        --bs-gutter-x: .75rem;
+        --bs-gutter-y: .75rem;
+        margin-bottom: 12px !important;
+    }
+
+    .module-page .kpi-card {
+        min-height: 88px !important;
+        padding: 12px 14px !important;
+        gap: 10px !important;
+        border-radius: 15px !important;
+    }
+
+    .module-page .kpi-icon {
+        width: 40px !important;
+        height: 40px !important;
+        border-radius: 12px !important;
+        flex: 0 0 40px !important;
+    }
+
+    .module-page .kpi-icon svg {
+        width: 18px !important;
+        height: 18px !important;
+    }
+
+    .module-page .kpi-label {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        letter-spacing: .02em !important;
+    }
+
+    .module-page .kpi-value {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        line-height: 1.1 !important;
+        margin: 2px 0 !important;
+    }
+
+    .module-page .kpi-sub {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.25 !important;
+        margin: 2px 0 0 !important;
+    }
+
+    .module-page .filter-card {
+        padding: 12px 14px !important;
+        margin-bottom: 12px !important;
+        border-radius: 15px !important;
+    }
+
+    .module-page .filter-card .form-label {
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+        margin-bottom: 4px !important;
+    }
+
+    .module-page .filter-card .form-control,
+    .module-page .filter-card .form-select {
+        min-height: 36px !important;
+        height: 36px !important;
+        font-size: 12px !important;
+        padding: 6px 10px !important;
+        border-radius: 9px !important;
+    }
+
+    .module-page .filter-card .btn {
+        min-height: 36px !important;
+        font-size: 11.5px !important;
+        font-weight: 700 !important;
+        padding: 6px 10px !important;
+        border-radius: 9px !important;
+    }
+
+    .module-page section.card-ui.overflow-hidden {
+        border-radius: 16px !important;
+    }
+
+    .module-page section.card-ui.overflow-hidden>.border-bottom {
+        padding: 12px 14px !important;
+    }
+
+    .module-page section.card-ui.overflow-hidden>.border-bottom h2 {
+        font-size: 14px !important;
+        font-weight: 800 !important;
+        margin-bottom: 2px !important;
+    }
+
+    .module-page section.card-ui.overflow-hidden>.border-bottom p {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.3 !important;
+    }
+
+    .module-page .desktop-table {
+        padding-left: 12px !important;
+        padding-right: 12px !important;
+        padding-bottom: 10px !important;
+    }
+
+    .module-page .table-ui {
+        font-size: 11.5px !important;
+    }
+
+    .module-page .table-ui th {
+        font-size: 9.5px !important;
+        font-weight: 750 !important;
+        padding: 7px 8px !important;
+        letter-spacing: .02em !important;
+        white-space: nowrap !important;
+    }
+
+    .module-page .table-ui td {
+        font-size: 11.5px !important;
+        padding: 7px 8px !important;
+        line-height: 1.25 !important;
+        vertical-align: middle !important;
+    }
+
+    .module-page .table-ui td .fw-bold {
+        font-weight: 700 !important;
+    }
+
+    .module-page .table-ui tbody tr {
+        height: auto !important;
+    }
+
+    .module-page .product-thumb {
+        width: 30px !important;
+        height: 30px !important;
+        border-radius: 6px !important;
+    }
+
+    .module-page .shortage-note {
+        font-size: 9.5px !important;
+        font-weight: 650 !important;
+        margin-top: 2px !important;
+    }
+
+    .module-page .stock-status-pill {
+        padding: 4px 7px !important;
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+        border-radius: 7px !important;
+    }
+
+    .module-page .table-ui .btn.btn-sm {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        line-height: 1.1 !important;
+        padding: 5px 7px !important;
+        min-height: 27px !important;
+        border-radius: 7px !important;
+    }
+
+    .module-page .table-ui td:last-child .d-flex {
+        gap: 4px !important;
+        flex-wrap: nowrap !important;
+    }
+
+    .module-page .modal-content {
+        border-radius: 16px !important;
+    }
+
+    .module-page .modal-header {
+        padding: 13px 16px !important;
+    }
+
+    .module-page .modal-body {
+        padding: 14px 16px !important;
+    }
+
+    .module-page .modal-footer {
+        padding: 11px 16px !important;
+    }
+
+    .module-page .modal-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+    }
+
+    .module-page .modal-header p {
+        font-size: 10.5px !important;
+    }
+
+    .module-page .modal-body .form-label {
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+        margin-bottom: 4px !important;
+    }
+
+    .module-page .modal-body .form-control,
+    .module-page .modal-body .form-select {
+        min-height: 36px !important;
+        font-size: 12px !important;
+        padding: 6px 9px !important;
+        border-radius: 9px !important;
+    }
+
+    .module-page .modal-stock-info {
+        padding: 9px !important;
+        border-radius: 10px !important;
+    }
+
+    .module-page .modal-stock-info .label {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    .module-page .modal-stock-info .value {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+    }
+
+    .module-page .bulk-stock-table th,
+    .module-page .bulk-stock-table td {
+        padding: 7px 8px !important;
+        font-size: 11px !important;
+    }
+
+    .module-page .bulk-stock-table th {
+        font-size: 9.5px !important;
+        font-weight: 750 !important;
+    }
+
+    .module-page .summary-line {
+        padding: 9px 11px !important;
+        gap: 12px !important;
+        font-size: 11px !important;
+    }
+
+    .module-page .summary-line strong {
+        font-size: 13px !important;
+        font-weight: 800 !important;
+    }
+
+    @media(max-width:767.98px) {
+        .module-page .page-head-card {
+            padding: 13px 14px !important;
+        }
+
+        .module-page .page-head-card h1 {
+            font-size: 20px !important;
+        }
+
+        .module-page .kpi-card {
+            min-height: 78px !important;
+            padding: 10px 12px !important;
+        }
+
+        .module-page .kpi-value {
+            font-size: 17px !important;
+        }
+
+        .module-page .mobile-stock {
+            gap: 8px !important;
+            padding: 8px !important;
+        }
+
+        .module-page .mobile-project-card {
+            padding: 11px !important;
+            border-radius: 13px !important;
+            font-size: 11.5px !important;
+        }
+
+        .module-page .mobile-field {
+            padding: 4px 0 !important;
+            font-size: 11px !important;
+        }
+
+        .module-page .mobile-project-card .btn {
+            font-size: 10px !important;
+            padding: 5px 7px !important;
+        }
+    }
+    </style>
+
 </head>
 
 <body class="<?= ps_e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -383,14 +702,15 @@ if (!empty($_GET['error'])) {
 
                 <?php if ($message !== ''): ?>
                 <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 12000">
-                    <div id="pageToast" class="toast toast-ui <?= ps_e($messageType) ?>" role="alert" aria-live="assertive"
-                        aria-atomic="true" data-bs-delay="4200">
+                    <div id="pageToast" class="toast toast-ui <?= ps_e($messageType) ?>" role="alert"
+                        aria-live="assertive" aria-atomic="true" data-bs-delay="4200">
                         <div class="d-flex">
                             <div class="toast-body">
                                 <div class="toast-title"><?= ps_e($toastTitle) ?></div>
                                 <div class="toast-message"><?= ps_e($message) ?></div>
                             </div>
-                            <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                            <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast"
+                                aria-label="Close"></button>
                         </div>
                     </div>
                 </div>
@@ -822,65 +1142,63 @@ if (!empty($_GET['error'])) {
 
     <?php include __DIR__ . '/includes/script.php'; ?>
     <script>
-    
-function showToast(message, type = 'success', title = '') {
-    if (!message) return;
+    function showToast(message, type = 'success', title = '') {
+        if (!message) return;
 
-    const oldToastWrap = document.getElementById('dynamicActionToastWrap');
-    if (oldToastWrap) oldToastWrap.remove();
+        const oldToastWrap = document.getElementById('dynamicActionToastWrap');
+        if (oldToastWrap) oldToastWrap.remove();
 
-    const toastTitle = title || (type === 'danger' ? 'Failed' : (type === 'warning' ? 'Warning' : 'Success'));
-    const wrap = document.createElement('div');
-    wrap.id = 'dynamicActionToastWrap';
-    wrap.className = 'toast-container position-fixed top-0 end-0 p-3';
-    wrap.style.zIndex = '12000';
+        const toastTitle = title || (type === 'danger' ? 'Failed' : (type === 'warning' ? 'Warning' : 'Success'));
+        const wrap = document.createElement('div');
+        wrap.id = 'dynamicActionToastWrap';
+        wrap.className = 'toast-container position-fixed top-0 end-0 p-3';
+        wrap.style.zIndex = '12000';
 
-    const toast = document.createElement('div');
-    toast.id = 'dynamicActionToast';
-    toast.className = 'toast toast-ui ' + type;
-    toast.setAttribute('role', 'alert');
-    toast.setAttribute('aria-live', 'assertive');
-    toast.setAttribute('aria-atomic', 'true');
-    toast.setAttribute('data-bs-delay', '4200');
+        const toast = document.createElement('div');
+        toast.id = 'dynamicActionToast';
+        toast.className = 'toast toast-ui ' + type;
+        toast.setAttribute('role', 'alert');
+        toast.setAttribute('aria-live', 'assertive');
+        toast.setAttribute('aria-atomic', 'true');
+        toast.setAttribute('data-bs-delay', '4200');
 
-    const flex = document.createElement('div');
-    flex.className = 'd-flex';
+        const flex = document.createElement('div');
+        flex.className = 'd-flex';
 
-    const body = document.createElement('div');
-    body.className = 'toast-body';
+        const body = document.createElement('div');
+        body.className = 'toast-body';
 
-    const titleEl = document.createElement('div');
-    titleEl.className = 'toast-title';
-    titleEl.textContent = toastTitle;
+        const titleEl = document.createElement('div');
+        titleEl.className = 'toast-title';
+        titleEl.textContent = toastTitle;
 
-    const messageEl = document.createElement('div');
-    messageEl.className = 'toast-message';
-    messageEl.textContent = message;
+        const messageEl = document.createElement('div');
+        messageEl.className = 'toast-message';
+        messageEl.textContent = message;
 
-    const close = document.createElement('button');
-    close.type = 'button';
-    close.className = 'btn-close me-3 m-auto';
-    close.setAttribute('data-bs-dismiss', 'toast');
-    close.setAttribute('aria-label', 'Close');
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'btn-close me-3 m-auto';
+        close.setAttribute('data-bs-dismiss', 'toast');
+        close.setAttribute('aria-label', 'Close');
 
-    body.appendChild(titleEl);
-    body.appendChild(messageEl);
-    flex.appendChild(body);
-    flex.appendChild(close);
-    toast.appendChild(flex);
-    wrap.appendChild(toast);
-    document.body.appendChild(wrap);
+        body.appendChild(titleEl);
+        body.appendChild(messageEl);
+        flex.appendChild(body);
+        flex.appendChild(close);
+        toast.appendChild(flex);
+        wrap.appendChild(toast);
+        document.body.appendChild(wrap);
 
-    if (window.bootstrap && bootstrap.Toast) {
-        bootstrap.Toast.getOrCreateInstance(toast).show();
+        if (window.bootstrap && bootstrap.Toast) {
+            bootstrap.Toast.getOrCreateInstance(toast).show();
+        }
     }
-}
 
-const pageToastEl = document.getElementById('pageToast');
-if (pageToastEl && window.bootstrap && bootstrap.Toast) {
-    bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
-}
-
+    const pageToastEl = document.getElementById('pageToast');
+    if (pageToastEl && window.bootstrap && bootstrap.Toast) {
+        bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
+    }
     </script>
     <?php if ($canCreate): ?>
     <script>

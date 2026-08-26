@@ -229,6 +229,131 @@ foreach ($subMenus as $parentId => $children) {
 $logoPath = 'assets/img/subhiksha-logo.png';
 $logoFullPath = __DIR__ . '/../' . $logoPath;
 ?>
+<style id="compact-sidebar-size-overrides">
+/* Compact desktop sidebar - visual sizing only. */
+:root {
+    --erp-sidebar-width: 232px;
+    --sidebar-width: 232px;
+}
+
+@media (min-width:1200px) {
+    #sidebar {
+        width: 232px !important;
+        min-width: 232px !important;
+        max-width: 232px !important;
+    }
+
+    #main {
+        margin-left: 232px !important;
+        width: calc(100% - 232px) !important;
+        max-width: calc(100% - 232px) !important;
+    }
+}
+
+#sidebar .sidebar-header {
+    min-height: 62px !important;
+    padding: 9px 12px !important;
+}
+
+#sidebar .brand-logo {
+    width: 38px !important;
+    height: 38px !important;
+    min-width: 38px !important;
+    border-radius: 10px !important;
+    overflow: hidden;
+}
+
+#sidebar .brand-logo img {
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain !important;
+}
+
+#sidebar .sidebar-brand-text {
+    font-size: 14px !important;
+    line-height: 1.1 !important;
+    font-weight: 750 !important;
+    letter-spacing: .01em !important;
+    white-space: nowrap;
+}
+
+#sidebar .sidebar-nav {
+    padding: 8px 9px 68px !important;
+}
+
+#sidebar .nav-link-custom {
+    min-height: 38px !important;
+    margin: 2px 0 !important;
+    padding: 7px 10px !important;
+    border-radius: 10px !important;
+    gap: 9px !important;
+    font-size: 12.5px !important;
+    line-height: 1.15 !important;
+    font-weight: 650 !important;
+}
+
+#sidebar .nav-link-custom>svg,
+#sidebar .nav-link-custom>i>svg {
+    width: 17px !important;
+    height: 17px !important;
+    min-width: 17px !important;
+    stroke-width: 1.9 !important;
+}
+
+#sidebar .sidebar-sub-arrow {
+    width: 14px !important;
+    height: 14px !important;
+}
+
+#sidebar .sidebar-submenu {
+    padding: 2px 0 3px !important;
+}
+
+#sidebar .sidebar-sub-link {
+    min-height: 34px !important;
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
+    padding-left: 27px !important;
+    font-size: 11.5px !important;
+}
+
+#sidebar .sidebar-flyout-title {
+    font-size: 10px !important;
+    font-weight: 700 !important;
+    padding: 6px 10px !important;
+}
+
+#sidebar .sidebar-footer {
+    min-height: 52px !important;
+    padding: 8px 12px !important;
+}
+
+#sidebar .support-icon {
+    width: 32px !important;
+    height: 32px !important;
+    min-width: 32px !important;
+    border-radius: 10px !important;
+}
+
+#sidebar .support-icon svg {
+    width: 16px !important;
+    height: 16px !important;
+}
+
+#sidebar .sidebar-help-text .small,
+#sidebar .sidebar-help-text p {
+    font-size: 10.5px !important;
+    line-height: 1.2 !important;
+    font-weight: 600 !important;
+}
+
+@media (max-width:1199.98px) {
+    #sidebar {
+        width: min(84vw, 250px) !important;
+        max-width: 250px !important;
+    }
+}
+</style>
 
 <aside id="sidebar">
     <div class="sidebar-header">
