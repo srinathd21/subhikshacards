@@ -305,7 +305,7 @@ class SubhikshaQuickSaleCashInvoicePDF extends FPDF
 
         $address = trim((string)($sale['address'] ?? ''));
         $addressLines = $this->splitText(
-            'Address: ' . ($address !== '' ? $address : '-'),
+            'Venue: ' . ($address !== '' ? $address : '-'),
             101
         );
         $addressLines = array_slice($addressLines, 0, 3);

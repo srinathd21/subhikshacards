@@ -850,7 +850,19 @@ try {
             font-size: 12px;
         }
     }
-    </style>
+    
+    .quick-sale-actions .btn {
+        width: 31px;
+        height: 31px;
+        min-width: 31px;
+        padding: 0;
+        border-radius: 9px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .quick-sale-actions .btn svg { width: 14px; height: 14px; }
+</style>
 
 <style id="compact-ui-overrides">
 /* Compact 100% zoom UI override - visual sizing only */
@@ -983,6 +995,96 @@ try {
 .module-page .product-search-clear{width:38px !important;min-width:38px !important;flex-basis:38px !important;border-radius:10px !important;font-size:16px !important;}
 .module-page .item-actions .btn{width:30px !important;height:30px !important;padding:0 !important;}
 .module-page .denom-total-box{padding:8px 9px !important;font-size:11px !important;}
+
+/* Recent Quick Sales - extra compact table/action UI */
+.module-page .module-card .section-title {
+    font-size: 14px !important;
+    font-weight: 750 !important;
+}
+
+.module-page .module-card .table-responsive {
+    border-radius: 10px;
+}
+
+.module-page .module-card .table-ui {
+    font-size: 10.5px !important;
+}
+
+.module-page .module-card .table-ui th {
+    padding: 6px 7px !important;
+    font-size: 9px !important;
+    font-weight: 700 !important;
+    white-space: nowrap;
+}
+
+.module-page .module-card .table-ui td {
+    padding: 6px 7px !important;
+    font-size: 10.5px !important;
+    font-weight: 500 !important;
+    line-height: 1.25 !important;
+    vertical-align: middle !important;
+}
+
+.module-page .module-card .table-ui td strong {
+    font-size: 10.7px !important;
+    font-weight: 700 !important;
+}
+
+.module-page .module-card .table-ui td small {
+    font-size: 9.3px !important;
+    line-height: 1.2 !important;
+    font-weight: 500 !important;
+}
+
+.module-page .quick-sale-actions {
+    gap: 4px !important;
+}
+
+.module-page .quick-sale-actions .btn {
+    width: 28px !important;
+    height: 28px !important;
+    min-width: 28px !important;
+    max-width: 28px !important;
+    border-radius: 8px !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+
+.module-page .quick-sale-actions .btn i {
+    font-size: 12px !important;
+    line-height: 1 !important;
+}
+
+.module-page .quick-sale-actions .btn-whatsapp-icon i {
+    font-size: 14px !important;
+}
+
+.module-page .quick-sale-actions .btn-whatsapp-icon {
+    background: #198754 !important;
+    border-color: #198754 !important;
+    color: #fff !important;
+}
+
+.module-page .quick-sale-actions .btn-whatsapp-icon:hover,
+.module-page .quick-sale-actions .btn-whatsapp-icon:focus {
+    background: #157347 !important;
+    border-color: #146c43 !important;
+    color: #fff !important;
+}
+
+.module-page .module-card .btn.rounded-pill {
+    font-size: 10.5px !important;
+    padding: 5px 11px !important;
+}
+
+@media (max-width: 991.98px) {
+    .module-page .module-card .table-ui {
+        min-width: 980px;
+    }
+}
+
 </style><!-- compact-ui-overrides -->
 </head>
 
@@ -1077,10 +1179,10 @@ try {
                                 </div>
 
                                 <div class="col-lg-5">
-                                    <label class="form-label fw-bold">Address</label>
-                                    <input type="text" name="customer_address" id="customer_address"
+                                    <label class="form-label fw-bold">Venue</label>
+                                    <input type="text" name="customer_venue" id="customer_venue"
                                         class="form-control" maxlength="1000"
-                                        placeholder="Optional customer address" autocomplete="street-address">
+                                        placeholder="Optional function / customer venue" autocomplete="off">
                                 </div>
                             </div>
                         </div>
@@ -1389,7 +1491,7 @@ try {
                                     <th>Payment</th>
                                     <th class="text-end">Return</th>
                                     <th class="text-end">Total Amount</th>
-                                    <th class="text-end">Invoice</th>
+                                    <th class="text-end">Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1408,7 +1510,7 @@ try {
                                         <?php
                                             $recentCustomerName = trim((string)($sale['customer_name'] ?? ''));
                                             $recentCustomerMobile = trim((string)($sale['mobile'] ?? ''));
-                                            $recentCustomerAddress = trim((string)($sale['address'] ?? ''));
+                                            $recentCustomerVenue = trim((string)($sale['address'] ?? ''));
                                         ?>
                                         <strong>
                                             <?= qs_e($recentCustomerName !== '' ? $recentCustomerName : 'Walk-in Customer') ?>
@@ -1418,10 +1520,10 @@ try {
                                             <?= qs_e($recentCustomerMobile) ?>
                                         </small>
                                         <?php endif; ?>
-                                        <?php if ($recentCustomerAddress !== ''): ?>
+                                        <?php if ($recentCustomerVenue !== ''): ?>
                                         <small class="d-block text-muted-custom"
-                                            title="<?= qs_e($recentCustomerAddress) ?>">
-                                            <?= qs_e($recentCustomerAddress) ?>
+                                            title="<?= qs_e($recentCustomerVenue) ?>">
+                                            Venue: <?= qs_e($recentCustomerVenue) ?>
                                         </small>
                                         <?php endif; ?>
                                     </td>
@@ -1445,11 +1547,26 @@ try {
                                     <td class="text-end"><?= qs_e(qs_money($sale['return_amount'] ?? 0)) ?></td>
                                     <td class="text-end fw-bold"><?= qs_e(qs_money($sale['total_amount'] ?? 0)) ?></td>
                                     <td class="text-end">
-                                        <a href="quick_sale_invoice_pdf.php?id=<?= (int)$sale['id'] ?>"
-                                           target="_blank"
-                                           class="btn btn-sm btn-outline-primary rounded-pill fw-bold px-3">
-                                            Invoice
-                                        </a>
+                                        <div class="d-inline-flex align-items-center justify-content-end gap-1 quick-sale-actions">
+                                            <a href="quick_sale_invoice_pdf.php?id=<?= (int)$sale['id'] ?>"
+                                                target="_blank" class="btn btn-action-icon btn-outline-primary"
+                                                title="View Invoice" aria-label="View Invoice">
+                                                <i class="bi bi-file-earmark-pdf"></i>
+                                            </a>
+                                            <button type="button" class="btn btn-whatsapp-icon btn-success js-quick-wa"
+                                                data-id="<?= (int)$sale['id'] ?>" title="Send WhatsApp" aria-label="Send WhatsApp">
+                                                <i class="bi bi-whatsapp"></i>
+                                            </button>
+                                            <a href="quick-sales.php?edit=<?= (int)$sale['id'] ?>"
+                                                class="btn btn-action-icon btn-outline-warning" title="Edit" aria-label="Edit">
+                                                <i class="bi bi-pencil"></i>
+                                            </a>
+                                            <button type="button" class="btn btn-delete-icon btn-outline-danger js-quick-delete"
+                                                data-id="<?= (int)$sale['id'] ?>" data-sale-no="<?= qs_e($sale['sale_no'] ?? '') ?>"
+                                                title="Delete" aria-label="Delete">
+                                                <i class="bi bi-trash3"></i>
+                                            </button>
+                                        </div>
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
@@ -1499,7 +1616,7 @@ try {
         const clearProductSearchBtn = document.getElementById('clearProductSearchBtn');
         const customerNameInput = document.getElementById('customer_name');
         const customerMobileInput = document.getElementById('customer_mobile');
-        const customerAddressInput = document.getElementById('customer_address');
+        const customerVenueInput = document.getElementById('customer_venue');
 
         function money(value) {
             return '₹' + (parseFloat(value || 0) || 0).toLocaleString('en-IN', {
@@ -2325,7 +2442,7 @@ try {
             if (upiReferenceInput) upiReferenceInput.value = '';
             if (customerNameInput) customerNameInput.value = '';
             if (customerMobileInput) customerMobileInput.value = '';
-            if (customerAddressInput) customerAddressInput.value = '';
+            if (customerVenueInput) customerVenueInput.value = '';
             syncPaymentModeUi();
             denominationTotal();
         });
@@ -2648,6 +2765,61 @@ try {
 
             $product.on('select2:clear change', useMasterPrice);
         }
+
+        async function recentQuickSaleAction(action, quickSaleId) {
+            const formData = new FormData();
+            formData.set('action', action);
+            formData.set('quick_sale_id', String(quickSaleId));
+            formData.set('csrf_token', String(document.querySelector('#quickSaleForm [name="csrf_token"]')?.value || ''));
+
+            const response = await fetch('api/quick-sale.php', {
+                method: 'POST',
+                body: formData,
+                headers: {'X-Requested-With': 'XMLHttpRequest'}
+            });
+            const data = await response.json().catch(() => ({status:false, message:'Invalid server response.'}));
+            if (!response.ok || !data.status) {
+                throw new Error(data.message || 'Quick Sale action failed.');
+            }
+            return data;
+        }
+
+        document.querySelectorAll('.js-quick-wa').forEach(button => {
+            button.addEventListener('click', async function() {
+                const id = parseInt(this.dataset.id || '0', 10);
+                if (!id) return;
+                const original = this.innerHTML;
+                this.disabled = true;
+                this.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+                try {
+                    const data = await recentQuickSaleAction('send_whatsapp', id);
+                    showToast(escapeHtml(data.message || 'WhatsApp sent.'), 'success', 'WhatsApp');
+                } catch (error) {
+                    showToast(escapeHtml(error?.message || 'WhatsApp sending failed.'), 'danger', 'WhatsApp Failed');
+                } finally {
+                    this.disabled = false;
+                    this.innerHTML = original;
+                }
+            });
+        });
+
+        document.querySelectorAll('.js-quick-delete').forEach(button => {
+            button.addEventListener('click', async function() {
+                const id = parseInt(this.dataset.id || '0', 10);
+                const saleNo = String(this.dataset.saleNo || '');
+                if (!id) return;
+                if (!window.confirm('Delete ' + (saleNo || 'this Quick Sale') + '? Stock will be restored automatically.')) return;
+                this.disabled = true;
+                try {
+                    const data = await recentQuickSaleAction('delete', id);
+                    showToast(escapeHtml(data.message || 'Quick Sale deleted.'), 'success', 'Deleted');
+                    setTimeout(() => window.location.reload(), 500);
+                } catch (error) {
+                    showToast(escapeHtml(error?.message || 'Unable to delete Quick Sale.'), 'danger', 'Delete Failed');
+                    this.disabled = false;
+                }
+            });
+        });
 
         const pageToast = document.getElementById('pageToast');
         if (pageToast && window.bootstrap) {

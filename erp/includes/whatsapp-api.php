@@ -182,8 +182,34 @@ if (!function_exists('subhiksha_wa_get_template')) {
             $row = $stmt->get_result()->fetch_assoc();
             $stmt->close();
 
-            return $row ?: null;
+            if ($row) {
+                return $row;
+            }
+
+            /*
+             * purchase_new is the approved Meta/Wabbs Quick Sale template.
+             * Keep a built-in fallback so Quick Sale WhatsApp works even when
+             * the local whatsapp_templates row has not been inserted yet.
+             */
+            if (strtolower(trim($templateKey)) === 'purchase_new') {
+                return [
+                    'id' => 0,
+                    'template_key' => 'purchase_new',
+                    'template_name' => 'purchase_new',
+                    'message_body' => "Hi *{{customer_name}}*,\n\nThank you for your purchase from *Subhiksha Cards*.\n\n*Quick Sale Invoice No:* {{quick_sale_no}}\n*Products:* {{product_details}}\n\n*Total Amount:* Rs. {{total_amount}}\n*Paid Amount:* Rs. {{paid_amount}}\n*Balance Amount:* Rs. {{balance_amount}}\n\nYour Quick Sale invoice is ready.\n\nThank you,\n*Subhiksha Cards*"
+                ];
+            }
+
+            return null;
         } catch (Throwable $e) {
+            if (strtolower(trim($templateKey)) === 'purchase_new') {
+                return [
+                    'id' => 0,
+                    'template_key' => 'purchase_new',
+                    'template_name' => 'purchase_new',
+                    'message_body' => "Hi *{{customer_name}}*,\n\nThank you for your purchase from *Subhiksha Cards*.\n\n*Quick Sale Invoice No:* {{quick_sale_no}}\n*Products:* {{product_details}}\n\n*Total Amount:* Rs. {{total_amount}}\n*Paid Amount:* Rs. {{paid_amount}}\n*Balance Amount:* Rs. {{balance_amount}}\n\nYour Quick Sale invoice is ready.\n\nThank you,\n*Subhiksha Cards*"
+                ];
+            }
             return null;
         }
     }
@@ -368,12 +394,12 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'required' => true
                 ]
             ],
-            'quick_sale_invoice' => [
+            'purchase_new' => [
                 'meta_id' => null,
                 'module' => 'Quick Sale',
 
                 /*
-                 * Meta template name: quick_sale_invoice
+                 * Meta template name: purchase_new
                  *
                  * BODY variable order:
                  * {{1}} customer_name
@@ -576,7 +602,8 @@ if (!function_exists('subhiksha_wa_canonical_template_key')) {
             'design_approval' => 'design_approval_new',
             'design_approval_required' => 'design_approval_new',
             'design_ready_for_approval' => 'design_approval_new',
-            'proofing_ready_for_approval' => 'design_approval_new'
+            'proofing_ready_for_approval' => 'design_approval_new',
+            'quick_sale_invoice' => 'purchase_new'
         ];
 
         return $aliases[$templateKey] ?? $templateKey;
