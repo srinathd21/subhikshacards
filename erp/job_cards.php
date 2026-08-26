@@ -636,6 +636,96 @@ function jcSendReadymadeScreenCompleteWhatsapp(mysqli $conn, array $job): array
     }
 }
 
+function jcSystemSetting(mysqli $conn, string $key, string $fallback = ''): string
+{
+    if (!jcTableExists($conn, 'system_settings')) return $fallback;
+    try {
+        $stmt = $conn->prepare("SELECT setting_value FROM system_settings WHERE setting_key = ? LIMIT 1");
+        $stmt->bind_param('s', $key);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        $value = trim((string)($row['setting_value'] ?? ''));
+        return $value !== '' ? $value : $fallback;
+    } catch (Throwable $e) {
+        return $fallback;
+    }
+}
+
+function jcInsertReviewLinkLog(mysqli $conn, array $job, string $reviewLink, array $waResult, int $sentBy): void
+{
+    if (!jcTableExists($conn, 'review_link_logs')) return;
+    try {
+        $jobId = (int)($job['id'] ?? 0);
+        $customerId = !empty($job['customer_id']) ? (int)$job['customer_id'] : null;
+        $mobile = trim((string)($job['mobile'] ?? ''));
+        $sentStatus = !empty($waResult['success']) ? 'sent' : 'failed';
+        $whatsappLogId = !empty($waResult['log_id']) ? (int)$waResult['log_id'] : null;
+        $sentAt = !empty($waResult['success']) ? date('Y-m-d H:i:s') : null;
+        $stmt = $conn->prepare("INSERT INTO review_link_logs (job_card_id, customer_id, mobile, review_link, sent_status, whatsapp_log_id, sent_by, sent_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())");
+        $stmt->bind_param('iisssiis', $jobId, $customerId, $mobile, $reviewLink, $sentStatus, $whatsappLogId, $sentBy, $sentAt);
+        $stmt->execute();
+        $stmt->close();
+    } catch (Throwable $e) {
+        // Logging must not block the WhatsApp send result.
+    }
+}
+
+function jcSendGoogleReviewWhatsapp(mysqli $conn, int $jobId): array
+{
+    if ($jobId <= 0) throw new RuntimeException('Invalid Job Card.');
+    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
+        throw new RuntimeException('WhatsApp API helper is not available.');
+    }
+
+    $stmt = $conn->prepare("SELECT jc.id, jc.job_card_no, jc.customer_id, jc.customer_name, jc.mobile, jcs.status_key FROM job_cards jc LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id WHERE jc.id = ? LIMIT 1");
+    $stmt->bind_param('i', $jobId);
+    $stmt->execute();
+    $job = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$job) throw new RuntimeException('Job Card not found.');
+    if (strtolower(trim((string)($job['status_key'] ?? ''))) !== 'completed') {
+        throw new RuntimeException('Google Review can be sent only after the Job Card is completed.');
+    }
+
+    $mobile = trim((string)($job['mobile'] ?? ''));
+    if ($mobile === '') throw new RuntimeException('Customer mobile number is missing.');
+
+    $reviewLink = jcSystemSetting($conn, 'google_review_link', 'https://g.page/r/Cbl_oKAsDotpEBE/review');
+    if ($reviewLink === '') throw new RuntimeException('Google Review link is not configured.');
+
+    $variables = [
+        'customer_name' => trim((string)($job['customer_name'] ?? '')) ?: 'Customer',
+        'job_card_no' => trim((string)($job['job_card_no'] ?? '')) ?: '-',
+        'google_review_link' => $reviewLink,
+    ];
+    $sentBy = (int)($_SESSION['user_id'] ?? 0);
+    $meta = [
+        'related_module' => 'Job Card Completed Review',
+        'related_id' => (int)$job['id'],
+        'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
+        'job_card_id' => (int)$job['id'],
+        'sent_by' => $sentBy,
+    ];
+
+    try {
+        if (function_exists('subhiksha_send_template_whatsapp')) {
+            $result = subhiksha_send_template_whatsapp($conn, 'google_review_link', $mobile, $variables, $meta);
+        } else {
+            $meta['mobile'] = $mobile;
+            $meta['template_key'] = 'google_review_link';
+            $meta['variables'] = $variables;
+            $result = subhiksha_send_whatsapp($conn, $meta);
+        }
+    } catch (Throwable $e) {
+        $result = ['success' => false, 'message' => 'Google Review WhatsApp sending failed.', 'log_id' => 0, 'response' => $e->getMessage()];
+    }
+
+    jcInsertReviewLinkLog($conn, $job, $reviewLink, $result, $sentBy);
+    return $result;
+}
+
 function jcRunReadymadeScreenShortcut(mysqli $conn, int $jobId, string $shortcutAction, string $roleKey): array
 {
     if ($roleKey !== 'screen_printing') {
@@ -769,6 +859,16 @@ if (!empty($_GET['shortcut_msg'])) {
     }
 }
 
+if (!empty($_GET['review_msg'])) {
+    if ($_GET['review_msg'] === 'sent') {
+        $message = 'Google Review WhatsApp sent successfully.';
+        $messageType = 'success';
+    } elseif ($_GET['review_msg'] === 'failed') {
+        $message = 'Google Review WhatsApp could not be sent. Please check WhatsApp logs.';
+        $messageType = 'danger';
+    }
+}
+
 $allAccessRoles = [
     'admin',
     'sales',
@@ -785,6 +885,7 @@ $printingRoleKeys = [
 $hasAllJobCardAccess = in_array($roleKey, $allAccessRoles, true);
 $isSpecificPrintingRole = in_array($roleKey, $printingRoleKeys, true);
 $isGeneralPrintingRole = $roleKey === 'printing';
+$canSendGoogleReview = in_array($roleKey, ['admin', 'sales', 'super_admin', 'business_admin'], true);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array(($_POST['action'] ?? ''), ['readymade_screen_start', 'readymade_screen_complete'], true)) {
     try {
@@ -800,6 +901,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array(($_POST['action'] ?? ''), 
             'shortcut_msg' => $action === 'readymade_screen_start' ? 'started' : 'completed',
             'wa' => !empty($waResult['success']) ? 'sent' : 'failed'
         ]);
+    } catch (Throwable $e) {
+        $message = $e->getMessage();
+        $messageType = 'danger';
+    }
+}
+
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)($_POST['action'] ?? '') === 'send_google_review') {
+    try {
+        if (empty($_POST['csrf_token']) || !hash_equals($shortcutCsrfToken, (string)$_POST['csrf_token'])) {
+            throw new RuntimeException('Invalid request token. Please refresh and try again.');
+        }
+        if (!$canSendGoogleReview) {
+            throw new RuntimeException('You do not have permission to send Google Review links.');
+        }
+        $jobId = (int)($_POST['job_card_id'] ?? 0);
+        $waResult = jcSendGoogleReviewWhatsapp($conn, $jobId);
+        jcRedirectBack(['review_msg' => !empty($waResult['success']) ? 'sent' : 'failed']);
     } catch (Throwable $e) {
         $message = $e->getMessage();
         $messageType = 'danger';
@@ -1108,6 +1227,7 @@ $pageAccessLabel = $hasAllJobCardAccess
     <title>Job Cards - Subhiksha Cards</title>
 
     <?php include __DIR__ . '/includes/links.php'; ?>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
 
     <style>
@@ -1518,379 +1638,387 @@ $pageAccessLabel = $hasAllJobCardAccess
     }
     </style>
 
-<style>
-/* ========================================================================
+    <style>
+    /* ========================================================================
    Compact module UI - tuned for comfortable use at 100% browser zoom.
    UI sizing only: no PHP, SQL, workflow, filters, pagination or API logic.
    ======================================================================== */
-#main .page-section {
-    font-size: 12.5px;
-}
+    #main .page-section {
+        font-size: 12.5px;
+    }
 
-#main .page-section .page-head {
-    padding: 16px 18px !important;
-    margin-bottom: 12px !important;
-    border-radius: 16px !important;
-}
-
-#main .page-section .page-head h1 {
-    font-size: 22px !important;
-    font-weight: 800 !important;
-    line-height: 1.15 !important;
-    letter-spacing: -.15px !important;
-    margin-bottom: 3px !important;
-}
-
-#main .page-section .page-head p,
-#main .page-section .page-head .text-muted-custom {
-    font-size: 11.5px !important;
-    font-weight: 500 !important;
-    line-height: 1.35 !important;
-}
-
-#main .page-section .module-card {
-    padding: 14px 15px !important;
-    border-radius: 16px !important;
-    margin-bottom: 12px !important;
-}
-
-#main .page-section .module-title {
-    font-size: 15px !important;
-    font-weight: 800 !important;
-    line-height: 1.2 !important;
-}
-
-#main .page-section .stat-card,
-#main .page-section .kpi-card {
-    min-height: 86px !important;
-    padding: 12px 13px !important;
-    border-radius: 14px !important;
-    gap: 10px !important;
-}
-
-#main .page-section .stat-icon {
-    width: 40px !important;
-    height: 40px !important;
-    min-width: 40px !important;
-    border-radius: 12px !important;
-}
-
-#main .page-section .stat-icon svg,
-#main .page-section .stat-icon i {
-    width: 19px !important;
-    height: 19px !important;
-}
-
-#main .page-section .stat-card span,
-#main .page-section .stat-card small,
-#main .page-section .kpi-card small {
-    font-size: 10px !important;
-    font-weight: 700 !important;
-    letter-spacing: .2px !important;
-}
-
-#main .page-section .stat-card strong,
-#main .page-section .kpi-card strong {
-    font-size: 18px !important;
-    font-weight: 800 !important;
-    line-height: 1.15 !important;
-}
-
-#main .page-section .filter-card {
-    padding: 12px !important;
-    border-radius: 14px !important;
-}
-
-#main .page-section .form-label,
-#main .page-section label.fw-bold {
-    font-size: 11px !important;
-    font-weight: 700 !important;
-    margin-bottom: 4px !important;
-}
-
-#main .page-section .form-control,
-#main .page-section .form-select,
-#main .page-section .select2-container--bootstrap-5 .select2-selection {
-    min-height: 38px !important;
-    font-size: 12px !important;
-    border-radius: 10px !important;
-}
-
-#main .page-section .form-control,
-#main .page-section .form-select {
-    padding-top: .38rem !important;
-    padding-bottom: .38rem !important;
-}
-
-#main .page-section textarea.form-control {
-    min-height: 68px !important;
-}
-
-#main .page-section .btn:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
-    font-size: 11.5px !important;
-    font-weight: 700 !important;
-    line-height: 1.2 !important;
-}
-
-#main .page-section .btn.rounded-pill:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
-    padding-top: 6px !important;
-    padding-bottom: 6px !important;
-}
-
-#main .page-section .table-ui,
-#main .page-section table {
-    font-size: 11.5px !important;
-}
-
-#main .page-section .table-ui th,
-#main .page-section table th {
-    font-size: 10px !important;
-    font-weight: 700 !important;
-    padding: 8px 9px !important;
-    line-height: 1.25 !important;
-}
-
-#main .page-section .table-ui td,
-#main .page-section table td {
-    font-size: 11.5px !important;
-    font-weight: 500 !important;
-    padding: 8px 9px !important;
-    line-height: 1.3 !important;
-}
-
-#main .page-section table td strong,
-#main .page-section .customer-name,
-#main .page-section .job-no,
-#main .page-section .mobile-card-title,
-#main .page-section .product-names,
-#main .page-section .amount-text,
-#main .page-section .balance-text,
-#main .page-section .paid-amount,
-#main .page-section .balance-amount {
-    font-weight: 700 !important;
-}
-
-#main .page-section .status-pill,
-#main .page-section .stock-pill,
-#main .page-section .badge-pill,
-#main .page-section .order-badge,
-#main .page-section .filter-tab {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-    padding: 4px 7px !important;
-}
-
-#main .page-section .mobile-card,
-#main .page-section .mobile-products .card-ui {
-    padding: 12px !important;
-    border-radius: 14px !important;
-    margin-bottom: 9px !important;
-}
-
-#main .page-section .mobile-card-title {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .mobile-card-subtitle,
-#main .page-section .muted-small,
-#main .page-section .small-muted,
-#main .page-section .meta {
-    font-size: 10.5px !important;
-    font-weight: 500 !important;
-    line-height: 1.35 !important;
-}
-
-#main .page-section .view-info-card,
-#main .page-section .amount-box,
-#main .page-section .profile-box,
-#main .page-section .summary-item,
-#main .page-section .hist-row {
-    border-radius: 13px !important;
-    padding: 11px !important;
-}
-
-#main .page-section .view-info-card small,
-#main .page-section .amount-box small,
-#main .page-section .summary-item small,
-#main .page-section .section-label {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .view-info-card span,
-#main .page-section .view-info-card strong,
-#main .page-section .amount-box strong,
-#main .page-section .summary-item strong {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .pagination-wrap,
-#main .page-section nav[aria-label*="Pagination" i] {
-    font-size: 11px !important;
-}
-
-#main .page-section .pagination .page-link,
-#main .page-section .product-pagination .page-link-ui {
-    min-width: 32px !important;
-    min-height: 32px !important;
-    padding: 5px 8px !important;
-    font-size: 10.5px !important;
-    font-weight: 700 !important;
-}
-
-/* Customer Management compact sizing */
-#main .customer-page .stats-grid {
-    gap: 10px !important;
-    margin-bottom: 12px !important;
-}
-
-#main .customer-page .stat-box {
-    padding: 11px 12px !important;
-    border-radius: 14px !important;
-}
-
-#main .customer-page .stat-box small {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .customer-page .stat-box strong {
-    font-size: 18px !important;
-    font-weight: 800 !important;
-    margin-top: 2px !important;
-}
-
-#main .customer-page .workspace {
-    gap: 12px !important;
-}
-
-#main .customer-page .pane {
-    border-radius: 16px !important;
-}
-
-#main .customer-page .pane-head,
-#main .customer-page .pane-body {
-    padding: 13px 14px !important;
-}
-
-#main .customer-page .customer-name,
-#main .customer-page .profile-name {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .customer-page .profile-grid,
-#main .customer-page .summary-grid {
-    gap: 9px !important;
-}
-
-#main .customer-page .tabs {
-    margin: 12px 0 9px !important;
-    gap: 5px !important;
-}
-
-#main .customer-page .tabs button {
-    padding: 5px 9px !important;
-    font-size: 10px !important;
-    font-weight: 700 !important;
-}
-
-/* Product master images and rows */
-#main .module-page .product-thumb,
-#main .module-page .placeholder-thumb {
-    width: 42px !important;
-    height: 42px !important;
-}
-
-/* Job Card shortcut controls */
-#main .module-page .shortcut-action-box {
-    padding: 10px !important;
-    border-radius: 13px !important;
-}
-
-#main .module-page .shortcut-btn {
-    min-height: 34px !important;
-    font-size: 10.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .module-page .shortcut-note,
-#main .module-page .shortcut-help-bar {
-    font-size: 10.5px !important;
-    font-weight: 500 !important;
-}
-
-/* Keep icon-only actions compact */
-#main .page-section .btn-action-icon,
-#main .page-section .btn-delete-icon,
-#main .page-section .btn-whatsapp-icon,
-#main .customer-page .actions .btn {
-    width: 32px !important;
-    height: 32px !important;
-    min-width: 32px !important;
-    max-width: 32px !important;
-    padding: 0 !important;
-}
-
-#main .page-section .btn-action-icon svg,
-#main .page-section .btn-delete-icon svg,
-#main .page-section .btn-whatsapp-icon svg,
-#main .customer-page .actions .btn svg {
-    width: 14px !important;
-    height: 14px !important;
-}
-
-/* Reduce heavy utility weight only inside module content */
-#main .page-section .fw-bold,
-#main .page-section strong {
-    font-weight: 700 !important;
-}
-
-/* Compact modal typography without changing modal workflow */
-#main ~ .modal .modal-title,
-.modal .modal-title {
-    font-size: 15px !important;
-    font-weight: 800 !important;
-}
-
-.modal .modal-header,
-.modal .modal-footer {
-    padding-top: 11px !important;
-    padding-bottom: 11px !important;
-}
-
-.modal .modal-body {
-    font-size: 12px !important;
-}
-
-@media (max-width: 767.98px) {
     #main .page-section .page-head {
-        padding: 14px !important;
+        padding: 16px 18px !important;
+        margin-bottom: 12px !important;
+        border-radius: 16px !important;
     }
 
     #main .page-section .page-head h1 {
-        font-size: 20px !important;
+        font-size: 22px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+        letter-spacing: -.15px !important;
+        margin-bottom: 3px !important;
+    }
+
+    #main .page-section .page-head p,
+    #main .page-section .page-head .text-muted-custom {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
     }
 
     #main .page-section .module-card {
-        padding: 12px !important;
+        padding: 14px 15px !important;
+        border-radius: 16px !important;
+        margin-bottom: 12px !important;
+    }
+
+    #main .page-section .module-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+        line-height: 1.2 !important;
     }
 
     #main .page-section .stat-card,
     #main .page-section .kpi-card {
-        min-height: 76px !important;
-        padding: 10px 11px !important;
+        min-height: 86px !important;
+        padding: 12px 13px !important;
+        border-radius: 14px !important;
+        gap: 10px !important;
     }
 
     #main .page-section .stat-icon {
-        width: 36px !important;
-        height: 36px !important;
-        min-width: 36px !important;
+        width: 40px !important;
+        height: 40px !important;
+        min-width: 40px !important;
+        border-radius: 12px !important;
     }
-}
-</style>
+
+    #main .page-section .stat-icon svg,
+    #main .page-section .stat-icon i {
+        width: 19px !important;
+        height: 19px !important;
+    }
+
+    #main .page-section .stat-card span,
+    #main .page-section .stat-card small,
+    #main .page-section .kpi-card small {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        letter-spacing: .2px !important;
+    }
+
+    #main .page-section .stat-card strong,
+    #main .page-section .kpi-card strong {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+    }
+
+    #main .page-section .filter-card {
+        padding: 12px !important;
+        border-radius: 14px !important;
+    }
+
+    #main .page-section .form-label,
+    #main .page-section label.fw-bold {
+        font-size: 11px !important;
+        font-weight: 700 !important;
+        margin-bottom: 4px !important;
+    }
+
+    #main .page-section .form-control,
+    #main .page-section .form-select,
+    #main .page-section .select2-container--bootstrap-5 .select2-selection {
+        min-height: 38px !important;
+        font-size: 12px !important;
+        border-radius: 10px !important;
+    }
+
+    #main .page-section .form-control,
+    #main .page-section .form-select {
+        padding-top: .38rem !important;
+        padding-bottom: .38rem !important;
+    }
+
+    #main .page-section textarea.form-control {
+        min-height: 68px !important;
+    }
+
+    #main .page-section .btn:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
+        font-size: 11.5px !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+    }
+
+    #main .page-section .btn.rounded-pill:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
+        padding-top: 6px !important;
+        padding-bottom: 6px !important;
+    }
+
+    #main .page-section .table-ui,
+    #main .page-section table {
+        font-size: 11.5px !important;
+    }
+
+    #main .page-section .table-ui th,
+    #main .page-section table th {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        padding: 8px 9px !important;
+        line-height: 1.25 !important;
+    }
+
+    #main .page-section .table-ui td,
+    #main .page-section table td {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        padding: 8px 9px !important;
+        line-height: 1.3 !important;
+    }
+
+    #main .page-section table td strong,
+    #main .page-section .customer-name,
+    #main .page-section .job-no,
+    #main .page-section .mobile-card-title,
+    #main .page-section .product-names,
+    #main .page-section .amount-text,
+    #main .page-section .balance-text,
+    #main .page-section .paid-amount,
+    #main .page-section .balance-amount {
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .status-pill,
+    #main .page-section .stock-pill,
+    #main .page-section .badge-pill,
+    #main .page-section .order-badge,
+    #main .page-section .filter-tab {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+        padding: 4px 7px !important;
+    }
+
+    #main .page-section .mobile-card,
+    #main .page-section .mobile-products .card-ui {
+        padding: 12px !important;
+        border-radius: 14px !important;
+        margin-bottom: 9px !important;
+    }
+
+    #main .page-section .mobile-card-title {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .mobile-card-subtitle,
+    #main .page-section .muted-small,
+    #main .page-section .small-muted,
+    #main .page-section .meta {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
+    }
+
+    #main .page-section .view-info-card,
+    #main .page-section .amount-box,
+    #main .page-section .profile-box,
+    #main .page-section .summary-item,
+    #main .page-section .hist-row {
+        border-radius: 13px !important;
+        padding: 11px !important;
+    }
+
+    #main .page-section .view-info-card small,
+    #main .page-section .amount-box small,
+    #main .page-section .summary-item small,
+    #main .page-section .section-label {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .view-info-card span,
+    #main .page-section .view-info-card strong,
+    #main .page-section .amount-box strong,
+    #main .page-section .summary-item strong {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .pagination-wrap,
+    #main .page-section nav[aria-label*="Pagination"i] {
+        font-size: 11px !important;
+    }
+
+    #main .page-section .pagination .page-link,
+    #main .page-section .product-pagination .page-link-ui {
+        min-width: 32px !important;
+        min-height: 32px !important;
+        padding: 5px 8px !important;
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Customer Management compact sizing */
+    #main .customer-page .stats-grid {
+        gap: 10px !important;
+        margin-bottom: 12px !important;
+    }
+
+    #main .customer-page .stat-box {
+        padding: 11px 12px !important;
+        border-radius: 14px !important;
+    }
+
+    #main .customer-page .stat-box small {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .customer-page .stat-box strong {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        margin-top: 2px !important;
+    }
+
+    #main .customer-page .workspace {
+        gap: 12px !important;
+    }
+
+    #main .customer-page .pane {
+        border-radius: 16px !important;
+    }
+
+    #main .customer-page .pane-head,
+    #main .customer-page .pane-body {
+        padding: 13px 14px !important;
+    }
+
+    #main .customer-page .customer-name,
+    #main .customer-page .profile-name {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .customer-page .profile-grid,
+    #main .customer-page .summary-grid {
+        gap: 9px !important;
+    }
+
+    #main .customer-page .tabs {
+        margin: 12px 0 9px !important;
+        gap: 5px !important;
+    }
+
+    #main .customer-page .tabs button {
+        padding: 5px 9px !important;
+        font-size: 10px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Product master images and rows */
+    #main .module-page .product-thumb,
+    #main .module-page .placeholder-thumb {
+        width: 42px !important;
+        height: 42px !important;
+    }
+
+    /* Job Card shortcut controls */
+    #main .module-page .shortcut-action-box {
+        padding: 10px !important;
+        border-radius: 13px !important;
+    }
+
+    #main .module-page .shortcut-btn {
+        min-height: 34px !important;
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .module-page .shortcut-note,
+    #main .module-page .shortcut-help-bar {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+    }
+
+    /* Keep icon-only actions compact */
+    #main .page-section .btn-action-icon,
+    #main .page-section .btn-delete-icon,
+    #main .page-section .btn-whatsapp-icon,
+    #main .customer-page .actions .btn {
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        max-width: 32px !important;
+        padding: 0 !important;
+    }
+
+    #main .page-section .btn-action-icon svg,
+    #main .page-section .btn-delete-icon svg,
+    #main .page-section .btn-whatsapp-icon svg,
+    #main .customer-page .actions .btn svg {
+        width: 14px !important;
+        height: 14px !important;
+    }
+
+    #main .page-section .btn-whatsapp-icon .bi-whatsapp {
+        font-size: 16px !important;
+        line-height: 1 !important;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    /* Reduce heavy utility weight only inside module content */
+    #main .page-section .fw-bold,
+    #main .page-section strong {
+        font-weight: 700 !important;
+    }
+
+    /* Compact modal typography without changing modal workflow */
+    #main~.modal .modal-title,
+    .modal .modal-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+    }
+
+    .modal .modal-header,
+    .modal .modal-footer {
+        padding-top: 11px !important;
+        padding-bottom: 11px !important;
+    }
+
+    .modal .modal-body {
+        font-size: 12px !important;
+    }
+
+    @media (max-width: 767.98px) {
+        #main .page-section .page-head {
+            padding: 14px !important;
+        }
+
+        #main .page-section .page-head h1 {
+            font-size: 20px !important;
+        }
+
+        #main .page-section .module-card {
+            padding: 12px !important;
+        }
+
+        #main .page-section .stat-card,
+        #main .page-section .kpi-card {
+            min-height: 76px !important;
+            padding: 10px 11px !important;
+        }
+
+        #main .page-section .stat-icon {
+            width: 36px !important;
+            height: 36px !important;
+            min-width: 36px !important;
+        }
+    }
+    </style>
 
 </head>
 
@@ -2215,6 +2343,22 @@ $pageAccessLabel = $hasAllJobCardAccess
                                             </form>
                                             <?php endif; ?>
 
+                                            <?php if ($statusKey === 'completed' && $canSendGoogleReview): ?>
+                                            <form method="post" class="shortcut-form">
+                                                <input type="hidden" name="csrf_token"
+                                                    value="<?= e($shortcutCsrfToken) ?>">
+                                                <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
+                                                <input type="hidden" name="action" value="send_google_review">
+                                                <button type="submit"
+                                                    class="btn btn-sm btn-success rounded-circle btn-whatsapp-icon"
+                                                    title="Send Google Review via WhatsApp"
+                                                    aria-label="Send Google Review via WhatsApp"
+                                                    onclick="return confirm('Send Google Review link to <?= e($row['customer_name']) ?> via WhatsApp?');">
+                                                    <i class="bi bi-whatsapp" aria-hidden="true"></i>
+                                                </button>
+                                            </form>
+                                            <?php endif; ?>
+
                                             <a href="job_card_view.php?id=<?= e($row['id']) ?>"
                                                 class="btn btn-sm btn-outline-secondary rounded-circle btn-action-icon"
                                                 title="View Job Card" aria-label="View Job Card">
@@ -2311,6 +2455,21 @@ $pageAccessLabel = $hasAllJobCardAccess
                                             <?= e($shortcutState['complete_label'] ?? 'Disabled') ?>
                                         </small>
                                     </div>
+                                </form>
+                                <?php endif; ?>
+
+                                <?php if ($statusKey === 'completed' && $canSendGoogleReview): ?>
+                                <form method="post" class="shortcut-form">
+                                    <input type="hidden" name="csrf_token" value="<?= e($shortcutCsrfToken) ?>">
+                                    <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
+                                    <input type="hidden" name="action" value="send_google_review">
+                                    <button type="submit"
+                                        class="btn btn-sm btn-success rounded-circle btn-whatsapp-icon"
+                                        title="Send Google Review via WhatsApp"
+                                        aria-label="Send Google Review via WhatsApp"
+                                        onclick="return confirm('Send Google Review link to <?= e($row['customer_name']) ?> via WhatsApp?');">
+                                        <i class="bi bi-whatsapp" aria-hidden="true"></i>
+                                    </button>
                                 </form>
                                 <?php endif; ?>
 

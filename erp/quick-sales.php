@@ -25,7 +25,7 @@ function qsl_action_svg(string $icon): string
     $common = 'class="quick-action-svg" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false"';
 
     if ($icon === 'whatsapp') {
-        return '<svg ' . $common . ' viewBox="0 0 32 32"><path fill="currentColor" d="M16.04 3C8.85 3 3 8.73 3 15.78c0 2.26.61 4.47 1.77 6.41L3 29l7.02-1.8a13.3 13.3 0 0 0 6.02 1.43C23.23 28.63 29 22.9 29 15.85S23.23 3 16.04 3Zm0 23.45c-1.9 0-3.76-.5-5.39-1.45l-.39-.23-4.16 1.07 1.11-4.01-.26-.41a11.05 11.05 0 0 1-1.73-5.64c0-5.84 4.85-10.6 10.82-10.6 5.96 0 10.81 4.76 10.81 10.67 0 5.84-4.85 10.6-10.81 10.6Zm5.93-7.95c-.32-.16-1.9-.92-2.2-1.03-.3-.11-.52-.16-.74.16-.22.32-.85 1.03-1.04 1.24-.19.22-.38.24-.7.08-.32-.16-1.36-.49-2.59-1.55-.96-.84-1.61-1.88-1.8-2.2-.19-.32-.02-.49.14-.65.14-.14.32-.38.49-.57.16-.19.22-.32.32-.54.11-.22.05-.41-.03-.57-.08-.16-.74-1.76-1.01-2.41-.27-.65-.54-.54-.74-.55h-.63c-.22 0-.57.08-.87.41-.3.32-1.14 1.09-1.14 2.68s1.17 3.12 1.33 3.34c.16.22 2.3 3.46 5.58 4.85.78.33 1.39.53 1.86.68.78.24 1.49.21 2.05.13.63-.09 1.9-.76 2.17-1.49.27-.73.27-1.36.19-1.49-.08-.13-.3-.21-.62-.37Z"/></svg>';
+        return '<i class="bi bi-whatsapp quick-action-whatsapp" aria-hidden="true"></i>';
     }
 
     $paths = [
@@ -266,6 +266,7 @@ function qsl_page_url(int $page): string
     <title>Quick Sales - Subhiksha Cards</title>
 
     <?php include __DIR__ . '/includes/links.php'; ?>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
 
     <style>
@@ -1072,6 +1073,19 @@ function qsl_page_url(int $page): string
     height: 18px !important;
 }
 
+</style>
+
+<style>
+/* WHATSAPP ICON UI OVERRIDE */
+.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp .quick-action-whatsapp {
+    font-size: 18px !important;
+    line-height: 1 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    color: #fff !important;
+    pointer-events: none !important;
+}
 </style>
 </head>
 

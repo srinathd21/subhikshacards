@@ -11,6 +11,11 @@ require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/auth.php';
 require_permission($conn, 'can_view', 'job_cards.php');
 
+$whatsappApiPath = __DIR__ . '/../includes/whatsapp-api.php';
+if (is_file($whatsappApiPath)) {
+    require_once $whatsappApiPath;
+}
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -1100,6 +1105,111 @@ function jc_tracking_status_update(mysqli $conn, int $trackingId, string $newSta
 }
 
 
+
+function jc_system_setting(mysqli $conn, string $key, string $fallback = ''): string
+{
+    if (!jc_table_exists($conn, 'system_settings')) return $fallback;
+    try {
+        $stmt = $conn->prepare("SELECT setting_value FROM system_settings WHERE setting_key = ? LIMIT 1");
+        $stmt->bind_param('s', $key);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        $value = trim((string)($row['setting_value'] ?? ''));
+        return $value !== '' ? $value : $fallback;
+    } catch (Throwable $e) {
+        return $fallback;
+    }
+}
+
+function jc_review_log_insert(mysqli $conn, array $job, string $reviewLink, array $waResult, int $sentBy): void
+{
+    if (!jc_table_exists($conn, 'review_link_logs')) return;
+    try {
+        $jobId = (int)($job['id'] ?? 0);
+        $customerId = !empty($job['customer_id']) ? (int)$job['customer_id'] : null;
+        $mobile = trim((string)($job['mobile'] ?? ''));
+        $sentStatus = !empty($waResult['success']) ? 'sent' : 'failed';
+        $whatsappLogId = !empty($waResult['log_id']) ? (int)$waResult['log_id'] : null;
+        $sentAt = !empty($waResult['success']) ? date('Y-m-d H:i:s') : null;
+        $stmt = $conn->prepare("INSERT INTO review_link_logs (job_card_id, customer_id, mobile, review_link, sent_status, whatsapp_log_id, sent_by, sent_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())");
+        $stmt->bind_param('iisssiis', $jobId, $customerId, $mobile, $reviewLink, $sentStatus, $whatsappLogId, $sentBy, $sentAt);
+        $stmt->execute();
+        $stmt->close();
+    } catch (Throwable $e) {
+        // Log failure must not change the WhatsApp result.
+    }
+}
+
+function jc_send_google_review(mysqli $conn, int $jobId): array
+{
+    if ($jobId <= 0) throw new RuntimeException('Invalid Job Card.');
+
+    $roleKeys = jc_current_role_keys($conn);
+    $canSendReview = jc_is_admin_user($conn) || in_array('sales', $roleKeys, true);
+    if (!$canSendReview) {
+        throw new RuntimeException('You do not have permission to send Google Review links.');
+    }
+    if (!function_exists('subhiksha_send_template_whatsapp') && !function_exists('subhiksha_send_whatsapp')) {
+        throw new RuntimeException('WhatsApp API helper is not available.');
+    }
+
+    $statusJoin = jc_table_exists($conn, 'job_card_statuses') && jc_col($conn, 'job_cards', 'job_card_status_id')
+        ? 'LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id'
+        : '';
+    $statusSelect = jc_table_exists($conn, 'job_card_statuses') && jc_col($conn, 'job_card_statuses', 'status_key')
+        ? 'jcs.status_key'
+        : "'' AS status_key";
+
+    $stmt = $conn->prepare("SELECT jc.id, jc.job_card_no, jc.customer_id, jc.customer_name, jc.mobile, {$statusSelect} FROM job_cards jc {$statusJoin} WHERE jc.id = ? LIMIT 1");
+    $stmt->bind_param('i', $jobId);
+    $stmt->execute();
+    $job = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$job) throw new RuntimeException('Job Card not found.');
+    if (strtolower(trim((string)($job['status_key'] ?? ''))) !== 'completed') {
+        throw new RuntimeException('Google Review can be sent only after the Job Card is completed.');
+    }
+
+    $mobile = trim((string)($job['mobile'] ?? ''));
+    if ($mobile === '') throw new RuntimeException('Customer mobile number is missing.');
+
+    $reviewLink = jc_system_setting($conn, 'google_review_link', 'https://g.page/r/Cbl_oKAsDotpEBE/review');
+    if ($reviewLink === '') throw new RuntimeException('Google Review link is not configured.');
+
+    $variables = [
+        'customer_name' => trim((string)($job['customer_name'] ?? '')) ?: 'Customer',
+        'job_card_no' => trim((string)($job['job_card_no'] ?? '')) ?: '-',
+        'google_review_link' => $reviewLink,
+    ];
+    $sentBy = (int)($_SESSION['user_id'] ?? 0);
+    $meta = [
+        'related_module' => 'Job Card Completed Review',
+        'related_id' => (int)$job['id'],
+        'customer_id' => !empty($job['customer_id']) ? (int)$job['customer_id'] : null,
+        'job_card_id' => (int)$job['id'],
+        'sent_by' => $sentBy,
+    ];
+
+    try {
+        if (function_exists('subhiksha_send_template_whatsapp')) {
+            $result = subhiksha_send_template_whatsapp($conn, 'google_review_link', $mobile, $variables, $meta);
+        } else {
+            $meta['mobile'] = $mobile;
+            $meta['template_key'] = 'google_review_link';
+            $meta['variables'] = $variables;
+            $result = subhiksha_send_whatsapp($conn, $meta);
+        }
+    } catch (Throwable $e) {
+        $result = ['success' => false, 'message' => 'Google Review WhatsApp sending failed.', 'log_id' => 0, 'response' => $e->getMessage()];
+    }
+
+    jc_review_log_insert($conn, $job, $reviewLink, $result, $sentBy);
+    return $result;
+}
+
+
 try {
     $action = (string)($_REQUEST['action'] ?? '');
 
@@ -1107,7 +1217,7 @@ try {
         apiResponse(false, 'Action is required.');
     }
 
-    if (in_array($action, ['save_record', 'create', 'update', 'delete_record', 'delete', 'update_tracking_status', 'auto_mark_delays'], true)) {
+    if (in_array($action, ['save_record', 'create', 'update', 'delete_record', 'delete', 'update_tracking_status', 'auto_mark_delays', 'send_google_review'], true)) {
         apiCsrf();
     }
 
@@ -1133,6 +1243,15 @@ try {
         apiResponse(true, 'Job card loaded successfully.', ['data' => $row]);
     }
 
+
+    if ($action === 'send_google_review') {
+        $jobId = jc_int($_POST['job_card_id'] ?? $_REQUEST['job_card_id'] ?? 0);
+        $result = jc_send_google_review($conn, $jobId);
+        apiResponse(!empty($result['success']), !empty($result['success']) ? 'Google Review WhatsApp sent successfully.' : 'Google Review WhatsApp could not be sent.', [
+            'job_card_id' => $jobId,
+            'whatsapp' => $result
+        ]);
+    }
 
     if ($action === 'update_tracking_status') {
         $trackingId = jc_int($_POST['tracking_id'] ?? 0);
