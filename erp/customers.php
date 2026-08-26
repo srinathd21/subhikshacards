@@ -1,959 +1,1272 @@
 <?php
 require_once __DIR__ . '/includes/auth.php';
+if (session_status() === PHP_SESSION_NONE) session_start();
 
-if (function_exists('require_permission')) {
-    require_permission($conn, 'can_view', 'job_cards.php');
+function cmp_admin(mysqli $conn): bool {
+    $rk=strtolower(trim((string)($_SESSION['role_key']??$_SESSION['role']??'')));$rn=strtolower(trim((string)($_SESSION['role_name']??'')));
+    if(in_array($rk,['admin','super_admin','superadmin','business_admin'],true)||$rn==='admin')return true;
+    $id=(int)($_SESSION['role_id']??0);if($id<=0)return false;
+    try{$s=$conn->prepare("SELECT role_key,role_name FROM roles WHERE id=? LIMIT 1");$s->bind_param('i',$id);$s->execute();$r=$s->get_result()->fetch_assoc();$s->close();if(!$r)return false;$rk=strtolower((string)$r['role_key']);$rn=strtolower((string)$r['role_name']);return in_array($rk,['admin','super_admin','superadmin','business_admin'],true)||$rn==='admin';}catch(Throwable $e){return false;}
 }
-
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
+function cmp_allowed(mysqli $conn,string $action): bool {
+    if(cmp_admin($conn))return true;$map=['view'=>'can_view','create'=>'can_create','edit'=>'can_edit','update'=>'can_update'];$fn=$map[$action]??'can_view';
+    if(function_exists($fn)){try{return (bool)$fn($conn,'customers.php');}catch(Throwable $e){}}
+    if(function_exists('permission_allowed')){try{return (bool)permission_allowed($conn,$fn,'customers.php');}catch(Throwable $e){}}
+    return false;
 }
-
-if (!function_exists('e')) {
-    function e($value): string
-    {
-        return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
-    }
-}
-
-function caTableExists(mysqli $conn, string $table): bool
-{
-    try {
-        $table = $conn->real_escape_string($table);
-        $res = $conn->query("SHOW TABLES LIKE '{$table}'");
-        $ok = $res && $res->num_rows > 0;
-        if ($res) $res->free();
-        return $ok;
-    } catch (Throwable $e) {
-        return false;
-    }
-}
-
-function caColExists(mysqli $conn, string $table, string $col): bool
-{
-    static $cache = [];
-    $key = $table . '.' . $col;
-    if (isset($cache[$key])) return $cache[$key];
-
-    try {
-        $tableEsc = $conn->real_escape_string($table);
-        $colEsc = $conn->real_escape_string($col);
-        $res = $conn->query("SHOW COLUMNS FROM `{$tableEsc}` LIKE '{$colEsc}'");
-        $ok = $res && $res->num_rows > 0;
-        if ($res) $res->free();
-        return $cache[$key] = $ok;
-    } catch (Throwable $e) {
-        return $cache[$key] = false;
-    }
-}
-
-function caDate($value): string
-{
-    return !empty($value) ? date('d-m-Y', strtotime((string)$value)) : '-';
-}
-
-function caDateTime($value): string
-{
-    return !empty($value) ? date('d-m-Y h:i A', strtotime((string)$value)) : '-';
-}
-
-function caMoney($value): string
-{
-    return '₹' . number_format((float)$value, 2);
-}
-
-function caApprovalLabel(?string $type): string
-{
-    $type = strtolower(trim((string)$type));
-    if ($type === 'proof_approval') return 'Proof Approval';
-    if ($type === 'design_approval') return 'Design Approval';
-    if ($type === 'confirmation') return 'Confirmation';
-    return $type !== '' ? ucwords(str_replace('_', ' ', $type)) : 'Customer Approval';
-}
-
-function caStatusClass(string $status): string
-{
-    $status = strtolower(trim($status));
-    if ($status === 'approved') return 'success';
-    if (in_array($status, ['rejected', 'correction_requested'], true)) return 'danger';
-    if ($status === 'expired') return 'muted';
-    return 'warning';
-}
-
-function caApprovalTypeFromStep(string $stepKey): string
-{
-    $stepKey = strtolower(trim($stepKey));
-    if ($stepKey === 'proofing_approval') return 'proof_approval';
-    if ($stepKey === 'design_approval') return 'design_approval';
-    return 'confirmation';
-}
-
-$message = '';
-$messageType = 'success';
-$toastTitle = 'Info';
-$filter = strtolower(trim((string)($_GET['status'] ?? 'waiting')));
-$allowedFilters = ['waiting', 'approved', 'rejected', 'expired', 'all'];
-if (!in_array($filter, $allowedFilters, true)) {
-    $filter = 'waiting';
-}
-
-$rows = [];
-$stats = [
-    'waiting' => 0,
-    'approved' => 0,
-    'rejected' => 0,
-    'expired' => 0,
-    'all' => 0,
-];
-
-if (!caTableExists($conn, 'job_tracking') || !caTableExists($conn, 'workflow_steps') || !caTableExists($conn, 'job_cards')) {
-    $message = 'Required tables are missing: job_tracking, workflow_steps, or job_cards.';
-    $messageType = 'danger';
-    $toastTitle = 'Failed';
-} else {
-    try {
-        $hasApprovalTable = caTableExists($conn, 'customer_approvals');
-
-        $approvalSelect = $hasApprovalTable ? "
-            ca.id AS approval_id,
-            ca.approval_type,
-            ca.approval_token,
-            ca.customer_name AS approval_customer_name,
-            ca.mobile AS approval_mobile,
-            ca.status AS approval_status,
-            ca.approved_by_customer,
-            ca.approved_by_call,
-            ca.call_confirmed_by,
-            ca.customer_remarks,
-            ca.internal_remarks,
-            ca.approved_at,
-            ca.rejected_at,
-            ca.expires_at,
-            ca.ip_address,
-            ca.user_agent,
-            ca.link_sent_at,
-            ca.link_sent_by,
-            ca.created_at AS approval_created_at,
-            ca.updated_at AS approval_updated_at,
-            call_user.username AS call_confirmed_by_name,
-            sent_user.username AS link_sent_by_name
-        " : "
-            NULL AS approval_id,
-            NULL AS approval_type,
-            NULL AS approval_token,
-            NULL AS approval_customer_name,
-            NULL AS approval_mobile,
-            NULL AS approval_status,
-            NULL AS approved_by_customer,
-            NULL AS approved_by_call,
-            NULL AS call_confirmed_by,
-            NULL AS customer_remarks,
-            NULL AS internal_remarks,
-            NULL AS approved_at,
-            NULL AS rejected_at,
-            NULL AS expires_at,
-            NULL AS ip_address,
-            NULL AS user_agent,
-            NULL AS link_sent_at,
-            NULL AS link_sent_by,
-            NULL AS approval_created_at,
-            NULL AS approval_updated_at,
-            NULL AS call_confirmed_by_name,
-            NULL AS link_sent_by_name
-        ";
-
-        $approvalJoin = '';
-        if ($hasApprovalTable) {
-            $approvalJoin = "
-                LEFT JOIN (
-                    SELECT ca1.*
-                    FROM customer_approvals ca1
-                    INNER JOIN (
-                        SELECT job_card_id, workflow_step_id, MAX(id) AS max_id
-                        FROM customer_approvals
-                        GROUP BY job_card_id, workflow_step_id
-                    ) latest_ca ON latest_ca.max_id = ca1.id
-                ) ca ON ca.job_card_id = jt.job_card_id AND ca.workflow_step_id = jt.workflow_step_id
-                LEFT JOIN users call_user ON call_user.id = ca.call_confirmed_by
-                LEFT JOIN users sent_user ON sent_user.id = ca.link_sent_by
-            ";
-        }
-
-        $sql = "
-            SELECT
-                jt.id AS tracking_id,
-                jt.status AS tracking_status,
-                jt.planned_start_date,
-                jt.planned_completion_date,
-                jt.revised_completion_date,
-                jt.actual_start_at,
-                jt.actual_completed_at,
-                jt.remarks AS tracking_remarks,
-                jt.delay_remarks,
-                jt.delay_days,
-                jt.delay_started_at,
-                ws.id AS workflow_step_id,
-                ws.step_key,
-                ws.step_name,
-                ws.sort_order,
-                ws.is_approval_step,
-                rr.role_name AS responsible_role_name,
-                ru.username AS responsible_user_name,
-                cu.username AS completed_by_name,
-                dr.reason_name AS delay_reason_name,
-                jc.id AS job_card_id,
-                jc.job_card_no,
-                jc.tracking_token,
-                jc.order_type,
-                jc.customer_name,
-                jc.mobile,
-                jc.product_name,
-                jc.final_amount,
-                jc.advance_amount,
-                jc.balance_amount,
-                jc.delivery_date,
-                jc.created_at AS job_created_at,
-                jcs.status_name AS job_status_name,
-                ft.function_name,
-                pt.printing_name,
-                pst.sub_type_name,
-                {$approvalSelect}
-            FROM job_tracking jt
-            INNER JOIN workflow_steps ws ON ws.id = jt.workflow_step_id
-            INNER JOIN job_cards jc ON jc.id = jt.job_card_id
-            LEFT JOIN roles rr ON rr.id = jt.responsible_role_id
-            LEFT JOIN users ru ON ru.id = jt.responsible_user_id
-            LEFT JOIN users cu ON cu.id = jt.completed_by
-            LEFT JOIN delay_reasons dr ON dr.id = jt.delay_reason_id
-            LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id
-            LEFT JOIN function_types ft ON ft.id = jc.function_type_id
-            LEFT JOIN printing_types pt ON pt.id = jc.printing_type_id
-            LEFT JOIN printing_sub_types pst ON pst.id = jc.printing_sub_type_id
-            {$approvalJoin}
-            WHERE (
-                COALESCE(ws.is_approval_step, 0) = 1
-                OR ws.step_key IN ('proofing_approval', 'design_approval')
-                OR LOWER(ws.step_name) LIKE '%approval%'
-            )
-            ORDER BY
-                CASE
-                    WHEN COALESCE(ca.status, 'pending') = 'pending' THEN 1
-                    WHEN COALESCE(ca.status, 'pending') = 'approved' THEN 2
-                    WHEN COALESCE(ca.status, 'pending') = 'rejected' THEN 3
-                    WHEN COALESCE(ca.status, 'pending') = 'expired' THEN 4
-                    ELSE 5
-                END,
-                jc.id DESC,
-                ws.sort_order ASC,
-                jt.id ASC
-        ";
-
-        if (!$hasApprovalTable) {
-            $sql = str_replace("COALESCE(ca.status, 'pending')", "'pending'", $sql);
-        }
-
-        $res = $conn->query($sql);
-        while ($row = $res->fetch_assoc()) {
-            $status = strtolower(trim((string)($row['approval_status'] ?? '')));
-            if ($status === '') $status = 'pending';
-
-            $approvedByCustomer = (int)($row['approved_by_customer'] ?? 0) === 1;
-            $approvedByCall = (int)($row['approved_by_call'] ?? 0) === 1;
-            if ($status === 'pending' && ($approvedByCustomer || $approvedByCall)) {
-                $status = 'approved';
-            }
-
-            $bucket = 'waiting';
-            if ($status === 'approved') $bucket = 'approved';
-            elseif (in_array($status, ['rejected', 'correction_requested'], true)) $bucket = 'rejected';
-            elseif ($status === 'expired') $bucket = 'expired';
-
-            $row['computed_status'] = $status;
-            $row['computed_bucket'] = $bucket;
-            $row['computed_approval_type'] = $row['approval_type'] ?: caApprovalTypeFromStep((string)($row['step_key'] ?? ''));
-
-            $stats['all']++;
-            $stats[$bucket]++;
-
-            if ($filter === 'all' || $filter === $bucket) {
-                $rows[] = $row;
-            }
-        }
-        if ($res) $res->free();
-    } catch (Throwable $e) {
-        $message = 'Approval list query error: ' . $e->getMessage();
-        $messageType = 'danger';
-        $toastTitle = 'Failed';
-        $rows = [];
-    }
-}
-
-$pageTitle = 'Customer Approvals';
+if(!cmp_admin($conn)) require_permission($conn,'can_view','customers.php');
+if(empty($_SESSION['customers_csrf']))$_SESSION['customers_csrf']=bin2hex(random_bytes(32));
+$csrf=$_SESSION['customers_csrf'];$canCreate=cmp_allowed($conn,'create');$canEdit=cmp_allowed($conn,'edit')||cmp_allowed($conn,'update');
 ?>
 <!doctype html>
 <html lang="en">
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title><?= e($pageTitle) ?> - Subhiksha Cards</title>
-    <?php include __DIR__ . '/includes/links.php'; ?>
-    <?php include __DIR__ . '/includes/theme-loader.php'; ?>
-
+    <title>Customer Management - Subhiksha Cards</title>
+    <?php include __DIR__.'/includes/links.php'; ?><?php include __DIR__.'/includes/theme-loader.php'; ?>
     <style>
-    .view-info-card{border:1px solid var(--border-soft);border-radius:16px;padding:14px 16px;background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg));height:100%}
-    .view-info-card small{display:block;color:var(--text-muted);font-size:11px;font-weight:900;text-transform:uppercase;margin-bottom:4px}
-    .view-info-card strong,.view-info-card span{display:block;color:var(--text-main);font-weight:900;word-break:break-word;white-space:pre-wrap}
-    .toast-ui{border:0;border-radius:18px;box-shadow:0 18px 45px rgba(15,23,42,.18);overflow:hidden;min-width:320px;max-width:420px}.toast-ui.success{background:#dcfce7;color:#14532d}.toast-ui.danger{background:#fee2e2;color:#7f1d1d}.toast-ui.warning{background:#fef3c7;color:#78350f}.toast-title{font-size:14px;font-weight:900;margin-bottom:2px}.toast-message{font-size:13px;font-weight:800;line-height:1.45}
-    .module-page .page-head{padding:24px 28px;margin-bottom:18px}.module-page .page-head h1{font-size:30px;font-weight:900;color:var(--text-main)}.module-card{padding:24px}.module-title{font-size:18px;font-weight:900;color:var(--text-main);margin:0}
-    .stat-card{padding:18px;min-height:112px;display:flex;align-items:center;gap:14px}.stat-icon{width:52px;height:52px;border-radius:16px;display:grid;place-items:center;color:#fff;flex:0 0 auto}.stat-card span{display:block;font-size:12px;color:var(--text-muted);font-weight:900;text-transform:uppercase}.stat-card strong{font-size:24px;font-weight:900;color:var(--text-main)}
-    .filter-tabs{display:flex;gap:8px;flex-wrap:wrap}.filter-tab{border:1px solid var(--border-soft);background:var(--card-bg);color:var(--text-main);border-radius:999px;padding:8px 14px;font-size:12px;font-weight:900;text-decoration:none}.filter-tab.active{background:#2563eb;border-color:#2563eb;color:#fff}.filter-tab.danger.active{background:#dc2626;border-color:#dc2626}.filter-tab.success.active{background:#16a34a;border-color:#16a34a}
-    .status-pill{font-size:11px;font-weight:900;border-radius:999px;padding:5px 9px;background:color-mix(in srgb,var(--info-color) 14%,transparent);color:var(--info-color);display:inline-flex}.status-pill.success{color:#166534;background:#dcfce7}.status-pill.warning{color:#92400e;background:#fef3c7}.status-pill.danger{color:#991b1b;background:#fee2e2}.status-pill.muted{color:#475569;background:#e2e8f0}
-    .amount-text{font-weight:900;color:var(--text-main);white-space:nowrap}.btn-action-icon{width:36px!important;height:36px!important;min-width:36px!important;max-width:36px!important;padding:0!important;border-radius:50%!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;line-height:1!important}.btn-action-icon svg{width:16px!important;height:16px!important;stroke-width:2.5!important}
-    .desktop-table{overflow-x:auto}.table-ui th{white-space:nowrap}.table-ui td{vertical-align:middle}.mobile-cards{display:none}.mobile-card{border:1px solid var(--border-soft);background:color-mix(in srgb,var(--card-bg) 96%,var(--body-bg));border-radius:18px;padding:16px;margin-bottom:12px}.mobile-card-title{font-size:16px;font-weight:900;color:var(--text-main)}.mobile-card-subtitle{display:block;color:var(--text-muted);font-size:12px;font-weight:700;margin-top:4px;word-break:break-word}.mobile-card-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
-    .approval-card-danger{border-color:#fecaca!important;background:color-mix(in srgb,#fee2e2 38%,var(--card-bg))!important}.modal-content{border:0;border-radius:22px;background:var(--card-bg);color:var(--text-main)}.modal-header,.modal-footer{border-color:var(--border-soft)}
-    @media(max-width:767.98px){.module-page .page-head{padding:18px;border-radius:18px}.module-page .page-head h1{font-size:24px}.module-page .page-head .btn{width:100%}.module-card{padding:16px;border-radius:18px}.desktop-table{display:none!important}.mobile-cards{display:block}.mobile-card-actions .btn{width:100%}.mobile-card .status-pill{font-size:10px;max-width:130px;white-space:normal;text-align:center}.filter-tabs{display:grid;grid-template-columns:1fr 1fr}.filter-tab{text-align:center}.btn-action-icon{width:42px!important;height:42px!important}}
-    </style>
+    .customer-page .page-head {
+        padding: 24px 28px;
+        margin-bottom: 18px
+    }
 
-<style>
-/* ========================================================================
+    .customer-page .page-head h1 {
+        font-size: 30px;
+        font-weight: 900;
+        color: var(--text-main)
+    }
+
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+        margin-bottom: 18px
+    }
+
+    .stat-box {
+        border: 1px solid var(--border-soft);
+        border-radius: 18px;
+        padding: 16px
+    }
+
+    .stat-box small {
+        display: block;
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+        color: var(--text-muted)
+    }
+
+    .stat-box strong {
+        display: block;
+        font-size: 23px;
+        font-weight: 900;
+        margin-top: 4px
+    }
+
+    .workspace {
+        display: grid;
+        grid-template-columns: minmax(0, 1.65fr) minmax(350px, .85fr);
+        gap: 18px;
+        align-items: start
+    }
+
+    .pane {
+        border: 1px solid var(--border-soft);
+        border-radius: 20px;
+        background: var(--card-bg);
+        overflow: hidden
+    }
+
+    .pane-head {
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--border-soft)
+    }
+
+    .pane-body {
+        padding: 18px 20px
+    }
+
+    .form-pane {
+        position: sticky;
+        top: 88px
+    }
+
+    .filter-grid {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) 160px 145px auto;
+        gap: 10px;
+        align-items: end
+    }
+
+    .customer-name {
+        font-weight: 900;
+        color: var(--text-main)
+    }
+
+    .meta {
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--text-muted);
+        line-height: 1.45
+    }
+
+    .badge-pill {
+        display: inline-flex;
+        border-radius: 999px;
+        padding: 5px 9px;
+        font-size: 10px;
+        font-weight: 900
+    }
+
+    .type-business {
+        background: #eef2ff;
+        color: #4338ca
+    }
+
+    .type-individual {
+        background: #ecfeff;
+        color: #0f766e
+    }
+
+    .status-active {
+        background: #dcfce7;
+        color: #166534
+    }
+
+    .status-inactive {
+        background: #fee2e2;
+        color: #991b1b
+    }
+
+    .actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+        flex-wrap: wrap
+    }
+
+    .actions .btn {
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center
+    }
+
+    .customer-table td,
+    .customer-table th {
+        vertical-align: middle
+    }
+
+    .mobile-card {
+        border: 1px solid var(--border-soft);
+        border-radius: 16px;
+        padding: 15px;
+        margin-bottom: 10px
+    }
+
+    .business-fields {
+        display: none
+    }
+
+    .business-fields.show {
+        display: block
+    }
+
+    .section-label {
+        font-size: 11px;
+        font-weight: 900;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        letter-spacing: .04em;
+        margin: 5px 0 11px
+    }
+
+    .required {
+        color: #dc2626
+    }
+
+    .profile-grid {
+        display: grid;
+        grid-template-columns: 1.05fr .95fr;
+        gap: 16px
+    }
+
+    .profile-box {
+        border: 1px solid var(--border-soft);
+        border-radius: 18px;
+        padding: 16px
+    }
+
+    .profile-name {
+        font-size: 20px;
+        font-weight: 900
+    }
+
+    .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px
+    }
+
+    .summary-item {
+        border: 1px solid var(--border-soft);
+        border-radius: 14px;
+        padding: 12px
+    }
+
+    .summary-item small {
+        display: block;
+        font-size: 10px;
+        font-weight: 900;
+        text-transform: uppercase;
+        color: var(--text-muted)
+    }
+
+    .summary-item strong {
+        display: block;
+        font-size: 16px;
+        font-weight: 900;
+        margin-top: 4px
+    }
+
+    .tabs {
+        display: flex;
+        gap: 7px;
+        flex-wrap: wrap;
+        margin: 18px 0 12px
+    }
+
+    .tabs button {
+        border: 1px solid var(--border-soft);
+        background: var(--card-bg);
+        border-radius: 999px;
+        padding: 7px 12px;
+        font-size: 11px;
+        font-weight: 900
+    }
+
+    .tabs button.active {
+        background: var(--primary-color, #2563eb);
+        color: #fff
+    }
+
+    .hist {
+        display: none
+    }
+
+    .hist.active {
+        display: block
+    }
+
+    .hist-row {
+        border: 1px solid var(--border-soft);
+        border-radius: 14px;
+        padding: 12px;
+        margin-bottom: 8px
+    }
+
+    .hist-row small {
+        display: block;
+        color: var(--text-muted);
+        font-size: 10px;
+        margin-top: 3px
+    }
+
+    .toast-ui {
+        border: 0;
+        border-radius: 18px;
+        min-width: 320px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, .18)
+    }
+
+    .toast-ui.success {
+        background: #dcfce7;
+        color: #14532d
+    }
+
+    .toast-ui.danger {
+        background: #fee2e2;
+        color: #7f1d1d
+    }
+
+    .toast-ui.warning {
+        background: #fef3c7;
+        color: #78350f
+    }
+
+    .loading {
+        padding: 24px;
+        text-align: center;
+        font-weight: 800;
+        color: var(--text-muted)
+    }
+
+    @media(max-width:1199.98px) {
+        .workspace {
+            grid-template-columns: 1fr
+        }
+
+        .form-pane {
+            position: static
+        }
+
+        .stats-grid {
+            grid-template-columns: repeat(2, 1fr)
+        }
+    }
+
+    @media(max-width:767.98px) {
+        .customer-page .page-head {
+            padding: 18px
+        }
+
+        .customer-page .page-head h1 {
+            font-size: 24px
+        }
+
+        .filter-grid {
+            grid-template-columns: 1fr 1fr
+        }
+
+        .filter-grid .wide {
+            grid-column: 1/-1
+        }
+
+        .desktop-list {
+            display: none !important
+        }
+
+        .mobile-list {
+            display: block !important
+        }
+
+        .profile-grid {
+            grid-template-columns: 1fr
+        }
+    }
+
+    @media(min-width:768px) {
+        .mobile-list {
+            display: none !important
+        }
+    }
+
+    @media(max-width:480px) {
+
+        .stats-grid,
+        .summary-grid {
+            grid-template-columns: 1fr
+        }
+    }
+    </style>
+    <style>
+    /* ========================================================================
    Compact module UI - tuned for comfortable use at 100% browser zoom.
    UI sizing only: no PHP, SQL, workflow, filters, pagination or API logic.
    ======================================================================== */
-#main .page-section {
-    font-size: 12.5px;
-}
+    #main .page-section {
+        font-size: 12.5px;
+    }
 
-#main .page-section .page-head {
-    padding: 16px 18px !important;
-    margin-bottom: 12px !important;
-    border-radius: 16px !important;
-}
-
-#main .page-section .page-head h1 {
-    font-size: 22px !important;
-    font-weight: 800 !important;
-    line-height: 1.15 !important;
-    letter-spacing: -.15px !important;
-    margin-bottom: 3px !important;
-}
-
-#main .page-section .page-head p,
-#main .page-section .page-head .text-muted-custom {
-    font-size: 11.5px !important;
-    font-weight: 500 !important;
-    line-height: 1.35 !important;
-}
-
-#main .page-section .module-card {
-    padding: 14px 15px !important;
-    border-radius: 16px !important;
-    margin-bottom: 12px !important;
-}
-
-#main .page-section .module-title {
-    font-size: 15px !important;
-    font-weight: 800 !important;
-    line-height: 1.2 !important;
-}
-
-#main .page-section .stat-card,
-#main .page-section .kpi-card {
-    min-height: 86px !important;
-    padding: 12px 13px !important;
-    border-radius: 14px !important;
-    gap: 10px !important;
-}
-
-#main .page-section .stat-icon {
-    width: 40px !important;
-    height: 40px !important;
-    min-width: 40px !important;
-    border-radius: 12px !important;
-}
-
-#main .page-section .stat-icon svg,
-#main .page-section .stat-icon i {
-    width: 19px !important;
-    height: 19px !important;
-}
-
-#main .page-section .stat-card span,
-#main .page-section .stat-card small,
-#main .page-section .kpi-card small {
-    font-size: 10px !important;
-    font-weight: 700 !important;
-    letter-spacing: .2px !important;
-}
-
-#main .page-section .stat-card strong,
-#main .page-section .kpi-card strong {
-    font-size: 18px !important;
-    font-weight: 800 !important;
-    line-height: 1.15 !important;
-}
-
-#main .page-section .filter-card {
-    padding: 12px !important;
-    border-radius: 14px !important;
-}
-
-#main .page-section .form-label,
-#main .page-section label.fw-bold {
-    font-size: 11px !important;
-    font-weight: 700 !important;
-    margin-bottom: 4px !important;
-}
-
-#main .page-section .form-control,
-#main .page-section .form-select,
-#main .page-section .select2-container--bootstrap-5 .select2-selection {
-    min-height: 38px !important;
-    font-size: 12px !important;
-    border-radius: 10px !important;
-}
-
-#main .page-section .form-control,
-#main .page-section .form-select {
-    padding-top: .38rem !important;
-    padding-bottom: .38rem !important;
-}
-
-#main .page-section textarea.form-control {
-    min-height: 68px !important;
-}
-
-#main .page-section .btn:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
-    font-size: 11.5px !important;
-    font-weight: 700 !important;
-    line-height: 1.2 !important;
-}
-
-#main .page-section .btn.rounded-pill:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
-    padding-top: 6px !important;
-    padding-bottom: 6px !important;
-}
-
-#main .page-section .table-ui,
-#main .page-section table {
-    font-size: 11.5px !important;
-}
-
-#main .page-section .table-ui th,
-#main .page-section table th {
-    font-size: 10px !important;
-    font-weight: 700 !important;
-    padding: 8px 9px !important;
-    line-height: 1.25 !important;
-}
-
-#main .page-section .table-ui td,
-#main .page-section table td {
-    font-size: 11.5px !important;
-    font-weight: 500 !important;
-    padding: 8px 9px !important;
-    line-height: 1.3 !important;
-}
-
-#main .page-section table td strong,
-#main .page-section .customer-name,
-#main .page-section .job-no,
-#main .page-section .mobile-card-title,
-#main .page-section .product-names,
-#main .page-section .amount-text,
-#main .page-section .balance-text,
-#main .page-section .paid-amount,
-#main .page-section .balance-amount {
-    font-weight: 700 !important;
-}
-
-#main .page-section .status-pill,
-#main .page-section .stock-pill,
-#main .page-section .badge-pill,
-#main .page-section .order-badge,
-#main .page-section .filter-tab {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-    padding: 4px 7px !important;
-}
-
-#main .page-section .mobile-card,
-#main .page-section .mobile-products .card-ui {
-    padding: 12px !important;
-    border-radius: 14px !important;
-    margin-bottom: 9px !important;
-}
-
-#main .page-section .mobile-card-title {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .mobile-card-subtitle,
-#main .page-section .muted-small,
-#main .page-section .small-muted,
-#main .page-section .meta {
-    font-size: 10.5px !important;
-    font-weight: 500 !important;
-    line-height: 1.35 !important;
-}
-
-#main .page-section .view-info-card,
-#main .page-section .amount-box,
-#main .page-section .profile-box,
-#main .page-section .summary-item,
-#main .page-section .hist-row {
-    border-radius: 13px !important;
-    padding: 11px !important;
-}
-
-#main .page-section .view-info-card small,
-#main .page-section .amount-box small,
-#main .page-section .summary-item small,
-#main .page-section .section-label {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .view-info-card span,
-#main .page-section .view-info-card strong,
-#main .page-section .amount-box strong,
-#main .page-section .summary-item strong {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .pagination-wrap,
-#main .page-section nav[aria-label*="Pagination" i] {
-    font-size: 11px !important;
-}
-
-#main .page-section .pagination .page-link,
-#main .page-section .product-pagination .page-link-ui {
-    min-width: 32px !important;
-    min-height: 32px !important;
-    padding: 5px 8px !important;
-    font-size: 10.5px !important;
-    font-weight: 700 !important;
-}
-
-/* Customer Management compact sizing */
-#main .customer-page .stats-grid {
-    gap: 10px !important;
-    margin-bottom: 12px !important;
-}
-
-#main .customer-page .stat-box {
-    padding: 11px 12px !important;
-    border-radius: 14px !important;
-}
-
-#main .customer-page .stat-box small {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .customer-page .stat-box strong {
-    font-size: 18px !important;
-    font-weight: 800 !important;
-    margin-top: 2px !important;
-}
-
-#main .customer-page .workspace {
-    gap: 12px !important;
-}
-
-#main .customer-page .pane {
-    border-radius: 16px !important;
-}
-
-#main .customer-page .pane-head,
-#main .customer-page .pane-body {
-    padding: 13px 14px !important;
-}
-
-#main .customer-page .customer-name,
-#main .customer-page .profile-name {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .customer-page .profile-grid,
-#main .customer-page .summary-grid {
-    gap: 9px !important;
-}
-
-#main .customer-page .tabs {
-    margin: 12px 0 9px !important;
-    gap: 5px !important;
-}
-
-#main .customer-page .tabs button {
-    padding: 5px 9px !important;
-    font-size: 10px !important;
-    font-weight: 700 !important;
-}
-
-/* Product master images and rows */
-#main .module-page .product-thumb,
-#main .module-page .placeholder-thumb {
-    width: 42px !important;
-    height: 42px !important;
-}
-
-/* Job Card shortcut controls */
-#main .module-page .shortcut-action-box {
-    padding: 10px !important;
-    border-radius: 13px !important;
-}
-
-#main .module-page .shortcut-btn {
-    min-height: 34px !important;
-    font-size: 10.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .module-page .shortcut-note,
-#main .module-page .shortcut-help-bar {
-    font-size: 10.5px !important;
-    font-weight: 500 !important;
-}
-
-/* Keep icon-only actions compact */
-#main .page-section .btn-action-icon,
-#main .page-section .btn-delete-icon,
-#main .page-section .btn-whatsapp-icon,
-#main .customer-page .actions .btn {
-    width: 32px !important;
-    height: 32px !important;
-    min-width: 32px !important;
-    max-width: 32px !important;
-    padding: 0 !important;
-}
-
-#main .page-section .btn-action-icon svg,
-#main .page-section .btn-delete-icon svg,
-#main .page-section .btn-whatsapp-icon svg,
-#main .customer-page .actions .btn svg {
-    width: 14px !important;
-    height: 14px !important;
-}
-
-/* Reduce heavy utility weight only inside module content */
-#main .page-section .fw-bold,
-#main .page-section strong {
-    font-weight: 700 !important;
-}
-
-/* Compact modal typography without changing modal workflow */
-#main ~ .modal .modal-title,
-.modal .modal-title {
-    font-size: 15px !important;
-    font-weight: 800 !important;
-}
-
-.modal .modal-header,
-.modal .modal-footer {
-    padding-top: 11px !important;
-    padding-bottom: 11px !important;
-}
-
-.modal .modal-body {
-    font-size: 12px !important;
-}
-
-@media (max-width: 767.98px) {
     #main .page-section .page-head {
-        padding: 14px !important;
+        padding: 16px 18px !important;
+        margin-bottom: 12px !important;
+        border-radius: 16px !important;
     }
 
     #main .page-section .page-head h1 {
-        font-size: 20px !important;
+        font-size: 22px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+        letter-spacing: -.15px !important;
+        margin-bottom: 3px !important;
+    }
+
+    #main .page-section .page-head p,
+    #main .page-section .page-head .text-muted-custom {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
     }
 
     #main .page-section .module-card {
-        padding: 12px !important;
+        padding: 14px 15px !important;
+        border-radius: 16px !important;
+        margin-bottom: 12px !important;
+    }
+
+    #main .page-section .module-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+        line-height: 1.2 !important;
     }
 
     #main .page-section .stat-card,
     #main .page-section .kpi-card {
-        min-height: 76px !important;
-        padding: 10px 11px !important;
+        min-height: 86px !important;
+        padding: 12px 13px !important;
+        border-radius: 14px !important;
+        gap: 10px !important;
     }
 
     #main .page-section .stat-icon {
-        width: 36px !important;
-        height: 36px !important;
-        min-width: 36px !important;
+        width: 40px !important;
+        height: 40px !important;
+        min-width: 40px !important;
+        border-radius: 12px !important;
     }
-}
-</style>
+
+    #main .page-section .stat-icon svg,
+    #main .page-section .stat-icon i {
+        width: 19px !important;
+        height: 19px !important;
+    }
+
+    #main .page-section .stat-card span,
+    #main .page-section .stat-card small,
+    #main .page-section .kpi-card small {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        letter-spacing: .2px !important;
+    }
+
+    #main .page-section .stat-card strong,
+    #main .page-section .kpi-card strong {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+    }
+
+    #main .page-section .filter-card {
+        padding: 12px !important;
+        border-radius: 14px !important;
+    }
+
+    #main .page-section .form-label,
+    #main .page-section label.fw-bold {
+        font-size: 11px !important;
+        font-weight: 700 !important;
+        margin-bottom: 4px !important;
+    }
+
+    #main .page-section .form-control,
+    #main .page-section .form-select,
+    #main .page-section .select2-container--bootstrap-5 .select2-selection {
+        min-height: 38px !important;
+        font-size: 12px !important;
+        border-radius: 10px !important;
+    }
+
+    #main .page-section .form-control,
+    #main .page-section .form-select {
+        padding-top: .38rem !important;
+        padding-bottom: .38rem !important;
+    }
+
+    #main .page-section textarea.form-control {
+        min-height: 68px !important;
+    }
+
+    #main .page-section .btn:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
+        font-size: 11.5px !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+    }
+
+    #main .page-section .btn.rounded-pill:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
+        padding-top: 6px !important;
+        padding-bottom: 6px !important;
+    }
+
+    #main .page-section .table-ui,
+    #main .page-section table {
+        font-size: 11.5px !important;
+    }
+
+    #main .page-section .table-ui th,
+    #main .page-section table th {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        padding: 8px 9px !important;
+        line-height: 1.25 !important;
+    }
+
+    #main .page-section .table-ui td,
+    #main .page-section table td {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        padding: 8px 9px !important;
+        line-height: 1.3 !important;
+    }
+
+    #main .page-section table td strong,
+    #main .page-section .customer-name,
+    #main .page-section .job-no,
+    #main .page-section .mobile-card-title,
+    #main .page-section .product-names,
+    #main .page-section .amount-text,
+    #main .page-section .balance-text,
+    #main .page-section .paid-amount,
+    #main .page-section .balance-amount {
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .status-pill,
+    #main .page-section .stock-pill,
+    #main .page-section .badge-pill,
+    #main .page-section .order-badge,
+    #main .page-section .filter-tab {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+        padding: 4px 7px !important;
+    }
+
+    #main .page-section .mobile-card,
+    #main .page-section .mobile-products .card-ui {
+        padding: 12px !important;
+        border-radius: 14px !important;
+        margin-bottom: 9px !important;
+    }
+
+    #main .page-section .mobile-card-title {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .mobile-card-subtitle,
+    #main .page-section .muted-small,
+    #main .page-section .small-muted,
+    #main .page-section .meta {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
+    }
+
+    #main .page-section .view-info-card,
+    #main .page-section .amount-box,
+    #main .page-section .profile-box,
+    #main .page-section .summary-item,
+    #main .page-section .hist-row {
+        border-radius: 13px !important;
+        padding: 11px !important;
+    }
+
+    #main .page-section .view-info-card small,
+    #main .page-section .amount-box small,
+    #main .page-section .summary-item small,
+    #main .page-section .section-label {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .view-info-card span,
+    #main .page-section .view-info-card strong,
+    #main .page-section .amount-box strong,
+    #main .page-section .summary-item strong {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .pagination-wrap,
+    #main .page-section nav[aria-label*="Pagination"i] {
+        font-size: 11px !important;
+    }
+
+    #main .page-section .pagination .page-link,
+    #main .page-section .product-pagination .page-link-ui {
+        min-width: 32px !important;
+        min-height: 32px !important;
+        padding: 5px 8px !important;
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Customer Management compact sizing */
+    #main .customer-page .stats-grid {
+        gap: 10px !important;
+        margin-bottom: 12px !important;
+    }
+
+    #main .customer-page .stat-box {
+        padding: 11px 12px !important;
+        border-radius: 14px !important;
+    }
+
+    #main .customer-page .stat-box small {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .customer-page .stat-box strong {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        margin-top: 2px !important;
+    }
+
+    #main .customer-page .workspace {
+        gap: 12px !important;
+    }
+
+    #main .customer-page .pane {
+        border-radius: 16px !important;
+    }
+
+    #main .customer-page .pane-head,
+    #main .customer-page .pane-body {
+        padding: 13px 14px !important;
+    }
+
+    #main .customer-page .customer-name,
+    #main .customer-page .profile-name {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .customer-page .profile-grid,
+    #main .customer-page .summary-grid {
+        gap: 9px !important;
+    }
+
+    #main .customer-page .tabs {
+        margin: 12px 0 9px !important;
+        gap: 5px !important;
+    }
+
+    #main .customer-page .tabs button {
+        padding: 5px 9px !important;
+        font-size: 10px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Product master images and rows */
+    #main .module-page .product-thumb,
+    #main .module-page .placeholder-thumb {
+        width: 42px !important;
+        height: 42px !important;
+    }
+
+    /* Job Card shortcut controls */
+    #main .module-page .shortcut-action-box {
+        padding: 10px !important;
+        border-radius: 13px !important;
+    }
+
+    #main .module-page .shortcut-btn {
+        min-height: 34px !important;
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .module-page .shortcut-note,
+    #main .module-page .shortcut-help-bar {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+    }
+
+    /* Keep icon-only actions compact */
+    #main .page-section .btn-action-icon,
+    #main .page-section .btn-delete-icon,
+    #main .page-section .btn-whatsapp-icon,
+    #main .customer-page .actions .btn {
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        max-width: 32px !important;
+        padding: 0 !important;
+    }
+
+    #main .page-section .btn-action-icon svg,
+    #main .page-section .btn-delete-icon svg,
+    #main .page-section .btn-whatsapp-icon svg,
+    #main .customer-page .actions .btn svg {
+        width: 14px !important;
+        height: 14px !important;
+    }
+
+    /* Reduce heavy utility weight only inside module content */
+    #main .page-section .fw-bold,
+    #main .page-section strong {
+        font-weight: 700 !important;
+    }
+
+    /* Compact modal typography without changing modal workflow */
+    #main~.modal .modal-title,
+    .modal .modal-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+    }
+
+    .modal .modal-header,
+    .modal .modal-footer {
+        padding-top: 11px !important;
+        padding-bottom: 11px !important;
+    }
+
+    .modal .modal-body {
+        font-size: 12px !important;
+    }
+
+    @media (max-width: 767.98px) {
+        #main .page-section .page-head {
+            padding: 14px !important;
+        }
+
+        #main .page-section .page-head h1 {
+            font-size: 20px !important;
+        }
+
+        #main .page-section .module-card {
+            padding: 12px !important;
+        }
+
+        #main .page-section .stat-card,
+        #main .page-section .kpi-card {
+            min-height: 76px !important;
+            padding: 10px 11px !important;
+        }
+
+        #main .page-section .stat-icon {
+            width: 36px !important;
+            height: 36px !important;
+            min-width: 36px !important;
+        }
+    }
+    </style>
 
 </head>
-<body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
-<div id="mobileOverlay"></div>
-<div class="app-shell">
-    <?php include __DIR__ . '/includes/sidebar.php'; ?>
-    <main id="main">
-        <?php include __DIR__ . '/includes/nav.php'; ?>
-        <section class="page-section module-page">
-            <div class="card-ui page-head">
-                <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
-                    <div>
-                        <h1 class="mb-1">Customer Approvals</h1>
-                        <p class="text-muted-custom mb-0">Waiting customer approvals with related job card details.</p>
-                    </div>
-                    <a href="job_cards.php" class="btn btn-outline-secondary rounded-pill px-4 fw-bold">Back to Job Cards</a>
-                </div>
-            </div>
 
-            <?php if ($message !== ''): ?>
-            <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:12000">
-                <div id="pageToast" class="toast toast-ui <?= e($messageType) ?>" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="4200">
-                    <div class="d-flex">
-                        <div class="toast-body"><div class="toast-title"><?= e($toastTitle) ?></div><div class="toast-message"><?= e($message) ?></div></div>
-                        <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+<body
+    class="<?= htmlspecialchars((($theme['layout_density']??'')==='compact'?'layout-compact':''),ENT_QUOTES,'UTF-8') ?>">
+    <div id="mobileOverlay"></div>
+    <div class="app-shell"><?php include __DIR__.'/includes/sidebar.php'; ?><main id="main">
+            <?php include __DIR__.'/includes/nav.php'; ?>
+            <section class="page-section customer-page">
+                <div class="card-ui page-head">
+                    <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
+                        <div>
+                            <h1 class="mb-1">Customer Management</h1>
+                            <p class="text-muted-custom mb-0">Manage customer master, contact details and complete
+                                business history in one page.</p>
+                        </div><?php if($canCreate): ?><button class="btn btn-primary rounded-pill px-4 fw-bold"
+                            id="newBtn"><i data-lucide="user-plus"></i> New Customer</button><?php endif; ?>
                     </div>
                 </div>
-            </div>
-            <?php endif; ?>
-
-            <div class="row g-3 mb-3">
-                <div class="col-6 col-md-3"><div class="card-ui stat-card h-100"><div class="stat-icon" style="background:linear-gradient(135deg,#f59e0b,#f97316)"><i data-lucide="clock"></i></div><div><span>Waiting</span><strong><?= number_format($stats['waiting']) ?></strong></div></div></div>
-                <div class="col-6 col-md-3"><div class="card-ui stat-card h-100"><div class="stat-icon" style="background:linear-gradient(135deg,#16a34a,#22c55e)"><i data-lucide="check-circle-2"></i></div><div><span>Approved</span><strong><?= number_format($stats['approved']) ?></strong></div></div></div>
-                <div class="col-6 col-md-3"><div class="card-ui stat-card h-100"><div class="stat-icon" style="background:linear-gradient(135deg,#dc2626,#f43f5e)"><i data-lucide="x-circle"></i></div><div><span>Rejected</span><strong><?= number_format($stats['rejected']) ?></strong></div></div></div>
-                <div class="col-6 col-md-3"><div class="card-ui stat-card h-100"><div class="stat-icon" style="background:linear-gradient(135deg,#2563eb,#0ea5e9)"><i data-lucide="list-checks"></i></div><div><span>Total</span><strong><?= number_format($stats['all']) ?></strong></div></div></div>
-            </div>
-
-            <div class="card-ui module-card">
-                <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
-                    <div>
-                        <h2 class="module-title">Approval List</h2>
-                        <p class="text-muted-custom mb-0">Default view shows approvals waiting from customers.</p>
-                    </div>
-                    <input type="search" id="tableSearch" class="form-control" style="max-width:340px" placeholder="Search approval / job card...">
+                <div class="stats-grid">
+                    <div class="card-ui stat-box"><small>Total Customers</small><strong id="sTotal">0</strong></div>
+                    <div class="card-ui stat-box"><small>Active</small><strong id="sActive">0</strong></div>
+                    <div class="card-ui stat-box"><small>Business</small><strong id="sBusiness">0</strong></div>
+                    <div class="card-ui stat-box"><small>Individual</small><strong id="sIndividual">0</strong></div>
                 </div>
-
-                <div class="filter-tabs mb-3">
-                    <a class="filter-tab <?= $filter === 'waiting' ? 'active' : '' ?>" href="customer_approvals.php?status=waiting">Waiting (<?= number_format($stats['waiting']) ?>)</a>
-                    <a class="filter-tab success <?= $filter === 'approved' ? 'active' : '' ?>" href="customer_approvals.php?status=approved">Approved (<?= number_format($stats['approved']) ?>)</a>
-                    <a class="filter-tab danger <?= $filter === 'rejected' ? 'active' : '' ?>" href="customer_approvals.php?status=rejected">Rejected (<?= number_format($stats['rejected']) ?>)</a>
-                    <a class="filter-tab <?= $filter === 'expired' ? 'active' : '' ?>" href="customer_approvals.php?status=expired">Expired (<?= number_format($stats['expired']) ?>)</a>
-                    <a class="filter-tab <?= $filter === 'all' ? 'active' : '' ?>" href="customer_approvals.php?status=all">All (<?= number_format($stats['all']) ?>)</a>
-                </div>
-
-                <div class="table-responsive desktop-table">
-                    <table class="table-ui" id="dataTable">
-                        <thead>
-                            <tr>
-                                <th>Job Card</th>
-                                <th>Customer</th>
-                                <th>Product / Printing</th>
-                                <th>Approval Stage</th>
-                                <th>Amount</th>
-                                <th>Delivery</th>
-                                <th>Status</th>
-                                <th class="text-end">Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (!$rows): ?>
-                            <tr><td colspan="8" class="text-center text-muted-custom py-4">No approvals found.</td></tr>
-                            <?php endif; ?>
-                            <?php foreach ($rows as $row): ?>
-                            <?php
-                                $bucket = (string)($row['computed_bucket'] ?? 'waiting');
-                                $status = (string)($row['computed_status'] ?? 'pending');
-                                $approvalType = (string)($row['computed_approval_type'] ?? 'confirmation');
-                                $statusClass = caStatusClass($status);
-                            ?>
-                            <tr>
-                                <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong><small class="d-block text-muted-custom">#<?= e($row['job_card_id'] ?? '-') ?></small></td>
-                                <td><?= e($row['customer_name'] ?? '-') ?><small class="d-block text-muted-custom"><?= e($row['mobile'] ?? '-') ?></small></td>
-                                <td><?= e($row['product_name'] ?? '-') ?><small class="d-block text-muted-custom"><?= e($row['printing_name'] ?? '-') ?> <?= e($row['sub_type_name'] ?? '') ?></small></td>
-                                <td><strong><?= e($row['step_name'] ?? '-') ?></strong><small class="d-block text-muted-custom"><?= e(caApprovalLabel($approvalType)) ?></small></td>
-                                <td><span class="amount-text"><?= e(caMoney($row['final_amount'] ?? 0)) ?></span><small class="d-block text-muted-custom">Bal: <?= e(caMoney($row['balance_amount'] ?? 0)) ?></small></td>
-                                <td><?= e(caDate($row['delivery_date'] ?? null)) ?></td>
-                                <td><span class="status-pill <?= e($statusClass) ?>"><?= e($bucket === 'waiting' ? 'Waiting' : ucwords(str_replace('_', ' ', $status))) ?></span></td>
-                                <td class="text-end">
-                                    <button type="button" class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-record btn-action-icon"
-                                        data-bs-toggle="modal" data-bs-target="#viewModal"
-                                        <?php foreach ($row as $key => $value): ?>
-                                            data-<?= e(str_replace('_', '-', $key)) ?>="<?= e($value) ?>"
-                                        <?php endforeach; ?>
-                                        data-approval-label="<?= e(caApprovalLabel($approvalType)) ?>"
-                                        data-display-status="<?= e($bucket === 'waiting' ? 'Waiting' : ucwords(str_replace('_', ' ', $status))) ?>"
-                                    ><i data-lucide="eye"></i></button>
-                                    <a href="job_card_view.php?id=<?= e($row['job_card_id'] ?? 0) ?>" class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon" title="Open Job Card"><i data-lucide="briefcase-business"></i></a>
-                                </td>
-                            </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-
-                <div class="mobile-cards" id="mobileCards">
-                    <?php if (!$rows): ?><div class="mobile-card text-center text-muted-custom">No approvals found.</div><?php endif; ?>
-                    <?php foreach ($rows as $row): ?>
-                    <?php
-                        $bucket = (string)($row['computed_bucket'] ?? 'waiting');
-                        $status = (string)($row['computed_status'] ?? 'pending');
-                        $approvalType = (string)($row['computed_approval_type'] ?? 'confirmation');
-                        $statusClass = caStatusClass($status);
-                    ?>
-                    <div class="mobile-card">
-                        <div class="d-flex justify-content-between gap-2">
-                            <div>
-                                <div class="mobile-card-title"><?= e($row['job_card_no'] ?? '-') ?></div>
-                                <span class="mobile-card-subtitle">Customer: <?= e($row['customer_name'] ?? '-') ?> | <?= e($row['mobile'] ?? '-') ?></span>
-                                <span class="mobile-card-subtitle">Stage: <?= e($row['step_name'] ?? '-') ?></span>
-                                <span class="mobile-card-subtitle">Approval: <?= e(caApprovalLabel($approvalType)) ?></span>
-                                <span class="mobile-card-subtitle">Delivery: <?= e(caDate($row['delivery_date'] ?? null)) ?></span>
+                <div class="workspace">
+                    <section class="pane">
+                        <div class="pane-head">
+                            <h5 class="mb-1 fw-bold">Customer List</h5><small id="resultText"
+                                class="text-muted-custom fw-bold">Loading...</small>
+                        </div>
+                        <div class="pane-body">
+                            <div class="filter-grid mb-3">
+                                <div class="wide"><label class="form-label fw-bold">Search</label><input
+                                        class="form-control" id="q"
+                                        placeholder="Name / Mobile / Email / Business / GST"></div>
+                                <div><label class="form-label fw-bold">Type</label><select class="form-select"
+                                        id="type">
+                                        <option value="">All</option>
+                                        <option value="individual">Individual</option>
+                                        <option value="business">Business</option>
+                                    </select></div>
+                                <div><label class="form-label fw-bold">Status</label><select class="form-select"
+                                        id="status">
+                                        <option value="">All</option>
+                                        <option value="1">Active</option>
+                                        <option value="0">Inactive</option>
+                                    </select></div>
+                                <div class="wide d-flex gap-2"><button class="btn btn-primary fw-bold"
+                                        id="filterBtn">Filter</button><button class="btn btn-outline-secondary fw-bold"
+                                        id="resetBtn">Reset</button></div>
                             </div>
-                            <span class="status-pill <?= e($statusClass) ?>"><?= e($bucket === 'waiting' ? 'Waiting' : ucwords(str_replace('_', ' ', $status))) ?></span>
+                            <div class="table-responsive desktop-list">
+                                <table class="table-ui customer-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Customer</th>
+                                            <th>Type / Business</th>
+                                            <th>Location</th>
+                                            <th>Business</th>
+                                            <th>Status</th>
+                                            <th class="text-end">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="tbody">
+                                        <tr>
+                                            <td colspan="6" class="loading">Loading customers...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div class="mobile-list" id="mobileList">
+                                <div class="loading">Loading customers...</div>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center mt-3 gap-2" id="pager"
+                                style="display:none!important"><small class="text-muted-custom fw-bold"
+                                    id="pageText"></small>
+                                <div class="d-flex gap-2"><button
+                                        class="btn btn-outline-secondary btn-sm rounded-pill px-3 fw-bold"
+                                        id="prev">Previous</button><button
+                                        class="btn btn-outline-secondary btn-sm rounded-pill px-3 fw-bold"
+                                        id="next">Next</button></div>
+                            </div>
                         </div>
-                        <div class="mobile-card-actions">
-                            <button type="button" class="btn btn-sm btn-outline-secondary rounded-circle fw-bold js-view-record btn-action-icon" data-bs-toggle="modal" data-bs-target="#viewModal"
-                                <?php foreach ($row as $key => $value): ?>
-                                    data-<?= e(str_replace('_', '-', $key)) ?>="<?= e($value) ?>"
-                                <?php endforeach; ?>
-                                data-approval-label="<?= e(caApprovalLabel($approvalType)) ?>"
-                                data-display-status="<?= e($bucket === 'waiting' ? 'Waiting' : ucwords(str_replace('_', ' ', $status))) ?>"
-                            ><i data-lucide="eye"></i></button>
-                            <a href="job_card_view.php?id=<?= e($row['job_card_id'] ?? 0) ?>" class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon"><i data-lucide="briefcase-business"></i></a>
+                    </section>
+                    <aside class="pane form-pane" id="formPane">
+                        <div class="pane-head">
+                            <h5 class="mb-1 fw-bold" id="formTitle">Add Customer</h5><small
+                                class="text-muted-custom fw-bold">Use the same form for add and edit.</small>
                         </div>
-                    </div>
-                    <?php endforeach; ?>
+                        <div class="pane-body">
+                            <form id="customerForm" autocomplete="off"><input type="hidden" name="action"
+                                    value="save"><input type="hidden" name="csrf_token"
+                                    value="<?= htmlspecialchars($csrf,ENT_QUOTES,'UTF-8') ?>"><input type="hidden"
+                                    name="id" id="cid" value="0">
+                                <div class="section-label">Basic Details</div>
+                                <div class="mb-3"><label class="form-label fw-bold">Customer Name <span
+                                            class="required">*</span></label><input class="form-control"
+                                        name="customer_name" id="name" maxlength="150" required></div>
+                                <div class="row g-3 mb-3">
+                                    <div class="col-md-6"><label class="form-label fw-bold">Mobile <span
+                                                class="required">*</span></label><input class="form-control"
+                                            name="mobile" id="mobile" inputmode="numeric" maxlength="10" required></div>
+                                    <div class="col-md-6"><label class="form-label fw-bold">Alternate
+                                            Mobile</label><input class="form-control" name="alternate_mobile" id="alt"
+                                            inputmode="numeric" maxlength="10"></div>
+                                </div>
+                                <div class="mb-3"><label class="form-label fw-bold">Email</label><input type="email"
+                                        class="form-control" name="email" id="email" maxlength="150"></div>
+                                <div class="section-label">Customer Type</div>
+                                <div class="row g-3 mb-3">
+                                    <div class="col-md-6"><label class="form-label fw-bold">Type</label><select
+                                            class="form-select" name="customer_type" id="ctype">
+                                            <option value="individual">Individual</option>
+                                            <option value="business">Business</option>
+                                        </select></div>
+                                    <div class="col-md-6"><label class="form-label fw-bold">Status</label><select
+                                            class="form-select" name="is_active" id="active">
+                                            <option value="1">Active</option>
+                                            <option value="0">Inactive</option>
+                                        </select></div>
+                                </div>
+                                <div class="business-fields" id="bizWrap">
+                                    <div class="row g-3 mb-3">
+                                        <div class="col-md-6"><label class="form-label fw-bold">Business Name <span
+                                                    class="required">*</span></label><input class="form-control"
+                                                name="business_name" id="biz" maxlength="200"></div>
+                                        <div class="col-md-6"><label class="form-label fw-bold">GST Number</label><input
+                                                class="form-control text-uppercase" name="gst_number" id="gst"
+                                                maxlength="50"></div>
+                                    </div>
+                                </div>
+                                <div class="section-label">Address</div>
+                                <div class="mb-3"><label class="form-label fw-bold">Address</label><textarea
+                                        class="form-control" name="address" id="address" rows="3"
+                                        maxlength="1500"></textarea></div>
+                                <div class="row g-3 mb-3">
+                                    <div class="col-md-6"><label class="form-label fw-bold">City</label><input
+                                            class="form-control" name="city" id="city" maxlength="100"></div>
+                                    <div class="col-md-6"><label class="form-label fw-bold">State</label><input
+                                            class="form-control" name="state" id="state" maxlength="100"
+                                            value="Tamil Nadu"></div>
+                                </div>
+                                <div class="mb-3"><label class="form-label fw-bold">Pincode</label><input
+                                        class="form-control" name="pincode" id="pin" inputmode="numeric" maxlength="6">
+                                </div>
+                                <div class="d-flex gap-2"><button type="button"
+                                        class="btn btn-outline-secondary fw-bold flex-grow-1"
+                                        id="clearBtn">Clear</button><?php if($canCreate||$canEdit): ?><button
+                                        class="btn btn-primary fw-bold flex-grow-1" id="saveBtn">Save
+                                        Customer</button><?php endif; ?></div>
+                            </form>
+                        </div>
+                    </aside>
                 </div>
-            </div>
-        </section>
-    </main>
-    <div id="settingsOverlay"></div>
-    <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
-</div>
-
-<div class="modal fade" id="viewModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered modal-xl">
-        <div class="modal-content">
-            <div class="modal-header">
-                <div>
-                    <h5 class="modal-title fw-bold">Customer Approval Details</h5>
-                    <small class="text-muted-custom" id="viewJobCardNo">-</small>
+            </section>
+        </main>
+        <div id="settingsOverlay"></div><?php include __DIR__.'/includes/rightsidebar.php'; ?>
+    </div>
+    <div class="modal fade" id="viewModal" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content rounded-4">
+                <div class="modal-header">
+                    <div>
+                        <h5 class="modal-title fw-bold">Customer Profile</h5><small
+                            class="text-muted-custom fw-bold">Details, summary and history.</small>
+                    </div><button class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <div class="row g-3">
-                    <div class="col-md-3"><div class="view-info-card"><small>Job Card</small><strong id="m_job_card_no">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Job Status</small><strong id="m_job_status_name">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Customer</small><strong id="m_customer_name">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Mobile</small><strong id="m_mobile">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Product</small><strong id="m_product_name">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Printing</small><strong id="m_printing_name">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Delivery Date</small><strong id="m_delivery_date">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Balance</small><strong id="m_balance_amount">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Stage</small><strong id="m_step_name">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Approval Type</small><strong id="m_approval_label">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Status</small><strong id="m_display_status">-</strong></div></div>
-                    <div class="col-md-3"><div class="view-info-card"><small>Approval ID</small><strong id="m_approval_id">-</strong></div></div>
-                    <div class="col-md-4"><div class="view-info-card"><small>Approved By Customer</small><strong id="m_approved_by_customer">-</strong></div></div>
-                    <div class="col-md-4"><div class="view-info-card"><small>Approved By Call</small><strong id="m_approved_by_call">-</strong></div></div>
-                    <div class="col-md-4"><div class="view-info-card"><small>Call Confirmed By</small><strong id="m_call_confirmed_by_name">-</strong></div></div>
-                    <div class="col-md-4"><div class="view-info-card"><small>Approved At</small><strong id="m_approved_at">-</strong></div></div>
-                    <div class="col-md-4"><div class="view-info-card"><small>Rejected At</small><strong id="m_rejected_at">-</strong></div></div>
-                    <div class="col-md-4"><div class="view-info-card"><small>Expires At</small><strong id="m_expires_at">-</strong></div></div>
-                    <div class="col-12"><div class="view-info-card"><small>Approval Token</small><span id="m_approval_token">-</span></div></div>
-                    <div class="col-md-6"><div class="view-info-card"><small>Customer Remarks</small><span id="m_customer_remarks">-</span></div></div>
-                    <div class="col-md-6"><div class="view-info-card"><small>Internal Remarks</small><span id="m_internal_remarks">-</span></div></div>
-                    <div class="col-md-6"><div class="view-info-card"><small>Tracking Remarks</small><span id="m_tracking_remarks">-</span></div></div>
-                    <div class="col-md-6"><div class="view-info-card"><small>Delay Remarks</small><span id="m_delay_remarks">-</span></div></div>
-                    <div class="col-md-4"><div class="view-info-card"><small>Planned Completion</small><strong id="m_planned_completion_date">-</strong></div></div>
-                    <div class="col-md-4"><div class="view-info-card"><small>Actual Completed</small><strong id="m_actual_completed_at">-</strong></div></div>
-                    <div class="col-md-4"><div class="view-info-card"><small>IP Address</small><strong id="m_ip_address">-</strong></div></div>
-                    <div class="col-12"><div class="view-info-card"><small>User Agent</small><span id="m_user_agent">-</span></div></div>
+                <div class="modal-body" id="viewBody">
+                    <div class="loading">Loading...</div>
                 </div>
-            </div>
-            <div class="modal-footer">
-                <a href="#" id="modalJobLink" class="btn btn-primary rounded-pill px-4 fw-bold">Open Job Card</a>
-                <button type="button" class="btn btn-outline-secondary rounded-pill px-4 fw-bold" data-bs-dismiss="modal">Close</button>
             </div>
         </div>
     </div>
-</div>
+    <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:1095">
+        <div id="toast" class="toast toast-ui">
+            <div class="toast-body">
+                <div class="fw-bold" id="toastTitle"></div>
+                <div class="small fw-bold" id="toastMsg"></div>
+            </div>
+        </div>
+    </div>
+    <script>
+    window.CM = {
+        csrf: <?= json_encode($csrf) ?>,
+        canCreate: <?= $canCreate?'true':'false' ?>,
+        canEdit: <?= $canEdit?'true':'false' ?>
+    };
+    </script><?php include __DIR__.'/includes/script.php'; ?>
+    <script>
+    (function() {
+        'use strict';
+        var pg = 1,
+            tp = 1,
+            pp = 15,
+            modalEl = document.getElementById('viewModal'),
+            viewModal = window.bootstrap ? new bootstrap.Modal(modalEl) : null;
 
-<?php include __DIR__ . '/includes/script.php'; ?>
-<script>
-(function(){
-    const pageToastEl = document.getElementById('pageToast');
-    if (pageToastEl && window.bootstrap && bootstrap.Toast) bootstrap.Toast.getOrCreateInstance(pageToastEl).show();
+        function e(v) {
+            return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#039;')
+        }
 
-    function setText(id, value){
-        const el = document.getElementById(id);
-        if(!el) return;
-        const clean = (value == null || String(value).trim() === '') ? '-' : String(value);
-        el.textContent = clean;
-    }
+        function money(v) {
+            return '₹' + Number(v || 0).toLocaleString('en-IN', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            })
+        }
 
-    function fmtMoney(value){
-        const n = Number(value || 0);
-        return '₹' + n.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2});
-    }
+        function toast(type, title, msg) {
+            var x = document.getElementById('toast');
+            x.className = 'toast toast-ui ' + type;
+            document.getElementById('toastTitle').textContent = title;
+            document.getElementById('toastMsg').textContent = msg;
+            if (window.bootstrap) bootstrap.Toast.getOrCreateInstance(x, {
+                delay: 3500
+            }).show()
+        }
 
-    function fmtDate(value, withTime){
-        if(!value || value === '-') return '-';
-        const d = new Date(String(value).replace(' ', 'T'));
-        if(isNaN(d.getTime())) return value;
-        const date = d.toLocaleDateString('en-GB').replace(/\//g, '-');
-        if(!withTime) return date;
-        return date + ' ' + d.toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit'});
-    }
+        function digits(id, max) {
+            document.getElementById(id).addEventListener('input', function() {
+                this.value = this.value.replace(/\D+/g, '').slice(0, max)
+            })
+        }
+        digits('mobile', 10);
+        digits('alt', 10);
+        digits('pin', 6);
 
-    document.querySelectorAll('.js-view-record').forEach(function(btn){
-        btn.addEventListener('click', function(){
-            setText('viewJobCardNo', btn.dataset.jobCardNo || '-');
-            setText('m_job_card_no', btn.dataset.jobCardNo || '-');
-            setText('m_job_status_name', btn.dataset.jobStatusName || '-');
-            setText('m_customer_name', btn.dataset.customerName || '-');
-            setText('m_mobile', btn.dataset.mobile || '-');
-            setText('m_product_name', btn.dataset.productName || '-');
-            setText('m_printing_name', [btn.dataset.printingName || '-', btn.dataset.subTypeName || ''].join(' ').trim());
-            setText('m_delivery_date', fmtDate(btn.dataset.deliveryDate || '', false));
-            setText('m_balance_amount', fmtMoney(btn.dataset.balanceAmount || 0));
-            setText('m_step_name', btn.dataset.stepName || '-');
-            setText('m_approval_label', btn.dataset.approvalLabel || '-');
-            setText('m_display_status', btn.dataset.displayStatus || '-');
-            setText('m_approval_id', btn.dataset.approvalId || '-');
-            setText('m_approved_by_customer', Number(btn.dataset.approvedByCustomer || 0) === 1 ? 'Yes' : 'No');
-            setText('m_approved_by_call', Number(btn.dataset.approvedByCall || 0) === 1 ? 'Yes' : 'No');
-            setText('m_call_confirmed_by_name', btn.dataset.callConfirmedByName || '-');
-            setText('m_approved_at', fmtDate(btn.dataset.approvedAt || '', true));
-            setText('m_rejected_at', fmtDate(btn.dataset.rejectedAt || '', true));
-            setText('m_expires_at', fmtDate(btn.dataset.expiresAt || '', true));
-            setText('m_approval_token', btn.dataset.approvalToken || '-');
-            setText('m_customer_remarks', btn.dataset.customerRemarks || '-');
-            setText('m_internal_remarks', btn.dataset.internalRemarks || '-');
-            setText('m_tracking_remarks', btn.dataset.trackingRemarks || '-');
-            setText('m_delay_remarks', btn.dataset.delayRemarks || '-');
-            setText('m_planned_completion_date', fmtDate(btn.dataset.plannedCompletionDate || '', false));
-            setText('m_actual_completed_at', fmtDate(btn.dataset.actualCompletedAt || '', true));
-            setText('m_ip_address', btn.dataset.ipAddress || '-');
-            setText('m_user_agent', btn.dataset.userAgent || '-');
-            const link = document.getElementById('modalJobLink');
-            if(link) link.href = 'job_card_view.php?id=' + encodeURIComponent(btn.dataset.jobCardId || '0');
+        function biz() {
+            var on = document.getElementById('ctype').value === 'business';
+            document.getElementById('bizWrap').classList.toggle('show', on);
+            document.getElementById('biz').required = on;
+            if (!on) {
+                document.getElementById('biz').value = '';
+                document.getElementById('gst').value = ''
+            }
+        }
+        document.getElementById('ctype').addEventListener('change', biz);
+
+        function reset() {
+            document.getElementById('customerForm').reset();
+            document.getElementById('cid').value = '0';
+            document.getElementById('state').value = 'Tamil Nadu';
+            document.getElementById('active').value = '1';
+            document.getElementById('ctype').value = 'individual';
+            document.getElementById('formTitle').textContent = 'Add Customer';
+            var b = document.getElementById('saveBtn');
+            if (b) b.textContent = 'Save Customer';
+            biz()
+        }
+        document.getElementById('clearBtn').onclick = reset;
+        var nb = document.getElementById('newBtn');
+        if (nb) nb.onclick = function() {
+            reset();
+            document.getElementById('name').focus()
+        };
+
+        function summary() {
+            fetch('api/customers.php?action=summary', {
+                credentials: 'same-origin'
+            }).then(r => r.json()).then(j => {
+                if (!j.status) return;
+                document.getElementById('sTotal').textContent = Number(j.summary.total || 0).toLocaleString(
+                    'en-IN');
+                document.getElementById('sActive').textContent = Number(j.summary.active || 0)
+                    .toLocaleString('en-IN');
+                document.getElementById('sBusiness').textContent = Number(j.summary.business || 0)
+                    .toLocaleString('en-IN');
+                document.getElementById('sIndividual').textContent = Number(j.summary.individual || 0)
+                    .toLocaleString('en-IN')
+            })
+        }
+
+        function params() {
+            var p = new URLSearchParams({
+                action: 'list',
+                page: pg,
+                per_page: pp,
+                q: document.getElementById('q').value.trim(),
+                customer_type: document.getElementById('type').value,
+                status: document.getElementById('status').value
+            });
+            return p
+        }
+
+        function row(r) {
+            var typ = r.customer_type === 'business' ? 'business' : 'individual',
+                loc = [r.city, r.state, r.pincode].filter(Boolean).join(', ') || '-',
+                st = Number(r.is_active) === 1;
+            return '<tr><td><div class="customer-name">' + e(r.customer_name) + '</div><div class="meta">' + e(r
+                    .mobile) + (r.email ? ' · ' + e(r.email) : '') +
+                '</div></td><td><span class="badge-pill type-' + typ + '">' + (typ === 'business' ? 'Business' :
+                    'Individual') + '</span><div class="meta">' + e(r.business_name || '-') + '</div></td><td>' + e(
+                    loc) + '</td><td><strong>' + money(r.total_business) + '</strong><div class="meta">Enq ' +
+                Number(r.enquiry_count || 0) + ' · Qtn ' + Number(r.quotation_count || 0) + ' · Pro ' + Number(r
+                    .proforma_count || 0) + '</div></td><td><span class="badge-pill ' + (st ? 'status-active' :
+                    'status-inactive') + '">' + (st ? 'Active' : 'Inactive') +
+                '</span></td><td><div class="actions"><button class="btn btn-outline-primary" onclick="cmView(' + r
+                .id + ')" title="View"><i data-lucide="eye"></i></button>' + (window.CM.canEdit ?
+                    '<button class="btn btn-outline-secondary" onclick="cmEdit(' + r.id +
+                    ')" title="Edit"><i data-lucide="pencil"></i></button><button class="btn btn-outline-' + (st ?
+                        'danger' : 'success') + '" onclick="cmToggle(' + r.id + ',' + (st ? 0 : 1) + ')" title="' +
+                    (st ? 'Deactivate' : 'Activate') + '"><i data-lucide="' + (st ? 'user-x' : 'user-check') +
+                    '"></i></button>' : '') + '</div></td></tr>'
+        }
+
+        function card(r) {
+            var st = Number(r.is_active) === 1;
+            return '<div class="mobile-card"><div class="d-flex justify-content-between gap-2"><div><div class="customer-name">' +
+                e(r.customer_name) + '</div><div class="meta">' + e(r.mobile) +
+                '</div></div><span class="badge-pill ' + (st ? 'status-active' : 'status-inactive') + '">' + (st ?
+                    'Active' : 'Inactive') + '</span></div><div class="meta mt-2">' + e(r.business_name || r
+                    .customer_type) + ' · ' + money(r.total_business) +
+                '</div><div class="d-flex gap-2 mt-2"><button class="btn btn-outline-primary btn-sm fw-bold" onclick="cmView(' +
+                r.id + ')">View</button>' + (window.CM.canEdit ?
+                    '<button class="btn btn-outline-secondary btn-sm fw-bold" onclick="cmEdit(' + r.id +
+                    ')">Edit</button><button class="btn btn-outline-' + (st ? 'danger' : 'success') +
+                    ' btn-sm fw-bold" onclick="cmToggle(' + r.id + ',' + (st ? 0 : 1) + ')">' + (st ? 'Deactivate' :
+                        'Activate') + '</button>' : '') + '</div></div>'
+        }
+
+        function load() {
+            document.getElementById('tbody').innerHTML = '<tr><td colspan="6" class="loading">Loading...</td></tr>';
+            fetch('api/customers.php?' + params(), {
+                credentials: 'same-origin'
+            }).then(r => r.json()).then(j => {
+                if (!j.status) throw Error(j.message);
+                var rows = j.rows || [];
+                document.getElementById('tbody').innerHTML = rows.length ? rows.map(row).join('') :
+                    '<tr><td colspan="6" class="text-center py-4 text-muted-custom">No customers found.</td></tr>';
+                document.getElementById('mobileList').innerHTML = rows.length ? rows.map(card).join('') :
+                    '<div class="mobile-card text-center">No customers found.</div>';
+                pg = Number(j.pagination.page || 1);
+                tp = Number(j.pagination.total_pages || 1);
+                document.getElementById('resultText').textContent = Number(j.pagination.total_rows || 0)
+                    .toLocaleString('en-IN') + ' customer(s) found';
+                document.getElementById('pageText').textContent = 'Page ' + pg + ' of ' + tp;
+                document.getElementById('prev').disabled = pg <= 1;
+                document.getElementById('next').disabled = pg >= tp;
+                var p = document.getElementById('pager');
+                p.style.setProperty('display', tp > 1 ? 'flex' : 'none', 'important');
+                if (window.lucide) lucide.createIcons()
+            }).catch(x => {
+                document.getElementById('tbody').innerHTML =
+                    '<tr><td colspan="6" class="text-danger text-center py-4">' + e(x.message) +
+                    '</td></tr>'
+            })
+        }
+        document.getElementById('filterBtn').onclick = function() {
+            pg = 1;
+            load()
+        };
+        document.getElementById('resetBtn').onclick = function() {
+            document.getElementById('q').value = '';
+            document.getElementById('type').value = '';
+            document.getElementById('status').value = '';
+            pg = 1;
+            load()
+        };
+        document.getElementById('q').addEventListener('keydown', function(x) {
+            if (x.key === 'Enter') {
+                x.preventDefault();
+                pg = 1;
+                load()
+            }
         });
-    });
+        document.getElementById('prev').onclick = function() {
+            if (pg > 1) {
+                pg--;
+                load()
+            }
+        };
+        document.getElementById('next').onclick = function() {
+            if (pg < tp) {
+                pg++;
+                load()
+            }
+        };
+        document.getElementById('customerForm').onsubmit = function(ev) {
+            ev.preventDefault();
+            var id = Number(document.getElementById('cid').value || 0),
+                m = document.getElementById('mobile').value,
+                a = document.getElementById('alt').value,
+                p = document.getElementById('pin').value;
+            if (id && !window.CM.canEdit) return toast('danger', 'Permission', 'No edit permission.');
+            if (!id && !window.CM.canCreate) return toast('danger', 'Permission', 'No create permission.');
+            if (!/^\d{10}$/.test(m)) return toast('warning', 'Mobile',
+            'Mobile must contain exactly 10 digits.');
+            if (a && !/^\d{10}$/.test(a)) return toast('warning', 'Alternate Mobile',
+                'Alternate mobile must contain 10 digits.');
+            if (p && !/^\d{6}$/.test(p)) return toast('warning', 'Pincode', 'Pincode must contain 6 digits.');
+            var fd = new FormData(this),
+                b = document.getElementById('saveBtn');
+            if (b) {
+                b.disabled = true;
+                b.textContent = 'Saving...'
+            }
+            fetch('api/customers.php', {
+                method: 'POST',
+                body: fd,
+                credentials: 'same-origin'
+            }).then(r => r.json()).then(j => {
+                if (!j.status) throw Error(j.message);
+                toast('success', id ? 'Customer Updated' : 'Customer Added', j.message);
+                reset();
+                summary();
+                load()
+            }).catch(x => toast('danger', 'Save Failed', x.message)).finally(() => {
+                if (b) {
+                    b.disabled = false;
+                    b.textContent = document.getElementById('cid').value === '0' ? 'Save Customer' :
+                        'Update Customer'
+                }
+            })
+        };
+        window.cmEdit = function(id) {
+            fetch('api/customers.php?action=get&id=' + id, {
+                credentials: 'same-origin'
+            }).then(r => r.json()).then(j => {
+                if (!j.status) throw Error(j.message);
+                var c = j.customer;
+                document.getElementById('cid').value = c.id;
+                document.getElementById('name').value = c.customer_name || '';
+                document.getElementById('mobile').value = c.mobile || '';
+                document.getElementById('alt').value = c.alternate_mobile || '';
+                document.getElementById('email').value = c.email || '';
+                document.getElementById('ctype').value = c.customer_type || 'individual';
+                document.getElementById('biz').value = c.business_name || '';
+                document.getElementById('gst').value = c.gst_number || '';
+                document.getElementById('address').value = c.address || '';
+                document.getElementById('city').value = c.city || '';
+                document.getElementById('state').value = c.state || '';
+                document.getElementById('pin').value = c.pincode || '';
+                document.getElementById('active').value = String(Number(c.is_active));
+                document.getElementById('formTitle').textContent = 'Edit Customer';
+                document.getElementById('saveBtn').textContent = 'Update Customer';
+                biz();
+                document.getElementById('formPane').scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'start'
+                })
+            }).catch(x => toast('danger', 'Edit Failed', x.message))
+        };
+        window.cmToggle = function(id, st) {
+            if (!confirm('Are you sure?')) return;
+            var fd = new FormData();
+            fd.append('action', 'toggle_status');
+            fd.append('id', id);
+            fd.append('is_active', st);
+            fd.append('csrf_token', window.CM.csrf);
+            fetch('api/customers.php', {
+                method: 'POST',
+                body: fd,
+                credentials: 'same-origin'
+            }).then(r => r.json()).then(j => {
+                if (!j.status) throw Error(j.message);
+                toast('success', 'Status Updated', j.message);
+                summary();
+                load()
+            }).catch(x => toast('danger', 'Status Failed', x.message))
+        };
 
-    document.getElementById('tableSearch')?.addEventListener('input', function(){
-        const value = this.value.toLowerCase().trim();
-        document.querySelectorAll('#dataTable tbody tr').forEach(function(row){
-            row.style.display = row.textContent.toLowerCase().includes(value) ? '' : 'none';
-        });
-        document.querySelectorAll('#mobileCards .mobile-card').forEach(function(card){
-            card.style.display = card.textContent.toLowerCase().includes(value) ? '' : 'none';
-        });
-    });
-
-    if(window.lucide && typeof window.lucide.createIcons === 'function') window.lucide.createIcons();
-})();
-</script>
+        function hrows(rows, msg) {
+            if (!rows || !rows.length) return '<div class="text-center text-muted-custom fw-bold py-4">' + e(msg) +
+                '</div>';
+            return rows.map(r =>
+                '<div class="hist-row"><div class="d-flex justify-content-between gap-2"><strong>' + e(r
+                .title) + '</strong><strong>' + e(r.amount_text || '') + '</strong></div><small>' + e(r.meta ||
+                    '') + '</small></div>').join('')
+        }
+        window.cmView = function(id) {
+            if (viewModal) viewModal.show();
+            document.getElementById('viewBody').innerHTML = '<div class="loading">Loading...</div>';
+            fetch('api/customers.php?action=profile&id=' + id, {
+                credentials: 'same-origin'
+            }).then(r => r.json()).then(j => {
+                if (!j.status) throw Error(j.message);
+                var c = j.customer,
+                    s = j.summary,
+                    h = j.history,
+                    addr = [c.address, c.city, c.state, c.pincode].filter(Boolean).join(', ');
+                document.getElementById('viewBody').innerHTML =
+                    '<div class="profile-grid"><div class="profile-box"><div class="profile-name">' + e(
+                        c.customer_name) + '</div><div class="meta mt-2">Mobile: ' + e(c.mobile ||
+                    '-') + '</div>' + (c.alternate_mobile ? '<div class="meta">Alternate: ' + e(c
+                        .alternate_mobile) + '</div>' : '') + (c.email ? '<div class="meta">Email: ' +
+                        e(c.email) + '</div>' : '') + '<div class="meta">Type: ' + e(c.customer_type) +
+                    '</div>' + (c.business_name ? '<div class="meta">Business: ' + e(c.business_name) +
+                        '</div>' : '') + (c.gst_number ? '<div class="meta">GST: ' + e(c.gst_number) +
+                        '</div>' : '') + '<div class="meta">Address: ' + e(addr || '-') +
+                    '</div></div><div class="profile-box"><div class="summary-grid"><div class="summary-item"><small>Enquiries</small><strong>' +
+                    s.enquiries +
+                    '</strong></div><div class="summary-item"><small>Quotations</small><strong>' + s
+                    .quotations +
+                    '</strong></div><div class="summary-item"><small>Proformas</small><strong>' + s
+                    .proformas +
+                    '</strong></div><div class="summary-item"><small>Quick Sales</small><strong>' + s
+                    .quick_sales +
+                    '</strong></div><div class="summary-item"><small>Total Business</small><strong>' +
+                    money(s.total_business) +
+                    '</strong></div><div class="summary-item"><small>Pending Balance</small><strong>' +
+                    money(s.pending_balance) +
+                    '</strong></div></div></div></div><div class="tabs"><button class="active" data-t="enquiries">Enquiries</button><button data-t="quotations">Quotations</button><button data-t="proformas">Proformas</button><button data-t="quick_sales">Quick Sales</button><button data-t="payments">Payments</button></div><div class="hist active" data-p="enquiries">' +
+                    hrows(h.enquiries, 'No enquiries found.') +
+                    '</div><div class="hist" data-p="quotations">' + hrows(h.quotations,
+                        'No quotations found.') + '</div><div class="hist" data-p="proformas">' + hrows(
+                        h.proformas, 'No proformas found.') +
+                    '</div><div class="hist" data-p="quick_sales">' + hrows(h.quick_sales,
+                        'No Quick Sales found.') + '</div><div class="hist" data-p="payments">' + hrows(
+                        h.payments, 'No payments found.') + '</div>';
+                document.querySelectorAll('.tabs button').forEach(b => b.onclick = function() {
+                    document.querySelectorAll('.tabs button').forEach(x => x.classList.remove(
+                        'active'));
+                    document.querySelectorAll('.hist').forEach(x => x.classList.remove(
+                        'active'));
+                    b.classList.add('active');
+                    document.querySelector('[data-p="' + b.dataset.t + '"]').classList.add(
+                        'active')
+                })
+            }).catch(x => document.getElementById('viewBody').innerHTML =
+                '<div class="alert alert-danger fw-bold">' + e(x.message) + '</div>')
+        };
+        reset();
+        summary();
+        load();
+        if (window.lucide) lucide.createIcons();
+    })();
+    </script>
 </body>
+
 </html>
