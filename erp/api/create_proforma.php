@@ -463,6 +463,32 @@ function pb_find_or_create_product(mysqli $conn, string $rawProductValue, string
 
 function pb_ensure_optional_create_proforma_columns(mysqli $conn): void
 {
+    /*
+     * Printing Only is a real Proforma/Job Card order type.
+     * It reuses the Readymade workflow_steps rows, so workflow_steps itself
+     * does not need a third enum value.
+     */
+    foreach (['proforma_bills', 'job_cards'] as $orderTypeTable) {
+        if (!pb_table_exists($conn, $orderTypeTable) || !apiColumnExists($conn, $orderTypeTable, 'order_type')) {
+            continue;
+        }
+
+        try {
+            $safeTable = $conn->real_escape_string($orderTypeTable);
+            $res = $conn->query("SHOW COLUMNS FROM `{$safeTable}` LIKE 'order_type'");
+            $col = $res ? $res->fetch_assoc() : null;
+            if ($res) $res->free();
+
+            $typeText = strtolower((string)($col['Type'] ?? ''));
+            if ($typeText !== '' && !str_contains($typeText, "'printing_only'")) {
+                $conn->query("ALTER TABLE `{$safeTable}` MODIFY COLUMN `order_type` ENUM('readymade','customized','printing_only') NOT NULL");
+            }
+        } catch (Throwable $e) {
+            // Explicit validation below will report the problem if the DB user
+            // cannot alter the enum. Existing Readymade/Customized remains safe.
+        }
+    }
+
     if (pb_table_exists($conn, 'proforma_bills')) {
         if (!apiColumnExists($conn, 'proforma_bills', 'card_extra_charge')) {
             $conn->query("ALTER TABLE proforma_bills ADD COLUMN card_extra_charge DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER discount_amount");
@@ -837,19 +863,105 @@ function pb_csrf(): void
 function pb_next_no(mysqli $conn, string $table, string $column, string $prefix): string
 {
     $datePart = date('ymd');
-    $like = $prefix . '-' . $datePart . '-%';
+    $numberPrefix = $prefix . '-' . $datePart . '-';
+    $like = $numberPrefix . '%';
 
+    /*
+     * Do NOT use COUNT(*) + 1 here.
+     *
+     * Example:
+     * Existing: 0001, 0002, 0004
+     * COUNT(*) + 1 => 0004 (duplicate)
+     *
+     * Instead read the highest existing number and increment its final sequence.
+     * FOR UPDATE is intentionally used because this function is normally called
+     * inside the current save transaction. It reduces the chance of two requests
+     * allocating the same number at the same time.
+     */
     try {
-        $stmt = $conn->prepare("SELECT COUNT(*) AS total FROM {$table} WHERE {$column} LIKE ?");
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $table) || !preg_match('/^[A-Za-z0-9_]+$/', $column)) {
+            throw new RuntimeException('Invalid number-generator table/column.');
+        }
+
+        $tableSql = '`' . $table . '`';
+        $columnSql = '`' . $column . '`';
+
+        $stmt = $conn->prepare("
+            SELECT {$columnSql} AS last_no
+            FROM {$tableSql}
+            WHERE {$columnSql} LIKE ?
+            ORDER BY {$columnSql} DESC
+            LIMIT 1
+            FOR UPDATE
+        ");
         $stmt->bind_param('s', $like);
         $stmt->execute();
         $row = $stmt->get_result()->fetch_assoc();
         $stmt->close();
 
-        $next = ((int)($row['total'] ?? 0)) + 1;
-        return $prefix . '-' . $datePart . '-' . str_pad((string)$next, 4, '0', STR_PAD_LEFT);
+        $next = 1;
+        $lastNo = trim((string)($row['last_no'] ?? ''));
+
+        if ($lastNo !== '' && preg_match('/-(\d+)$/', $lastNo, $match)) {
+            $next = ((int)$match[1]) + 1;
+        }
+
+        /*
+         * Extra collision guard.
+         * This also protects old databases containing gaps/deleted rows.
+         */
+        for ($attempt = 0; $attempt < 10000; $attempt++, $next++) {
+            $candidate = $numberPrefix . str_pad((string)$next, 4, '0', STR_PAD_LEFT);
+
+            $stmt = $conn->prepare("
+                SELECT 1
+                FROM {$tableSql}
+                WHERE {$columnSql} = ?
+                LIMIT 1
+            ");
+            $stmt->bind_param('s', $candidate);
+            $stmt->execute();
+            $exists = (bool)$stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if (!$exists) {
+                return $candidate;
+            }
+        }
+
+        throw new RuntimeException('Unable to allocate the next document number.');
     } catch (Throwable $e) {
-        return $prefix . '-' . $datePart . '-' . str_pad((string)random_int(1, 9999), 4, '0', STR_PAD_LEFT);
+        /*
+         * Last-resort fallback still checks uniqueness instead of returning a
+         * random value blindly.
+         */
+        try {
+            $tableSql = '`' . preg_replace('/[^A-Za-z0-9_]/', '', $table) . '`';
+            $columnSql = '`' . preg_replace('/[^A-Za-z0-9_]/', '', $column) . '`';
+
+            for ($attempt = 0; $attempt < 100; $attempt++) {
+                $candidate = $numberPrefix . str_pad((string)random_int(1, 9999), 4, '0', STR_PAD_LEFT);
+
+                $stmt = $conn->prepare("
+                    SELECT 1
+                    FROM {$tableSql}
+                    WHERE {$columnSql} = ?
+                    LIMIT 1
+                ");
+                $stmt->bind_param('s', $candidate);
+                $stmt->execute();
+                $exists = (bool)$stmt->get_result()->fetch_assoc();
+                $stmt->close();
+
+                if (!$exists) {
+                    return $candidate;
+                }
+            }
+        } catch (Throwable $ignored) {
+            // Throw the original allocation error below.
+        }
+
+        throw new RuntimeException('Document number generation failed: ' . $e->getMessage());
     }
 }
 
@@ -1270,7 +1382,8 @@ function pb_customer_id(mysqli $conn, string $customerName, string $mobile, stri
 function pb_first_workflow_step(mysqli $conn, string $orderType): ?int
 {
     try {
-        $preferred = $orderType === 'customized' ? 'designing' : 'proofing';
+        $workflowOrderType = $orderType === 'printing_only' ? 'readymade' : $orderType;
+        $preferred = $workflowOrderType === 'customized' ? 'designing' : 'proofing';
 
         $stmt = $conn->prepare("
             SELECT id
@@ -1280,7 +1393,7 @@ function pb_first_workflow_step(mysqli $conn, string $orderType): ?int
               AND is_active = 1
             LIMIT 1
         ");
-        $stmt->bind_param('ss', $orderType, $preferred);
+        $stmt->bind_param('ss', $workflowOrderType, $preferred);
         $stmt->execute();
         $row = $stmt->get_result()->fetch_assoc();
         $stmt->close();
@@ -1297,7 +1410,7 @@ function pb_first_workflow_step(mysqli $conn, string $orderType): ?int
             ORDER BY sort_order ASC
             LIMIT 1
         ");
-        $stmt->bind_param('s', $orderType);
+        $stmt->bind_param('s', $workflowOrderType);
         $stmt->execute();
         $row = $stmt->get_result()->fetch_assoc();
         $stmt->close();
@@ -1850,6 +1963,7 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
 
     $firstItem = $items[0];
     $orderType = (string)$bill['order_type'];
+    $workflowOrderType = $orderType === 'printing_only' ? 'readymade' : $orderType;
     $jobNo = pb_next_no($conn, 'job_cards', 'job_card_no', 'SC-JOB');
     $trackingToken = bin2hex(random_bytes(24));
     $currentStepId = pb_first_workflow_step($conn, $orderType);
@@ -1982,7 +2096,7 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
           AND ws.is_active = 1
         ORDER BY ws.sort_order ASC
     ");
-    $stmt->bind_param('s', $orderType);
+    $stmt->bind_param('s', $workflowOrderType);
     $stmt->execute();
     $res = $stmt->get_result();
 
@@ -3450,14 +3564,28 @@ try {
              * New Create Proforma UI sends all added product rows in items_json.
              * Single-product fields remain as a backward-compatible fallback.
              */
-            $itemsPayload = json_decode((string)($_POST['items_json'] ?? ''), true);
-            if (!is_array($itemsPayload) || !$itemsPayload) {
+            if ($orderType === 'printing_only') {
+                /*
+                 * Printing Only has no Product Master / stock item.
+                 * Keep one synthetic non-stock line so Proforma + Job Card item
+                 * relationships remain compatible with the existing workflow.
+                 */
                 $itemsPayload = [[
-                    'product_id' => $_POST['product_id'] ?? null,
-                    'product_name' => pb_post('item_name') ?: pb_post('product_name'),
-                    'qty' => $_POST['qty'] ?? 1,
-                    'rate' => $_POST['rate'] ?? 0
+                    'product_id' => null,
+                    'product_name' => 'Customer Printing Work',
+                    'qty' => 1,
+                    'rate' => 0
                 ]];
+            } else {
+                $itemsPayload = json_decode((string)($_POST['items_json'] ?? ''), true);
+                if (!is_array($itemsPayload) || !$itemsPayload) {
+                    $itemsPayload = [[
+                        'product_id' => $_POST['product_id'] ?? null,
+                        'product_name' => pb_post('item_name') ?: pb_post('product_name'),
+                        'qty' => $_POST['qty'] ?? 1,
+                        'rate' => $_POST['rate'] ?? 0
+                    ]];
+                }
             }
 
             $discountAmount = pb_float($_POST['discount_amount'] ?? 0);
@@ -3502,7 +3630,7 @@ try {
                 $upiRef = pb_post('upi_reference');
             }
 
-            if (!in_array($orderType, ['readymade', 'customized'], true)) {
+            if (!in_array($orderType, ['readymade', 'customized', 'printing_only'], true)) {
                 throw new RuntimeException('Invalid order type.');
             }
 
@@ -3545,6 +3673,21 @@ try {
                 }
             }
 
+            /*
+             * Billing auto-fill is also enforced server-side so API submissions
+             * stay correct even when JavaScript is bypassed.
+             * Wedding/Reception billing name format: Groom&Bride.
+             */
+            if ($billingMobile === '') {
+                $billingMobile = $mobile;
+            }
+            if ($selectedFieldGroup === 'wedding_reception') {
+                $coupleBillingName = trim($groomName) . '&' . trim($brideName);
+                $billingName = trim($coupleBillingName, '&');
+            } elseif ($billingName === '') {
+                $billingName = $customerName;
+            }
+
             if ($discountAmount < 0) {
                 throw new RuntimeException('Discount cannot be negative.');
             }
@@ -3561,21 +3704,40 @@ try {
                 throw new RuntimeException('Printing charge cannot be negative.');
             }
 
+            if ($orderType === 'printing_only' && $printingCharge <= 0) {
+                throw new RuntimeException('Printing Charge is required for Printing Only orders.');
+            }
+
             if ($advanceAmount < 0) {
                 throw new RuntimeException('Advance amount cannot be negative.');
             }
 
-            if ($orderType === 'readymade') {
+            if (in_array($orderType, ['readymade', 'printing_only'], true)) {
                 if (!$globalPrintingTypeId) {
-                    throw new RuntimeException('Please select the common Printing Type for this Readymade Proforma.');
+                    throw new RuntimeException(
+                        $orderType === 'printing_only'
+                            ? 'Please select Printing Type for this Printing Only order.'
+                            : 'Please select the common Printing Type for this Readymade Proforma.'
+                    );
                 }
 
-                if (!pb_printing_type_allowed_for_readymade($conn, $globalPrintingTypeId)) {
+                if ($orderType === 'readymade' && !pb_printing_type_allowed_for_readymade($conn, $globalPrintingTypeId)) {
                     throw new RuntimeException('Readymade order allows only Offset Print, Screen Print, or Digital Print.');
                 }
 
+                if ($orderType === 'printing_only') {
+                    $stmt = $conn->prepare("SELECT id FROM printing_types WHERE id = ? AND is_active = 1 LIMIT 1");
+                    $stmt->bind_param('i', $globalPrintingTypeId);
+                    $stmt->execute();
+                    $printingTypeExists = (bool)$stmt->get_result()->fetch_assoc();
+                    $stmt->close();
+                    if (!$printingTypeExists) {
+                        throw new RuntimeException('Selected Printing Type is not active.');
+                    }
+                }
+
                 if (pb_is_screen_printing_type($conn, $globalPrintingTypeId) && !$globalPrintingSubTypeId) {
-                    throw new RuntimeException('Please select Screen Print sub-type: UV Products or Foil Products.');
+                    throw new RuntimeException('Please select Screen Print sub-type.');
                 }
             }
 
@@ -3594,6 +3756,13 @@ try {
                 $qty = pb_float($rawItem['qty'] ?? 0);
                 $rate = pb_float($rawItem['rate'] ?? 0);
 
+                if ($orderType === 'printing_only') {
+                    $rawProductValue = '';
+                    $manualItemName = 'Customer Printing Work';
+                    $qty = 1.0;
+                    $rate = 0.0;
+                }
+
                 if ($rawProductValue === '' && $manualItemName === '') {
                     throw new RuntimeException('Please select product for item ' . ($itemIndex + 1) . '.');
                 }
@@ -3608,7 +3777,7 @@ try {
 
                 $itemPlannedDates = [];
 
-                if ($orderType === 'readymade') {
+                if (in_array($orderType, ['readymade', 'printing_only'], true)) {
                     /*
                      * SAME Printing Type/Sub-Type/Finishing for every Readymade item.
                      */
@@ -3680,19 +3849,24 @@ try {
                     $finishingRequired = 0;
                 }
 
-                $productInfo = pb_find_or_create_product(
-                    $conn,
-                    $rawProductValue,
-                    $manualItemName,
-                    $orderType,
-                    $rate,
-                    $userId
-                );
+                if ($orderType === 'printing_only') {
+                    $productId = null;
+                    $productName = 'Customer Printing Work';
+                } else {
+                    $productInfo = pb_find_or_create_product(
+                        $conn,
+                        $rawProductValue,
+                        $manualItemName,
+                        $orderType,
+                        $rate,
+                        $userId
+                    );
 
-                $productId = $productInfo['id'];
-                $productName = trim((string)$productInfo['name']);
-                if ($productName === '') {
-                    $productName = 'Invitation Cards';
+                    $productId = $productInfo['id'];
+                    $productName = trim((string)$productInfo['name']);
+                    if ($productName === '') {
+                        $productName = 'Invitation Cards';
+                    }
                 }
 
                 $amount = round($qty * $rate, 2);

@@ -806,7 +806,7 @@ $customizedSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order
 $quotationJson = json_encode($quotations, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $subTypeJson = json_encode($printingSubTypes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $printingTypeJson = json_encode($printingTypes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
-$stepsJson = json_encode(['readymade' => $readymadeSteps, 'customized' => $customizedSteps], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+$stepsJson = json_encode(['readymade' => $readymadeSteps, 'printing_only' => $readymadeSteps, 'customized' => $customizedSteps], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $plannedDatesJson = json_encode($plannedDates ?: new stdClass(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $editItemsJson = json_encode($editItems ?: [], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
@@ -1742,7 +1742,178 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             grid-template-columns: 1fr;
         }
     }
-    </style>
+    
+    /* Professional compact Create Proforma UI */
+    .module-page{
+        width:100%;
+        max-width:1320px;
+        margin:0 auto;
+    }
+    .module-page .page-head{
+        padding:15px 18px;
+        margin-bottom:12px;
+        border-radius:16px;
+    }
+    .module-page .page-head h1{
+        font-size:23px;
+        line-height:1.15;
+        font-weight:800;
+        letter-spacing:-.25px;
+    }
+    .module-page .page-head p{
+        font-size:12px;
+        font-weight:500;
+    }
+    .module-card{
+        padding:18px !important;
+        border-radius:16px !important;
+    }
+    .module-card > .row.g-3{
+        --bs-gutter-y:.75rem;
+        --bs-gutter-x:.85rem;
+    }
+    .section-title{
+        font-size:15px !important;
+        font-weight:800 !important;
+        margin-bottom:2px !important;
+        color:var(--text-main);
+    }
+    .form-label{
+        font-size:10.5px !important;
+        font-weight:750 !important;
+        margin-bottom:5px !important;
+        letter-spacing:.01em;
+    }
+    .form-control,
+    .form-select,
+    .select2-container .select2-selection--single{
+        min-height:39px !important;
+        font-size:12.5px !important;
+        border-radius:11px !important;
+    }
+    textarea.form-control{
+        min-height:58px !important;
+    }
+    .input-group-text{
+        min-height:39px;
+        font-size:12px;
+        padding:6px 10px;
+    }
+    .soft-panel{
+        padding:14px !important;
+        border-radius:15px !important;
+    }
+    .quotation-clear-btn,
+    .product-clear-btn{
+        min-height:39px !important;
+        font-size:11px !important;
+        font-weight:700 !important;
+        border-radius:11px !important;
+    }
+    .pricing-requirement-title{
+        padding:10px 12px !important;
+        border-radius:12px !important;
+        font-size:12px !important;
+    }
+    .pricing-requirement-title span{
+        font-size:13px !important;
+        font-weight:800 !important;
+    }
+    .pricing-requirement-title small{
+        font-size:10.5px !important;
+        font-weight:600 !important;
+    }
+    .proforma-items-panel,
+    .pricing-summary-card,
+    .amount-summary-panel,
+    .advance-payment-panel{
+        border-radius:14px !important;
+    }
+    .proforma-items-head{
+        padding:10px 12px !important;
+    }
+    .proforma-items-head strong{
+        font-size:13px !important;
+        font-weight:800 !important;
+    }
+    .proforma-items-table th,
+    .proforma-items-table td{
+        padding:7px 9px !important;
+        font-size:10.5px !important;
+    }
+    .charge-input-row{
+        gap:9px !important;
+    }
+    .charge-input-card{
+        padding:10px !important;
+        border-radius:12px !important;
+    }
+    .amount-summary-item{
+        padding:9px 10px !important;
+        border-radius:11px !important;
+    }
+    .amount-summary-item small{
+        font-size:9.5px !important;
+        font-weight:700 !important;
+    }
+    .amount-summary-item strong{
+        font-size:14px !important;
+        font-weight:800 !important;
+    }
+    .workflow-step{
+        padding:9px 10px !important;
+        border-radius:11px !important;
+    }
+    .workflow-step strong{
+        font-size:11.5px !important;
+        font-weight:750 !important;
+    }
+    .workflow-date-field small{
+        font-size:9px !important;
+    }
+    .printing-only-product-field{
+        transition:.15s ease;
+    }
+    .printing-only-product-field.printing-disabled{
+        opacity:.58;
+    }
+    .printing-only-info{
+        display:flex;
+        align-items:flex-start;
+        gap:10px;
+        padding:10px 12px;
+        border:1px solid rgba(14,116,144,.22);
+        border-radius:12px;
+        background:rgba(14,116,144,.06);
+        color:var(--text-main);
+    }
+    .printing-only-info svg{
+        width:18px;
+        height:18px;
+        flex:0 0 18px;
+        margin-top:1px;
+        color:#0e7490;
+    }
+    .printing-only-info strong{
+        display:block;
+        font-size:12px;
+        font-weight:800;
+        margin-bottom:2px;
+    }
+    .printing-only-info span{
+        display:block;
+        font-size:10.5px;
+        font-weight:600;
+        color:var(--text-muted);
+        line-height:1.4;
+    }
+    @media(max-width:767.98px){
+        .module-card{padding:13px !important;}
+        .module-page .page-head{padding:13px 14px;}
+        .module-page .page-head h1{font-size:20px;}
+    }
+
+</style>
 </head>
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -1829,10 +2000,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                     value="<?= e($type['id']) ?>" data-field-group="<?= e($type['field_group']) ?>">
                                     <?= e($type['function_name']) ?></option><?php endforeach; ?>
                             </select></div>
-                        <div class="col-md-4 wedding-field"><label class="form-label fw-bold">Bride Name</label><input
-                                type="text" name="bride_name" id="bride_name" class="form-control"></div>
                         <div class="col-md-4 wedding-field"><label class="form-label fw-bold">Groom Name</label><input
-                                type="text" name="groom_name" id="groom_name" class="form-control"></div>
+                                type="text" name="groom_name" id="groom_name" class="form-control" placeholder="Enter groom name"></div>
+                        <div class="col-md-4 wedding-field"><label class="form-label fw-bold">Bride Name</label><input
+                                type="text" name="bride_name" id="bride_name" class="form-control" placeholder="Enter bride name"></div>
                         <div class="col-md-4 event-field"><label class="form-label fw-bold">Function Date</label><input
                                 type="date" name="function_date" id="function_date" class="form-control"></div>
                         <div class="col-md-4 event-field"><label class="form-label fw-bold">Function Time <span
@@ -1865,9 +2036,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                         <select name="order_type" id="order_type" class="form-select" required>
                                             <option value="readymade">Readymade</option>
                                             <option value="customized">Customized</option>
+                                            <option value="printing_only">Printing Only</option>
                                         </select>
                                     </div>
-                                    <div class="col-md-9">
+                                    <div class="col-md-9 printing-only-product-field">
                                         <label class="form-label fw-bold">Product Master *</label>
                                         <div class="product-select-wrap">
                                             <select name="product_id" id="product_id"
@@ -1907,12 +2079,12 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                             Select a product to view On Hand, Reserved and Available stock.</div>
                                     </div>
 
-                                    <div class="col-md-4">
+                                    <div class="col-md-4 printing-only-product-field">
                                         <label class="form-label fw-bold">Quantity *</label>
                                         <input type="number" step="1" min="1" name="qty" id="qty" class="form-control"
                                             value="1" required>
                                     </div>
-                                    <div class="col-md-4">
+                                    <div class="col-md-4 printing-only-product-field">
                                         <label class="form-label fw-bold">Rate / Unit</label>
                                         <div class="input-group">
                                             <span class="input-group-text">₹</span>
@@ -1923,7 +2095,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                         <small class="text-muted-custom fw-bold">Editable rate for this selected
                                             product.</small>
                                     </div>
-                                    <div class="col-md-4">
+                                    <div class="col-md-4 printing-only-product-field">
                                         <label class="form-label fw-bold">Product Total</label>
                                         <div class="input-group">
                                             <span class="input-group-text">₹</span>
@@ -2038,14 +2210,24 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                         </div>
                                     </div>
 
-                                    <div class="col-12 product-add-line-wrap">
+                                    <div class="col-12 printing-only-note hide-field" id="printingOnlyNote">
+                                        <div class="printing-only-info">
+                                            <i data-lucide="printer"></i>
+                                            <div>
+                                                <strong>Printing Only Order</strong>
+                                                <span>Customer supplies the material/design. Product Master, Quantity, Rate and Product Total are not used. Select Printing Type and enter the amount in Printing Charge.</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="col-12 product-add-line-wrap printing-only-hide">
                                         <button type="button" id="addProductBtn"
                                             class="btn btn-primary product-add-line-btn">
                                             <i data-lucide="plus" class="me-1"></i> Add Product
                                         </button>
                                     </div>
 
-                                    <div class="col-12">
+                                    <div class="col-12 printing-only-hide">
                                         <div class="proforma-items-panel">
                                             <div class="proforma-items-head">
                                                 <div>
@@ -2130,7 +2312,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                         <input type="date" name="delivery_date" id="delivery_date" class="form-control">
                                     </div>
 
-                                    <div class="col-12 readymade-field">
+                                    <div class="col-12 readymade-field printing-only-hide-pricing">
                                         <div class="pricing-requirement-title">
                                             <span><i data-lucide="sliders-horizontal" class="me-2"></i>Requirement
                                                 Details & Predefined
@@ -2164,7 +2346,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                     <?php endif; ?>
 
 
-                                    <div class="col-12 readymade-field">
+                                    <div class="col-12 readymade-field printing-only-hide-pricing">
                                         <div id="pricingSummaryCard" class="pricing-summary-card no-price">
                                             <div class="pricing-summary-head">
                                                 <strong>Pricing Summary</strong>
@@ -2782,7 +2964,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             proformaItems.reduce((sum, item) => sum + (parseFloat(item.amount || 0) || 0), 0) :
             0;
 
-        const sub = Math.max(0, hasAddedProducts ? addedProductsAmount : currentProductAmount);
+        const sub = orderType === 'printing_only' ? 0 : Math.max(0, hasAddedProducts ? addedProductsAmount : currentProductAmount);
 
         let chargeTotal = 0;
 
@@ -2932,6 +3114,25 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             'wedding_reception' || g === 'event')));
     }
 
+    function syncBillingDetails() {
+        const customerName = String(getValue('customer_name') || '').trim();
+        const customerMobile = String(getValue('mobile') || '').trim();
+        const group = functionGroup();
+
+        if (customerMobile !== '') {
+            setValue('billing_mobile', customerMobile);
+        }
+
+        if (group === 'wedding_reception') {
+            const groom = String(getValue('groom_name') || '').trim();
+            const bride = String(getValue('bride_name') || '').trim();
+            const coupleName = [groom, bride].filter(Boolean).join('&');
+            setValue('billing_name', coupleName || customerName);
+        } else {
+            setValue('billing_name', customerName);
+        }
+    }
+
     function isMulticolorOffsetOption(opt) {
         if (!opt || !opt.value) return false;
         const label = (opt.textContent || '').toLowerCase();
@@ -2969,11 +3170,47 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     function toggleOrderType(forceDefaults = false) {
         const type = getValue('order_type') || 'readymade';
         const isCustomized = type === 'customized';
-        document.querySelectorAll('.readymade-field').forEach(el => el.classList.toggle('hide-field', type !==
-            'readymade'));
+        const isPrintingOnly = type === 'printing_only';
+        const usesCommonPrinting = type === 'readymade' || isPrintingOnly;
+
+        document.querySelectorAll('.readymade-field').forEach(el => el.classList.toggle('hide-field', !usesCommonPrinting));
         document.querySelectorAll('.customized-field').forEach(el => el.classList.toggle('hide-field', !isCustomized));
         document.querySelectorAll('.custom-only-field').forEach(el => el.classList.toggle('hide-field', !isCustomized));
         document.querySelectorAll('.customized-column').forEach(el => el.classList.toggle('hide-field', !isCustomized));
+        document.querySelectorAll('.printing-only-hide').forEach(el => el.classList.toggle('hide-field', isPrintingOnly));
+        document.querySelectorAll('.printing-only-hide-pricing').forEach(el => el.classList.toggle('hide-field', isPrintingOnly));
+        document.getElementById('printingOnlyNote')?.classList.toggle('hide-field', !isPrintingOnly);
+
+        const product = document.getElementById('product_id');
+        const qty = document.getElementById('qty');
+        const rate = document.getElementById('rate');
+        const total = document.getElementById('product_total_display');
+        const clearProduct = document.getElementById('clearProductBtn');
+
+        [product, qty, rate, total, clearProduct].forEach(el => {
+            if (el) el.disabled = isPrintingOnly;
+        });
+        document.querySelectorAll('.printing-only-product-field').forEach(el => {
+            el.classList.toggle('printing-disabled', isPrintingOnly);
+        });
+
+        if (window.jQuery && $.fn.select2 && product) {
+            $('#product_id').prop('disabled', isPrintingOnly).trigger('change.select2');
+        }
+
+        if (isPrintingOnly) {
+            if (Array.isArray(proformaItems) && proformaItems.length) {
+                proformaItems = [];
+                editingProductIndex = -1;
+                syncItemsJson();
+            }
+            setValue('product_id', '');
+            setValue('product_name', '');
+            setValue('qty', '1');
+            setValue('rate', '0');
+            clearPricingSelection('Printing Only uses manual Printing Charge. Product pricing is not required.');
+        }
+
         document.getElementById('delivery_date').required = true;
         syncCurrentProductRequiredState();
         updatePrintingTypeOptions();
@@ -2995,19 +3232,23 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         if (chargeHelp) {
             chargeHelp.textContent = isCustomized ?
                 'Customized charges are added product-wise. These values are automatic totals from all added Customized products.' :
-                'Readymade charges are common once for the full Proforma.';
+                (isPrintingOnly ?
+                    'Printing Only: enter the customer printing amount in Printing Charge. No Product Master or stock reservation is used.' :
+                    'Readymade charges are common once for the full Proforma.');
         }
 
         const autoLabel = document.getElementById('autoCreateJobCardLabel');
         if (autoLabel) {
             autoLabel.textContent = isCustomized ?
                 'Create Separate Job Card for Every Customized Product Automatically' :
-                'Create Job Card Automatically';
+                (isPrintingOnly ? 'Create Printing Job Card Automatically' : 'Create Job Card Automatically');
         }
 
         const trackingHelp = document.getElementById('trackingDatesHelp');
         if (trackingHelp) {
-            trackingHelp.textContent = 'Optional. These dates belong to the single Readymade Job Card.';
+            trackingHelp.textContent = isPrintingOnly ?
+                'Uses the same tracking stages as a Readymade Job Card.' :
+                'Optional. These dates belong to the single Readymade Job Card.';
         }
 
         if (isCustomized) {
@@ -3017,6 +3258,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         renderWorkflowSteps();
         renderProformaItems();
         calculate();
+        refreshProformaIcons();
     }
 
     function updatePrintingTypeOptions() {
@@ -3024,7 +3266,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         const select = document.getElementById('printing_type_id');
         Array.from(select.options).forEach(opt => {
             if (!opt.value) return;
-            const ok = type === 'readymade' ? opt.dataset.readymade === '1' : opt.dataset.customized === '1';
+            const ok = type === 'printing_only'
+                ? true
+                : (type === 'readymade' ? opt.dataset.readymade === '1' : opt.dataset.customized === '1');
             opt.hidden = !ok;
             opt.disabled = !ok;
         });
@@ -3431,6 +3675,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         setValue('venue', q.venue || '');
         setValue('function_date', q.function_date || '');
         setValue('function_time', q.function_time || '');
+        syncBillingDetails();
         setValue('qty', q.total_qty || 1);
         setValue('description', q.item_details || q.description || '');
         setValue('product_name', q.product_name || q.item_name || q.item_details || '');
@@ -3625,6 +3870,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     function canLookupPricing(payload) {
         const qty = parseFloat(payload.qty || 0) || 0;
 
+        if ((getValue('order_type') || 'readymade') === 'printing_only') {
+            return false;
+        }
+
         if ((getValue('order_type') || 'readymade') === 'readymade' &&
             Array.isArray(proformaItems) && proformaItems.length > 1) {
             return false;
@@ -3638,7 +3887,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     function fetchPricing() {
         const payload = currentPricingPayload();
         if (!canLookupPricing(payload)) {
-            if ((getValue('order_type') || 'readymade') === 'readymade' &&
+            if ((getValue('order_type') || 'readymade') === 'printing_only') {
+                clearPricingSelection('Printing Only uses manual Printing Charge. Product slab pricing is not used.');
+            } else if ((getValue('order_type') || 'readymade') === 'readymade' &&
                 Array.isArray(proformaItems) && proformaItems.length > 1 &&
                 String(getValue('printing_type_id') || '').trim() !== '') {
                 clearPricingSelection(
@@ -3848,7 +4099,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     function syncCurrentProductRequiredState() {
         const hasSavedItems = Array.isArray(proformaItems) && proformaItems.length > 0;
         const hasCurrentProduct = String(getValue('product_id') || '').trim() !== '';
-        const isCustomized = (getValue('order_type') || 'readymade') === 'customized';
+        const orderType = getValue('order_type') || 'readymade';
+        const isCustomized = orderType === 'customized';
+        const isPrintingOnly = orderType === 'printing_only';
 
         /*
          * Once at least one product has been added, the blank Product Entry area
@@ -3858,7 +4111,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
          * Printing Side / Scoring Type after a valid product is already in
          * "Added Products".
          */
-        const currentLineRequired = !hasSavedItems || hasCurrentProduct || editingProductIndex >= 0;
+        const currentLineRequired = !isPrintingOnly && (!hasSavedItems || hasCurrentProduct || editingProductIndex >= 0);
 
         const product = document.getElementById('product_id');
         const qty = document.getElementById('qty');
@@ -4312,7 +4565,14 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     document.getElementById('clearQuotationBtn')?.addEventListener('click', function() {
         clearQuotationSelection(true);
     });
-    document.getElementById('function_type_id')?.addEventListener('change', toggleFunctionFields);
+    document.getElementById('function_type_id')?.addEventListener('change', () => {
+        toggleFunctionFields();
+        syncBillingDetails();
+    });
+    ['customer_name', 'mobile', 'groom_name', 'bride_name'].forEach(id => {
+        document.getElementById(id)?.addEventListener('input', syncBillingDetails);
+        document.getElementById(id)?.addEventListener('change', syncBillingDetails);
+    });
     document.getElementById('order_type')?.addEventListener('change', () => {
         toggleOrderType(true);
         schedulePriceLookup();
@@ -4363,7 +4623,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         $('#quotation_id').on('select2:clear', function() {
             clearQuotationSelection(false);
         });
-        $('#function_type_id').on('select2:select select2:clear', toggleFunctionFields);
+        $('#function_type_id').on('select2:select select2:clear', function() {
+            toggleFunctionFields();
+            syncBillingDetails();
+        });
         $('#product_id').on('select2:select select2:clear', productChanged);
     }
     initSelect2(document);
@@ -4627,8 +4890,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
          */
         syncCurrentProductRequiredState();
 
+        const submitOrderType = getValue('order_type') || 'readymade';
+        const isPrintingOnlySubmit = submitOrderType === 'printing_only';
         const currentProductIdForSubmit = String(getValue('product_id') || '').trim();
-        if (currentProductIdForSubmit) {
+        if (!isPrintingOnlySubmit && currentProductIdForSubmit) {
             const productError = validateCurrentProductForAdd();
             if (productError) {
                 showActionToast(productError, 'danger', 'Product Check');
@@ -4655,7 +4920,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             renderProformaItems();
         }
 
-        if (!proformaItems.length) {
+        if (!isPrintingOnlySubmit && !proformaItems.length) {
             showActionToast('Please add at least one product before creating the Proforma.', 'danger',
                 'Product Check');
             return;
@@ -4678,7 +4943,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             return;
         }
 
-        if ((getValue('order_type') || 'readymade') === 'readymade') {
+        if (['readymade', 'printing_only'].includes(getValue('order_type') || 'readymade')) {
             if (!String(getValue('printing_type_id') || '').trim()) {
                 showActionToast(
                     'Please select the common Printing Type. It applies to all added Readymade products.',
@@ -4708,6 +4973,14 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                 setTimeout(() => target?.focus(), 250);
                 return;
             }
+        }
+
+        if (isPrintingOnlySubmit && (parseFloat(getValue('printing_charge')) || 0) <= 0) {
+            showActionToast('Please enter the Printing Charge for this Printing Only order.', 'danger', 'Printing Charge');
+            const target = document.getElementById('printing_charge');
+            target?.scrollIntoView({behavior:'smooth', block:'center'});
+            setTimeout(() => target?.focus(), 250);
+            return;
         }
 
         syncItemsJson();
