@@ -765,6 +765,7 @@ function qs_api_require_action_permission(mysqli $conn, string $action): void
 
     $permission = match ($action) {
         'update_customer' => 'can_edit',
+        'update_sale' => 'can_edit',
         'delete' => 'can_delete',
         'send_whatsapp' => 'can_view',
         default => 'can_create',
@@ -882,6 +883,109 @@ function qs_api_save_whatsapp_result(mysqli $conn, int $quickSaleId, array $what
     $stmt->close();
 }
 
+
+function qs_api_restore_sale_stock_for_edit(
+    mysqli $conn,
+    int $quickSaleId,
+    string $saleNo,
+    int $userId
+): void {
+    $stmt = $conn->prepare("
+        SELECT product_id, product_name, qty
+        FROM quick_sale_items
+        WHERE quick_sale_id = ?
+        ORDER BY id ASC
+    ");
+    $stmt->bind_param('i', $quickSaleId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $items = [];
+    while ($row = $res->fetch_assoc()) {
+        $items[] = $row;
+    }
+    $stmt->close();
+
+    foreach ($items as $item) {
+        $productId = (int)($item['product_id'] ?? 0);
+        $qty = max(0, (float)($item['qty'] ?? 0));
+
+        if ($productId <= 0 || $qty <= 0) {
+            continue;
+        }
+
+        $stmt = $conn->prepare("
+            SELECT on_hand_stock, reserved_stock
+            FROM product_stock
+            WHERE product_id = ?
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $stmt->bind_param('i', $productId);
+        $stmt->execute();
+        $stock = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$stock) {
+            continue;
+        }
+
+        $onHandBefore = round((float)($stock['on_hand_stock'] ?? 0), 2);
+        $reservedBefore = round((float)($stock['reserved_stock'] ?? 0), 2);
+        $onHandAfter = round($onHandBefore + $qty, 2);
+
+        $stmt = $conn->prepare("
+            UPDATE product_stock
+            SET on_hand_stock = ?, updated_at = NOW()
+            WHERE product_id = ?
+        ");
+        $stmt->bind_param('di', $onHandAfter, $productId);
+        $stmt->execute();
+        $stmt->close();
+
+        $transactionType = 'quick_sale_edit_restore';
+        $referenceType = 'quick_sale_edit';
+        $description = 'Restore old quantity before editing Quick Sale ' . $saleNo;
+
+        $stmt = $conn->prepare("
+            INSERT INTO stock_transactions
+                (
+                    product_id,
+                    transaction_type,
+                    quantity,
+                    on_hand_before,
+                    on_hand_after,
+                    reserved_before,
+                    reserved_after,
+                    reference_type,
+                    reference_id,
+                    reference_no,
+                    description,
+                    created_by,
+                    created_at
+                )
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ");
+        $stmt->bind_param(
+            'isdddddsissi',
+            $productId,
+            $transactionType,
+            $qty,
+            $onHandBefore,
+            $onHandAfter,
+            $reservedBefore,
+            $reservedBefore,
+            $referenceType,
+            $quickSaleId,
+            $saleNo,
+            $description,
+            $userId
+        );
+        $stmt->execute();
+        $stmt->close();
+    }
+}
+
 function qs_api_delete_quick_sale(mysqli $conn, int $quickSaleId, int $userId): string
 {
     $stmt = $conn->prepare("
@@ -993,7 +1097,7 @@ try {
     }
 
     $action = strtolower(trim((string)($_POST['action'] ?? 'create')));
-    if (!in_array($action, ['create', 'send_whatsapp', 'update_customer', 'delete'], true)) {
+    if (!in_array($action, ['create', 'send_whatsapp', 'update_customer', 'update_sale', 'delete'], true)) {
         throw new RuntimeException('Invalid Quick Sale action.');
     }
 
@@ -1244,42 +1348,119 @@ try {
     }
 
     $userId = (int)($_SESSION['user_id'] ?? 0);
+    $createdBy = $userId > 0 ? $userId : null;
+    $isUpdateSale = $action === 'update_sale';
     $conn->begin_transaction();
 
     try {
-        $saleNo = qs_api_next_no($conn);
+        if ($isUpdateSale) {
+            $quickSaleId = (int)($_POST['quick_sale_id'] ?? 0);
+            if ($quickSaleId <= 0) {
+                throw new RuntimeException('Invalid Quick Sale for edit.');
+            }
 
-        $invoiceToken = bin2hex(random_bytes(24));
+            $stmt = $conn->prepare("
+                SELECT id, sale_no, invoice_token
+                FROM quick_sales
+                WHERE id = ?
+                LIMIT 1
+                FOR UPDATE
+            ");
+            $stmt->bind_param('i', $quickSaleId);
+            $stmt->execute();
+            $existingSale = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
 
-        $stmt = $conn->prepare("
-            INSERT INTO quick_sales
-                (
-                    sale_no,
-                    customer_name,
-                    mobile,
-                    address,
-                    invoice_token,
-                    whatsapp_status,
-                    total_amount,
-                    created_by,
-                    created_at
-                )
-            VALUES
-                (?, ?, ?, ?, ?, 'pending', 0, ?, NOW())
-        ");
-        $createdBy = $userId > 0 ? $userId : null;
-        $stmt->bind_param(
-            'sssssi',
-            $saleNo,
-            $customerName,
-            $customerMobile,
-            $customerVenue,
-            $invoiceToken,
-            $createdBy
-        );
-        $stmt->execute();
-        $quickSaleId = (int)$stmt->insert_id;
-        $stmt->close();
+            if (!$existingSale) {
+                throw new RuntimeException('Quick Sale not found.');
+            }
+
+            $saleNo = (string)$existingSale['sale_no'];
+            $invoiceToken = trim((string)($existingSale['invoice_token'] ?? ''));
+            if ($invoiceToken === '') {
+                $invoiceToken = bin2hex(random_bytes(24));
+            }
+
+            /*
+             * Restore stock from the old sale first. Then old item/payment rows
+             * are replaced by the corrected Quick Sale inside this transaction.
+             */
+            qs_api_restore_sale_stock_for_edit(
+                $conn,
+                $quickSaleId,
+                $saleNo,
+                $userId
+            );
+
+            $stmt = $conn->prepare("DELETE FROM quick_sale_items WHERE quick_sale_id = ?");
+            $stmt->bind_param('i', $quickSaleId);
+            $stmt->execute();
+            $stmt->close();
+
+            /*
+             * Cash denominations cascade from quick_sale_payments.
+             */
+            $stmt = $conn->prepare("DELETE FROM quick_sale_payments WHERE quick_sale_id = ?");
+            $stmt->bind_param('i', $quickSaleId);
+            $stmt->execute();
+            $stmt->close();
+
+            $stmt = $conn->prepare("
+                UPDATE quick_sales
+                SET
+                    customer_name = ?,
+                    mobile = ?,
+                    address = ?,
+                    invoice_token = ?,
+                    whatsapp_status = 'pending',
+                    whatsapp_log_id = NULL,
+                    whatsapp_sent_at = NULL,
+                    total_amount = 0
+                WHERE id = ?
+            ");
+            $stmt->bind_param(
+                'ssssi',
+                $customerName,
+                $customerMobile,
+                $customerVenue,
+                $invoiceToken,
+                $quickSaleId
+            );
+            $stmt->execute();
+            $stmt->close();
+        } else {
+            $saleNo = qs_api_next_no($conn);
+            $invoiceToken = bin2hex(random_bytes(24));
+
+            $stmt = $conn->prepare("
+                INSERT INTO quick_sales
+                    (
+                        sale_no,
+                        customer_name,
+                        mobile,
+                        address,
+                        invoice_token,
+                        whatsapp_status,
+                        total_amount,
+                        created_by,
+                        created_at
+                    )
+                VALUES
+                    (?, ?, ?, ?, ?, 'pending', 0, ?, NOW())
+            ");
+            $stmt->bind_param(
+                'sssssi',
+                $saleNo,
+                $customerName,
+                $customerMobile,
+                $customerVenue,
+                $invoiceToken,
+                $createdBy
+            );
+            $stmt->execute();
+            $quickSaleId = (int)$stmt->insert_id;
+            $stmt->close();
+        }
 
         $grandTotal = 0.0;
         $savedItems = [];
@@ -1419,10 +1600,10 @@ try {
              * Direct sale = negative quantity.
              * Reserved stock is unchanged.
              */
-            $transactionType = 'quick_sale';
+            $transactionType = $isUpdateSale ? 'quick_sale_edit' : 'quick_sale';
             $signedQty = -1 * $qty;
             $referenceType = 'quick_sale';
-            $description = 'Direct Quick Sale - ' . $saleNo;
+            $description = ($isUpdateSale ? 'Edited Quick Sale - ' : 'Direct Quick Sale - ') . $saleNo;
 
             $stmt = $conn->prepare("
                 INSERT INTO stock_transactions
@@ -1592,7 +1773,12 @@ try {
             // Sale is already safely committed.
         }
 
-        qs_api_response(true, 'Quick Sale, payment and stock saved successfully.', [
+        qs_api_response(
+            true,
+            $isUpdateSale
+                ? 'Quick Sale, payment and stock updated successfully.'
+                : 'Quick Sale, payment and stock saved successfully.',
+            [
             'quick_sale_id' => $quickSaleId,
             'sale_no' => $saleNo,
             'customer_name' => $customerName,

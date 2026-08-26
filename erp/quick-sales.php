@@ -20,6 +20,25 @@ function qsl_money($value): string
     return '₹' . number_format((float)$value, 2);
 }
 
+function qsl_action_svg(string $icon): string
+{
+    $common = 'class="quick-action-svg" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false"';
+
+    if ($icon === 'whatsapp') {
+        return '<svg ' . $common . ' viewBox="0 0 32 32"><path fill="currentColor" d="M16.04 3C8.85 3 3 8.73 3 15.78c0 2.26.61 4.47 1.77 6.41L3 29l7.02-1.8a13.3 13.3 0 0 0 6.02 1.43C23.23 28.63 29 22.9 29 15.85S23.23 3 16.04 3Zm0 23.45c-1.9 0-3.76-.5-5.39-1.45l-.39-.23-4.16 1.07 1.11-4.01-.26-.41a11.05 11.05 0 0 1-1.73-5.64c0-5.84 4.85-10.6 10.82-10.6 5.96 0 10.81 4.76 10.81 10.67 0 5.84-4.85 10.6-10.81 10.6Zm5.93-7.95c-.32-.16-1.9-.92-2.2-1.03-.3-.11-.52-.16-.74.16-.22.32-.85 1.03-1.04 1.24-.19.22-.38.24-.7.08-.32-.16-1.36-.49-2.59-1.55-.96-.84-1.61-1.88-1.8-2.2-.19-.32-.02-.49.14-.65.14-.14.32-.38.49-.57.16-.19.22-.32.32-.54.11-.22.05-.41-.03-.57-.08-.16-.74-1.76-1.01-2.41-.27-.65-.54-.54-.74-.55h-.63c-.22 0-.57.08-.87.41-.3.32-1.14 1.09-1.14 2.68s1.17 3.12 1.33 3.34c.16.22 2.3 3.46 5.58 4.85.78.33 1.39.53 1.86.68.78.24 1.49.21 2.05.13.63-.09 1.9-.76 2.17-1.49.27-.73.27-1.36.19-1.49-.08-.13-.3-.21-.62-.37Z"/></svg>';
+    }
+
+    $paths = [
+        'eye' => '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/>',
+        'invoice' => '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/>',
+        'edit' => '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+        'delete' => '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+    ];
+
+    $path = $paths[$icon] ?? $paths['invoice'];
+    return '<svg ' . $common . ' fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' . $path . '</svg>';
+}
+
 function qsl_table_exists(mysqli $conn, string $table): bool
 {
     try {
@@ -72,21 +91,6 @@ $q = trim((string)($_GET['q'] ?? ''));
 $fromDate = trim((string)($_GET['from_date'] ?? ''));
 $toDate = trim((string)($_GET['to_date'] ?? ''));
 $paymentMode = strtolower(trim((string)($_GET['payment_mode'] ?? '')));
-$editQuickSaleId = max(0, (int)($_GET['edit'] ?? 0));
-$editQuickSale = null;
-
-if ($editQuickSaleId > 0) {
-    try {
-        $stmt = $conn->prepare("SELECT id, sale_no, customer_name, mobile, address FROM quick_sales WHERE id = ? LIMIT 1");
-        $stmt->bind_param('i', $editQuickSaleId);
-        $stmt->execute();
-        $editQuickSale = $stmt->get_result()->fetch_assoc() ?: null;
-        $stmt->close();
-    } catch (Throwable $e) {
-        $editQuickSale = null;
-    }
-}
-
 if (!in_array($paymentMode, ['', 'cash', 'upi'], true)) {
     $paymentMode = '';
 }
@@ -872,47 +876,200 @@ function qsl_page_url(int $page): string
     margin-top: 2px !important;
 }
 
-/* Reuse the previous ERP Bootstrap toast notification style */
+/* Toast UI - same styling used by Enquiries */
 .toast-ui {
-    min-width: 300px;
-    max-width: 410px;
     border: 0;
-    border-radius: 14px;
+    border-radius: 18px;
+    box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
     overflow: hidden;
-    box-shadow: 0 16px 45px rgba(15, 23, 42, .18);
-    background: #fff;
+    min-width: 320px;
+    max-width: 420px;
 }
 
 .toast-ui.success {
-    border-left: 4px solid #16a34a;
+    background: #dcfce7;
+    color: #14532d;
 }
 
 .toast-ui.danger {
-    border-left: 4px solid #dc2626;
+    background: #fee2e2;
+    color: #7f1d1d;
 }
 
 .toast-ui.warning {
-    border-left: 4px solid #d97706;
+    background: #fef3c7;
+    color: #78350f;
 }
 
 .toast-ui .toast-title {
-    font-size: 12.5px;
-    font-weight: 800;
-    color: #111827;
+    font-size: 14px;
+    font-weight: 900;
     margin-bottom: 2px;
 }
 
 .toast-ui .toast-message {
-    font-size: 11px;
-    font-weight: 550;
-    line-height: 1.35;
-    color: #475569;
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1.45;
+}
+
+.quick-action-svg {
+    display: block !important;
+    width: 14px !important;
+    height: 14px !important;
+    flex: 0 0 14px !important;
+    pointer-events: none !important;
+}
+
+.btn-whatsapp-icon .quick-action-svg {
+    width: 16px !important;
+    height: 16px !important;
 }
 
 @media (max-width: 991.98px) {
     .quick-sales-page .table-ui {
         min-width: 1040px;
     }
+}
+
+
+/* Quick Sales action icons - match the supplied reference page */
+.quick-sales-page .quick-sale-action-group {
+    gap: 7px !important;
+}
+
+.quick-sales-page .quick-sale-action-group .btn {
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+    max-width: 36px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-shadow: none !important;
+    background: #fff !important;
+}
+
+.quick-sales-page .quick-sale-action-group .quick-action-svg {
+    width: 16px !important;
+    height: 16px !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-invoice {
+    border: 1px solid #667085 !important;
+    color: #667085 !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-invoice:hover {
+    background: #f8fafc !important;
+    border-color: #344054 !important;
+    color: #344054 !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-edit {
+    border: 1.5px solid #0d6efd !important;
+    color: #0d6efd !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-edit:hover {
+    background: #eff6ff !important;
+    border-color: #0b5ed7 !important;
+    color: #0b5ed7 !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp {
+    background: #198754 !important;
+    border: 1px solid #198754 !important;
+    color: #fff !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp:hover {
+    background: #157347 !important;
+    border-color: #157347 !important;
+    color: #fff !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-delete {
+    border: 1px solid #dc3545 !important;
+    color: #dc3545 !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-delete:hover {
+    background: #fff5f5 !important;
+    border-color: #bb2d3b !important;
+    color: #bb2d3b !important;
+}
+
+</style>
+<style>
+
+/* FINAL Quick Sales action icon override - exact reference style */
+.quick-sales-page .quick-sale-action-group {
+    gap: 7px !important;
+    white-space: nowrap !important;
+}
+
+.quick-sales-page .quick-sale-action-group .btn {
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+    max-width: 36px !important;
+    border-radius: 50% !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-shadow: none !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-invoice {
+    background: #fff !important;
+    border: 1px solid #344054 !important;
+    color: #1f2937 !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-invoice:hover {
+    background: #f8fafc !important;
+    border-color: #111827 !important;
+    color: #111827 !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp {
+    background: #198754 !important;
+    border: 1px solid #198754 !important;
+    color: #fff !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp:hover {
+    background: #157347 !important;
+    border-color: #157347 !important;
+    color: #fff !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-edit {
+    background: #fff !important;
+    border: 1.5px solid #0d6efd !important;
+    color: #0d6efd !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-delete {
+    background: #fff !important;
+    border: 1px solid #dc3545 !important;
+    color: #dc3545 !important;
+}
+
+.quick-sales-page .quick-sale-action-group .quick-action-svg {
+    width: 16px !important;
+    height: 16px !important;
+    display: block !important;
+    flex: 0 0 16px !important;
+}
+
+.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp .quick-action-svg {
+    width: 18px !important;
+    height: 18px !important;
 }
 
 </style>
@@ -1115,31 +1272,27 @@ function qsl_page_url(int $page): string
                                         <?php $waSent = strtolower((string)($row['whatsapp_status'] ?? '')) === 'sent'; ?>
                                         <div class="quick-sale-action-group">
                                             <a href="quick_sale_invoice_pdf.php?id=<?= (int)$row['id'] ?>"
-                                                target="_blank" class="btn btn-outline-primary btn-action-icon"
+                                                target="_blank" class="btn btn-action-icon qs-ref-invoice"
                                                 title="View Invoice" aria-label="View Invoice">
-                                                <i class="bi bi-file-earmark-pdf"></i>
+                                                <?= qsl_action_svg('invoice') ?>
                                             </a>
                                             <button type="button"
-                                                class="btn btn-success btn-whatsapp-icon js-qsl-wa <?= $waSent ? 'wa-sent' : '' ?>"
+                                                class="btn btn-whatsapp-icon qs-ref-whatsapp js-qsl-wa <?= $waSent ? 'wa-sent' : '' ?>"
                                                 data-id="<?= (int)$row['id'] ?>"
                                                 title="<?= $waSent ? 'Send WhatsApp Again' : 'Send WhatsApp' ?>"
                                                 aria-label="Send WhatsApp">
-                                                <i class="bi bi-whatsapp"></i>
+                                                <?= qsl_action_svg('whatsapp') ?>
                                             </button>
-                                            <button type="button" class="btn btn-outline-warning btn-action-icon js-qsl-edit"
-                                                data-id="<?= (int)$row['id'] ?>"
-                                                data-sale-no="<?= qsl_e($row['sale_no'] ?? '') ?>"
-                                                data-customer="<?= qsl_e($customerName) ?>"
-                                                data-mobile="<?= qsl_e($customerMobile) ?>"
-                                                data-venue="<?= qsl_e($customerVenue) ?>"
-                                                title="Edit Customer / Venue" aria-label="Edit">
-                                                <i class="bi bi-pencil"></i>
-                                            </button>
-                                            <button type="button" class="btn btn-outline-danger btn-delete-icon js-qsl-delete"
+                                            <a href="quick-sale.php?edit=<?= (int)$row['id'] ?>"
+                                                class="btn btn-action-icon qs-ref-edit"
+                                                title="Edit in Quick Sale" aria-label="Edit">
+                                                <?= qsl_action_svg('edit') ?>
+                                            </a>
+                                            <button type="button" class="btn btn-delete-icon qs-ref-delete js-qsl-delete"
                                                 data-id="<?= (int)$row['id'] ?>"
                                                 data-sale-no="<?= qsl_e($row['sale_no'] ?? '') ?>"
                                                 title="Delete" aria-label="Delete">
-                                                <i class="bi bi-trash3"></i>
+                                                <?= qsl_action_svg('delete') ?>
                                             </button>
                                         </div>
                                     </td>
@@ -1174,46 +1327,6 @@ function qsl_page_url(int $page): string
             </section>
         </main>
 
-        <div class="modal fade quick-sale-edit-modal" id="quickSaleEditModal" tabindex="-1" aria-hidden="true">
-            <div class="modal-dialog modal-dialog-centered">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <div>
-                            <h5 class="modal-title fw-bold mb-1">Edit Quick Sale</h5>
-                            <small class="text-muted-custom" id="editSaleNoText">Customer / venue details only</small>
-                        </div>
-                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                    </div>
-                    <form id="quickSaleEditForm">
-                        <div class="modal-body">
-                            <input type="hidden" name="quick_sale_id" id="edit_quick_sale_id">
-                            <div class="mb-3">
-                                <label class="form-label fw-bold">Customer Name *</label>
-                                <input type="text" class="form-control" name="customer_name" id="edit_customer_name" maxlength="200" required>
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label fw-bold">Mobile Number *</label>
-                                <input type="text" class="form-control" name="customer_mobile" id="edit_customer_mobile"
-                                    inputmode="numeric" maxlength="10" required>
-                            </div>
-                            <div>
-                                <label class="form-label fw-bold">Venue</label>
-                                <input type="text" class="form-control" name="customer_venue" id="edit_customer_venue"
-                                    maxlength="1000" placeholder="Optional function / customer venue">
-                            </div>
-                            <div class="alert alert-light border rounded-3 mt-3 mb-0 py-2 small text-muted-custom">
-                                Product quantities and payment values are not changed from this edit action, so stock and payment history remain safe.
-                            </div>
-                        </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-outline-secondary rounded-pill px-3" data-bs-dismiss="modal">Cancel</button>
-                            <button type="submit" class="btn btn-primary rounded-pill px-4" id="saveQuickSaleEditBtn">Save Changes</button>
-                        </div>
-                    </form>
-                </div>
-            </div>
-        </div>
-
         <div id="settingsOverlay"></div>
         <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
     </div>
@@ -1223,9 +1336,6 @@ function qsl_page_url(int $page): string
     <script>
     (function () {
         const csrfToken = <?= json_encode($csrfToken, JSON_UNESCAPED_SLASHES) ?>;
-        const editModalEl = document.getElementById('quickSaleEditModal');
-        const editModal = editModalEl && window.bootstrap ? bootstrap.Modal.getOrCreateInstance(editModalEl) : null;
-
         function escapeToastHtml(value) {
             return String(value ?? '')
                 .replaceAll('&', '&amp;')
@@ -1236,41 +1346,37 @@ function qsl_page_url(int $page): string
         }
 
         function actionToast(message, type = 'success', title = '') {
-            const old = document.getElementById('quickSalesActionToast');
-            if (old) old.remove();
+            if (!message) return;
 
+            const oldToastWrap = document.getElementById('dynamicActionToastWrap');
+            if (oldToastWrap) {
+                oldToastWrap.remove();
+            }
+
+            const toastTitle = title || (type === 'danger' ? 'Failed' : (type === 'warning' ? 'Warning' :
+                'Success'));
             const wrap = document.createElement('div');
-            wrap.id = 'quickSalesActionToast';
+            wrap.id = 'dynamicActionToastWrap';
             wrap.className = 'toast-container position-fixed top-0 end-0 p-3';
             wrap.style.zIndex = '12000';
 
-            const finalTitle = title || (
-                type === 'danger'
-                    ? 'Failed'
-                    : (type === 'warning' ? 'Warning' : 'Success')
-            );
-
             wrap.innerHTML = `
-                <div class="toast toast-ui ${type}" role="alert" aria-live="assertive"
-                    aria-atomic="true" data-bs-delay="4200">
+                <div id="dynamicActionToast" class="toast toast-ui ${type}" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="4200">
                     <div class="d-flex">
                         <div class="toast-body">
-                            <div class="toast-title">${escapeToastHtml(finalTitle)}</div>
+                            <div class="toast-title">${escapeToastHtml(toastTitle)}</div>
                             <div class="toast-message">${escapeToastHtml(message)}</div>
                         </div>
-                        <button type="button" class="btn-close me-3 m-auto"
-                            data-bs-dismiss="toast" aria-label="Close"></button>
+                        <button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
                     </div>
                 </div>
             `;
 
             document.body.appendChild(wrap);
 
-            const toastEl = wrap.querySelector('.toast');
-            if (window.bootstrap && toastEl) {
-                const instance = bootstrap.Toast.getOrCreateInstance(toastEl);
-                instance.show();
-                toastEl.addEventListener('hidden.bs.toast', () => wrap.remove(), {once: true});
+            const toastEl = document.getElementById('dynamicActionToast');
+            if (window.bootstrap && bootstrap.Toast && toastEl) {
+                bootstrap.Toast.getOrCreateInstance(toastEl).show();
             }
         }
 
@@ -1290,43 +1396,6 @@ function qsl_page_url(int $page): string
             return data;
         }
 
-        function openEdit(button) {
-            document.getElementById('edit_quick_sale_id').value = button.dataset.id || '';
-            document.getElementById('edit_customer_name').value = button.dataset.customer || '';
-            document.getElementById('edit_customer_mobile').value = button.dataset.mobile || '';
-            document.getElementById('edit_customer_venue').value = button.dataset.venue || '';
-            document.getElementById('editSaleNoText').textContent = button.dataset.saleNo || 'Quick Sale';
-            editModal?.show();
-        }
-
-        document.querySelectorAll('.js-qsl-edit').forEach(button => {
-            button.addEventListener('click', () => openEdit(button));
-        });
-
-        document.getElementById('quickSaleEditForm')?.addEventListener('submit', async function (event) {
-            event.preventDefault();
-            const saveBtn = document.getElementById('saveQuickSaleEditBtn');
-            saveBtn.disabled = true;
-            try {
-                const data = await runAction('update_customer', {
-                    quick_sale_id: document.getElementById('edit_quick_sale_id').value,
-                    customer_name: document.getElementById('edit_customer_name').value.trim(),
-                    customer_mobile: document.getElementById('edit_customer_mobile').value.trim(),
-                    customer_venue: document.getElementById('edit_customer_venue').value.trim()
-                });
-                editModal?.hide();
-                actionToast(data.message || 'Quick Sale updated.', 'success', 'Quick Sale Updated');
-                setTimeout(() => {
-                    const url = new URL(window.location.href);
-                    url.searchParams.delete('edit');
-                    window.location.href = url.toString();
-                }, 500);
-            } catch (error) {
-                actionToast(error?.message || 'Unable to update Quick Sale.', 'danger', 'Update Failed');
-            } finally {
-                saveBtn.disabled = false;
-            }
-        });
 
         document.querySelectorAll('.js-qsl-wa').forEach(button => {
             button.addEventListener('click', async function () {
@@ -1362,19 +1431,6 @@ function qsl_page_url(int $page): string
             });
         });
 
-        <?php if ($editQuickSale): ?>
-        const editFromQuery = document.querySelector('.js-qsl-edit[data-id="<?= (int)$editQuickSale['id'] ?>"]');
-        if (editFromQuery) {
-            openEdit(editFromQuery);
-        } else if (editModal) {
-            document.getElementById('edit_quick_sale_id').value = <?= json_encode((string)$editQuickSale['id']) ?>;
-            document.getElementById('edit_customer_name').value = <?= json_encode((string)$editQuickSale['customer_name']) ?>;
-            document.getElementById('edit_customer_mobile').value = <?= json_encode((string)$editQuickSale['mobile']) ?>;
-            document.getElementById('edit_customer_venue').value = <?= json_encode((string)$editQuickSale['address']) ?>;
-            document.getElementById('editSaleNoText').textContent = <?= json_encode((string)$editQuickSale['sale_no']) ?>;
-            editModal.show();
-        }
-        <?php endif; ?>
     })();
     </script>
 
