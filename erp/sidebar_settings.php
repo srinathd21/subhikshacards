@@ -1001,121 +1001,500 @@ foreach ($allMenus as $menu) {
     }
     </style>
 
-<style id="compact-ui-overrides">
-/* Compact 100% zoom UI override - visual sizing only */
-.module-page .page-head{
-    padding:16px 18px !important;
-    margin-bottom:12px !important;
-    border-radius:16px !important;
-}
-.module-page .page-head h1{
-    font-size:24px !important;
-    line-height:1.2 !important;
-    font-weight:800 !important;
-    letter-spacing:-.2px !important;
-}
-.module-page .page-head p,
-.module-page .text-muted-custom{
-    font-size:12px !important;
-    font-weight:500 !important;
-}
-.module-page .module-card{
-    padding:16px !important;
-    border-radius:16px !important;
-    margin-bottom:12px !important;
-}
-.module-page .module-title,
-.module-page .section-title{
-    font-size:15px !important;
-    line-height:1.25 !important;
-    font-weight:750 !important;
-    margin-bottom:10px !important;
-}
-.module-page .stat-card{
-    min-height:auto !important;
-    padding:12px 14px !important;
-    border-radius:14px !important;
-}
-.module-page .stat-card small,
-.module-page .stat-card span{
-    font-size:10px !important;
-    font-weight:700 !important;
-}
-.module-page .stat-card strong{
-    font-size:18px !important;
-    line-height:1.15 !important;
-    font-weight:800 !important;
-}
-.module-page .stat-icon{
-    width:38px !important;
-    height:38px !important;
-    border-radius:12px !important;
-}
-.module-page .stat-icon svg{width:19px !important;height:19px !important;}
-.module-page .form-label{
-    font-size:12px !important;
-    font-weight:700 !important;
-    margin-bottom:5px !important;
-}
-.module-page .form-control,
-.module-page .form-select,
-.module-page .input-group-text{
-    min-height:38px !important;
-    font-size:13px !important;
-    border-radius:10px !important;
-    padding:7px 10px !important;
-}
-.module-page textarea.form-control{min-height:72px !important;}
-.module-page .btn{
-    font-size:12px !important;
-    font-weight:700 !important;
-    line-height:1.2 !important;
-    padding:7px 12px !important;
-}
-.module-page .btn-sm{
-    font-size:11px !important;
-    padding:5px 9px !important;
-}
-.module-page .table-ui th,
-.module-page .table-ui td,
-.module-page .table th,
-.module-page .table td{
-    font-size:12px !important;
-    padding:9px 10px !important;
-}
-.module-page .table-ui th,
-.module-page .table th{
-    font-size:10.5px !important;
-    font-weight:750 !important;
-}
-.module-page .status-pill,
-.module-page .stock-pill,
-.module-page .filter-chip,
-.module-page .sidebar-filter-pill,
-.module-page .badge-soft,
-.module-page .sidebar-url-badge{
-    font-size:10px !important;
-    font-weight:700 !important;
-    padding:4px 8px !important;
-}
-.module-page .modal-title{font-size:16px !important;font-weight:800 !important;}
-.module-page .modal-header{padding:14px 16px !important;}
-.module-page .modal-body{padding:16px !important;}
-.module-page .modal-footer{padding:12px 16px !important;}
-.module-page .modal-content{border-radius:16px !important;}
-.module-page .toast-title{font-size:13px !important;font-weight:800 !important;}
-.module-page .toast-message{font-size:12px !important;font-weight:600 !important;}
-@media(max-width:767.98px){
-    .module-page .page-head{padding:14px !important;}
-    .module-page .page-head h1{font-size:21px !important;}
-    .module-page .module-card{padding:13px !important;}
-}
+    <style id="compact-ui-overrides">
+    /* Compact 100% zoom UI override - visual sizing only */
+    .module-page .page-head {
+        padding: 16px 18px !important;
+        margin-bottom: 12px !important;
+        border-radius: 16px !important;
+    }
 
-.sidebar-control-page .sidebar-menu-icon{width:34px !important;height:34px !important;border-radius:10px !important;}
-.sidebar-control-page .sidebar-action-btn{width:30px !important;height:30px !important;padding:0 !important;}
-.sidebar-control-page .sidebar-mobile-card{padding:12px !important;border-radius:14px !important;}
-.sidebar-control-page .sidebar-table th,.sidebar-control-page .sidebar-table td{font-size:11.5px !important;padding:8px 9px !important;}
-</style><!-- compact-ui-overrides -->
+    .module-page .page-head h1 {
+        font-size: 24px !important;
+        line-height: 1.2 !important;
+        font-weight: 800 !important;
+        letter-spacing: -.2px !important;
+    }
+
+    .module-page .page-head p,
+    .module-page .text-muted-custom {
+        font-size: 12px !important;
+        font-weight: 500 !important;
+    }
+
+    .module-page .module-card {
+        padding: 16px !important;
+        border-radius: 16px !important;
+        margin-bottom: 12px !important;
+    }
+
+    .module-page .module-title,
+    .module-page .section-title {
+        font-size: 15px !important;
+        line-height: 1.25 !important;
+        font-weight: 750 !important;
+        margin-bottom: 10px !important;
+    }
+
+    .module-page .stat-card {
+        min-height: auto !important;
+        padding: 12px 14px !important;
+        border-radius: 14px !important;
+    }
+
+    .module-page .stat-card small,
+    .module-page .stat-card span {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+    }
+
+    .module-page .stat-card strong {
+        font-size: 18px !important;
+        line-height: 1.15 !important;
+        font-weight: 800 !important;
+    }
+
+    .module-page .stat-icon {
+        width: 38px !important;
+        height: 38px !important;
+        border-radius: 12px !important;
+    }
+
+    .module-page .stat-icon svg {
+        width: 19px !important;
+        height: 19px !important;
+    }
+
+    .module-page .form-label {
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        margin-bottom: 5px !important;
+    }
+
+    .module-page .form-control,
+    .module-page .form-select,
+    .module-page .input-group-text {
+        min-height: 38px !important;
+        font-size: 13px !important;
+        border-radius: 10px !important;
+        padding: 7px 10px !important;
+    }
+
+    .module-page textarea.form-control {
+        min-height: 72px !important;
+    }
+
+    .module-page .btn {
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+        padding: 7px 12px !important;
+    }
+
+    .module-page .btn-sm {
+        font-size: 11px !important;
+        padding: 5px 9px !important;
+    }
+
+    .module-page .table-ui th,
+    .module-page .table-ui td,
+    .module-page .table th,
+    .module-page .table td {
+        font-size: 12px !important;
+        padding: 9px 10px !important;
+    }
+
+    .module-page .table-ui th,
+    .module-page .table th {
+        font-size: 10.5px !important;
+        font-weight: 750 !important;
+    }
+
+    .module-page .status-pill,
+    .module-page .stock-pill,
+    .module-page .filter-chip,
+    .module-page .sidebar-filter-pill,
+    .module-page .badge-soft,
+    .module-page .sidebar-url-badge {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        padding: 4px 8px !important;
+    }
+
+    .module-page .modal-title {
+        font-size: 16px !important;
+        font-weight: 800 !important;
+    }
+
+    .module-page .modal-header {
+        padding: 14px 16px !important;
+    }
+
+    .module-page .modal-body {
+        padding: 16px !important;
+    }
+
+    .module-page .modal-footer {
+        padding: 12px 16px !important;
+    }
+
+    .module-page .modal-content {
+        border-radius: 16px !important;
+    }
+
+    .module-page .toast-title {
+        font-size: 13px !important;
+        font-weight: 800 !important;
+    }
+
+    .module-page .toast-message {
+        font-size: 12px !important;
+        font-weight: 600 !important;
+    }
+
+    @media(max-width:767.98px) {
+        .module-page .page-head {
+            padding: 14px !important;
+        }
+
+        .module-page .page-head h1 {
+            font-size: 21px !important;
+        }
+
+        .module-page .module-card {
+            padding: 13px !important;
+        }
+    }
+
+    .sidebar-control-page .sidebar-menu-icon {
+        width: 34px !important;
+        height: 34px !important;
+        border-radius: 10px !important;
+    }
+
+    .sidebar-control-page .sidebar-action-btn {
+        width: 30px !important;
+        height: 30px !important;
+        padding: 0 !important;
+    }
+
+    .sidebar-control-page .sidebar-mobile-card {
+        padding: 12px !important;
+        border-radius: 14px !important;
+    }
+
+    .sidebar-control-page .sidebar-table th,
+    .sidebar-control-page .sidebar-table td {
+        font-size: 11.5px !important;
+        padding: 8px 9px !important;
+    }
+    </style><!-- compact-ui-overrides -->
+
+    <style id="sidebar-settings-professional-fix">
+    /* Sidebar Control: compact professional layout and non-overlapping actions. */
+    .sidebar-control-page {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+    }
+
+    .sidebar-control-page .page-head {
+        padding: 13px 16px !important;
+        margin-bottom: 10px !important;
+        border-radius: 14px !important;
+    }
+
+    .sidebar-control-page .page-head h1 {
+        font-size: 20px !important;
+        line-height: 1.15 !important;
+        font-weight: 750 !important;
+        margin: 0 0 2px !important;
+    }
+
+    .sidebar-control-page .page-head p {
+        font-size: 10.5px !important;
+        line-height: 1.25 !important;
+    }
+
+    .sidebar-control-page .page-head .btn {
+        min-height: 29px !important;
+        padding: 5px 9px !important;
+        font-size: 10.5px !important;
+        font-weight: 650 !important;
+    }
+
+    .sidebar-control-page .row.g-3.mb-3 {
+        --bs-gutter-x: 10px;
+        --bs-gutter-y: 10px;
+        margin-bottom: 10px !important;
+    }
+
+    .sidebar-control-page .stat-card {
+        min-height: 62px !important;
+        padding: 8px 10px !important;
+        gap: 8px !important;
+        border-radius: 12px !important;
+    }
+
+    .sidebar-control-page .stat-icon {
+        width: 34px !important;
+        height: 34px !important;
+        min-width: 34px !important;
+        border-radius: 10px !important;
+    }
+
+    .sidebar-control-page .stat-icon svg {
+        width: 16px !important;
+        height: 16px !important;
+    }
+
+    .sidebar-control-page .stat-card span {
+        font-size: 9px !important;
+        line-height: 1.1 !important;
+        font-weight: 650 !important;
+    }
+
+    .sidebar-control-page .stat-card strong {
+        font-size: 16px !important;
+        line-height: 1.05 !important;
+        font-weight: 750 !important;
+    }
+
+    .sidebar-control-page .stat-card small {
+        font-size: 9px !important;
+        line-height: 1.1 !important;
+        font-weight: 550 !important;
+    }
+
+    .sidebar-control-page .module-card {
+        padding: 0 !important;
+        margin-bottom: 10px !important;
+        border-radius: 14px !important;
+        overflow: hidden;
+    }
+
+    .sidebar-control-page .module-card>.p-3,
+    .sidebar-control-page .module-card>.p-lg-4 {
+        padding: 10px 12px !important;
+    }
+
+    .sidebar-control-page .module-title {
+        font-size: 14px !important;
+        font-weight: 700 !important;
+        margin: 0 0 2px !important;
+    }
+
+    .sidebar-control-page .sidebar-filter-pill {
+        padding: 4px 8px !important;
+        min-height: 27px !important;
+        font-size: 9.5px !important;
+        line-height: 1 !important;
+        font-weight: 650 !important;
+        gap: 4px !important;
+    }
+
+    .sidebar-control-page .sidebar-filter-pill svg {
+        width: 11px !important;
+        height: 11px !important;
+    }
+
+    .sidebar-control-page .d-flex.flex-wrap.gap-2.mb-4 {
+        gap: 5px !important;
+        margin-bottom: 8px !important;
+    }
+
+    .sidebar-control-page .table-responsive {
+        padding-left: 12px !important;
+        padding-right: 12px !important;
+        padding-bottom: 10px !important;
+    }
+
+    .sidebar-control-page .sidebar-table {
+        margin-bottom: 0 !important;
+        min-width: 1040px;
+        table-layout: auto;
+    }
+
+    .sidebar-control-page .sidebar-table thead th {
+        padding: 7px 7px !important;
+        font-size: 9px !important;
+        font-weight: 700 !important;
+        line-height: 1.1 !important;
+        text-transform: uppercase;
+        letter-spacing: .025em;
+        white-space: nowrap;
+        vertical-align: middle;
+    }
+
+    .sidebar-control-page .sidebar-table tbody td {
+        padding: 6px 7px !important;
+        font-size: 10.5px !important;
+        line-height: 1.2 !important;
+        vertical-align: middle !important;
+    }
+
+    .sidebar-control-page .sidebar-table tbody tr {
+        height: 46px;
+    }
+
+    .sidebar-control-page .sidebar-table .d-flex.align-items-center.gap-3 {
+        gap: 7px !important;
+    }
+
+    .sidebar-control-page .sidebar-table .ps-4 {
+        padding-left: 14px !important;
+    }
+
+    .sidebar-control-page .sidebar-menu-icon {
+        width: 28px !important;
+        height: 28px !important;
+        min-width: 28px !important;
+        border-radius: 8px !important;
+    }
+
+    .sidebar-control-page .sidebar-menu-icon svg {
+        width: 13px !important;
+        height: 13px !important;
+    }
+
+    .sidebar-control-page .sidebar-table .fw-bold {
+        font-size: 10.5px !important;
+        font-weight: 650 !important;
+        line-height: 1.15 !important;
+    }
+
+    .sidebar-control-page .sidebar-table small {
+        font-size: 8.8px !important;
+        line-height: 1.1 !important;
+    }
+
+    .sidebar-control-page .sidebar-url-badge {
+        max-width: 155px;
+        padding: 4px 7px !important;
+        border-radius: 8px !important;
+        font-size: 9px !important;
+        font-weight: 550 !important;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .sidebar-control-page .sidebar-url-badge svg {
+        width: 10px !important;
+        height: 10px !important;
+        flex: 0 0 auto;
+    }
+
+    .sidebar-control-page .sidebar-sort-input {
+        width: 64px !important;
+        min-height: 28px !important;
+        height: 28px !important;
+        border-radius: 8px !important;
+        padding: 3px 5px !important;
+        font-size: 10px !important;
+        font-weight: 600 !important;
+    }
+
+    .sidebar-control-page .badge-soft {
+        min-height: 22px !important;
+        padding: 3px 7px !important;
+        border-radius: 999px !important;
+        font-size: 8.8px !important;
+        line-height: 1 !important;
+        font-weight: 650 !important;
+    }
+
+    .sidebar-control-page .sidebar-actions-cell {
+        width: 190px !important;
+        min-width: 190px !important;
+    }
+
+    .sidebar-control-page .sidebar-row-actions {
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 4px;
+        width: 176px;
+        max-width: 176px;
+    }
+
+    .sidebar-control-page .sidebar-row-actions form {
+        display: block !important;
+        width: 100% !important;
+        margin: 0 !important;
+    }
+
+    .sidebar-control-page .sidebar-row-actions .sidebar-action-btn {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 3px !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        height: 27px !important;
+        min-height: 27px !important;
+        margin: 0 !important;
+        padding: 3px 5px !important;
+        border-radius: 7px !important;
+        font-size: 8.8px !important;
+        font-weight: 650 !important;
+        line-height: 1 !important;
+        white-space: nowrap !important;
+    }
+
+    .sidebar-control-page .sidebar-row-actions .sidebar-action-btn svg {
+        width: 10px !important;
+        height: 10px !important;
+    }
+
+    .sidebar-control-page .modal-content {
+        border-radius: 14px !important;
+    }
+
+    .sidebar-control-page .modal-header {
+        padding: 11px 14px !important;
+    }
+
+    .sidebar-control-page .modal-body {
+        padding: 14px !important;
+    }
+
+    .sidebar-control-page .modal-footer {
+        padding: 10px 14px !important;
+    }
+
+    .sidebar-control-page .modal .form-label {
+        font-size: 10px !important;
+        font-weight: 650 !important;
+        margin-bottom: 3px !important;
+    }
+
+    .sidebar-control-page .modal .form-control,
+    .sidebar-control-page .modal .form-select {
+        min-height: 32px !important;
+        padding: 5px 8px !important;
+        border-radius: 9px !important;
+        font-size: 11px !important;
+    }
+
+    .sidebar-control-page .sidebar-mobile-card {
+        padding: 10px !important;
+        border-radius: 12px !important;
+    }
+
+    @media(max-width:767.98px) {
+        .sidebar-control-page .page-head {
+            padding: 11px 12px !important;
+        }
+
+        .sidebar-control-page .page-head h1 {
+            font-size: 18px !important;
+        }
+
+        .sidebar-control-page .stat-card {
+            min-height: 58px !important;
+        }
+    }
+    </style>
+
 </head>
 
 <body
@@ -1280,7 +1659,7 @@ foreach ($allMenus as $menu) {
                                     <th>Sort</th>
                                     <th>Sidebar</th>
                                     <th>Status</th>
-                                    <th style="width: 250px;">Action</th>
+                                    <th style="width:190px;min-width:190px;">Action</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1348,46 +1727,53 @@ foreach ($allMenus as $menu) {
                                             <?= $isActive ? 'Active' : 'Inactive' ?>
                                         </span>
                                     </td>
-                                    <td>
-                                        <button type="button" class="btn btn-sm btn-outline-primary sidebar-action-btn"
-                                            data-bs-toggle="modal" data-bs-target="#menuModal"
-                                            onclick='editMenu(<?= json_encode($menu, JSON_HEX_APOS | JSON_HEX_QUOT) ?>)'>
-                                            Edit
-                                        </button>
-
-                                        <form method="post" action="api/sidebar_settings.php"
-                                            class="d-inline js-sidebar-api-form">
-                                            <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
-                                            <input type="hidden" name="action" value="toggle_active">
-                                            <input type="hidden" name="id" value="<?= (int)$menu['id'] ?>">
-                                            <button type="submit"
-                                                class="btn btn-sm btn-outline-warning sidebar-action-btn">
-                                                <i data-lucide="power" style="width:14px;height:14px;"></i>
-                                                <?= $isActive ? 'Deactivate' : 'Activate' ?>
+                                    <td class="sidebar-actions-cell">
+                                        <div class="sidebar-row-actions">
+                                            <button type="button"
+                                                class="btn btn-sm btn-outline-primary sidebar-action-btn"
+                                                data-bs-toggle="modal" data-bs-target="#menuModal"
+                                                onclick='editMenu(<?= json_encode($menu, JSON_HEX_APOS | JSON_HEX_QUOT) ?>)'>
+                                                <i data-lucide="pencil" style="width:12px;height:12px;"></i>
+                                                <span>Edit</span>
                                             </button>
-                                        </form>
 
-                                        <form method="post" action="api/sidebar_settings.php"
-                                            class="d-inline js-sidebar-api-form">
-                                            <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
-                                            <input type="hidden" name="action" value="toggle_sidebar">
-                                            <input type="hidden" name="id" value="<?= (int)$menu['id'] ?>">
-                                            <button type="submit"
-                                                class="btn btn-sm btn-outline-secondary sidebar-action-btn mt-1">
-                                                <i data-lucide="<?= $isShown ? 'eye-off' : 'eye' ?>"
-                                                    style="width:14px;height:14px;"></i>
-                                                Sidebar <?= $isShown ? 'Hide' : 'Show' ?>
-                                            </button>
-                                        </form>
+                                            <form method="post" action="api/sidebar_settings.php"
+                                                class="d-inline js-sidebar-api-form">
+                                                <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                                                <input type="hidden" name="action" value="toggle_active">
+                                                <input type="hidden" name="id" value="<?= (int)$menu['id'] ?>">
+                                                <button type="submit"
+                                                    class="btn btn-sm btn-outline-warning sidebar-action-btn">
+                                                    <i data-lucide="power" style="width:14px;height:14px;"></i>
+                                                    <span><?= $isActive ? 'Deactivate' : 'Activate' ?></span>
+                                                </button>
+                                            </form>
 
-                                        <form method="post" action="api/sidebar_settings.php"
-                                            class="d-inline js-sidebar-api-form js-confirm-delete">
-                                            <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
-                                            <input type="hidden" name="action" value="delete_menu">
-                                            <input type="hidden" name="id" value="<?= (int)$menu['id'] ?>">
-                                            <button type="submit"
-                                                class="btn btn-sm btn-outline-danger sidebar-action-btn mt-1">Delete</button>
-                                        </form>
+                                            <form method="post" action="api/sidebar_settings.php"
+                                                class="d-inline js-sidebar-api-form">
+                                                <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                                                <input type="hidden" name="action" value="toggle_sidebar">
+                                                <input type="hidden" name="id" value="<?= (int)$menu['id'] ?>">
+                                                <button type="submit"
+                                                    class="btn btn-sm btn-outline-secondary sidebar-action-btn mt-1">
+                                                    <i data-lucide="<?= $isShown ? 'eye-off' : 'eye' ?>"
+                                                        style="width:14px;height:14px;"></i>
+                                                    <span>Sidebar <?= $isShown ? 'Hide' : 'Show' ?></span>
+                                                </button>
+                                            </form>
+
+                                            <form method="post" action="api/sidebar_settings.php"
+                                                class="d-inline js-sidebar-api-form js-confirm-delete">
+                                                <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                                                <input type="hidden" name="action" value="delete_menu">
+                                                <input type="hidden" name="id" value="<?= (int)$menu['id'] ?>">
+                                                <button type="submit"
+                                                    class="btn btn-sm btn-outline-danger sidebar-action-btn mt-1">
+                                                    <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
+                                                    <span>Delete</span>
+                                                </button>
+                                            </form>
+                                        </div>
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
