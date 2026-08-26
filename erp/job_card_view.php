@@ -1532,42 +1532,275 @@ function jcvApprovalTypeFromStepKey(string $stepKey): string
 
 function jcvFindApprovalWorkflowStepForPhoto(mysqli $conn, array $job, array $sourceStep): ?array
 {
-    if (!jcvTableExists($conn, 'workflow_steps')) return null;
+    if (!jcvTableExists($conn, 'workflow_steps') || !jcvTableExists($conn, 'job_tracking')) {
+        return null;
+    }
+
+    $jobId = (int)($job['id'] ?? 0);
+    if ($jobId <= 0) return null;
 
     $orderType = strtolower(trim((string)($job['order_type'] ?? ($sourceStep['order_type'] ?? ''))));
+    $sourceStepId = (int)($sourceStep['workflow_step_id'] ?? 0);
     $sourceSort = (int)($sourceStep['sort_order'] ?? 0);
     $preferredStepKey = $orderType === 'readymade' ? 'proofing_approval' : 'design_approval';
 
     try {
-        if ($orderType !== '') {
-            $stmt = $conn->prepare("SELECT id, step_key, step_name FROM workflow_steps WHERE order_type = ? AND step_key = ? AND is_active = 1 LIMIT 1");
-            $stmt->bind_param('ss', $orderType, $preferredStepKey);
-            $stmt->execute();
-            $row = $stmt->get_result()->fetch_assoc();
-            $stmt->close();
-            if ($row) return $row;
+        /* Use the approval row that actually exists in this Job Card. */
+        $stmt = $conn->prepare("
+            SELECT
+                jt.workflow_step_id AS id,
+                ws.step_key,
+                ws.step_name,
+                ws.sort_order
+            FROM job_tracking jt
+            INNER JOIN workflow_steps ws ON ws.id = jt.workflow_step_id
+            WHERE jt.job_card_id = ?
+              AND ws.step_key = ?
+            ORDER BY jt.id ASC
+            LIMIT 1
+        ");
+        $stmt->bind_param('is', $jobId, $preferredStepKey);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($row) return $row;
+
+        $stmt = $conn->prepare("
+            SELECT
+                jt.workflow_step_id AS id,
+                ws.step_key,
+                ws.step_name,
+                ws.sort_order
+            FROM job_tracking jt
+            INNER JOIN workflow_steps ws ON ws.id = jt.workflow_step_id
+            WHERE jt.job_card_id = ?
+              AND jt.workflow_step_id <> ?
+              AND (
+                    COALESCE(ws.is_approval_step, 0) = 1
+                    OR ws.step_key IN ('proofing_approval','design_approval')
+                    OR LOWER(COALESCE(ws.step_name, '')) LIKE '%approval%'
+                  )
+              AND (? <= 0 OR ws.sort_order >= ?)
+            ORDER BY ws.sort_order ASC, jt.id ASC
+            LIMIT 1
+        ");
+        $stmt->bind_param('iiii', $jobId, $sourceStepId, $sourceSort, $sourceSort);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $row ?: null;
+    } catch (Throwable $e) {
+        error_log('jcvFindApprovalWorkflowStepForPhoto: ' . $e->getMessage());
+        return null;
+    }
+}
+
+
+/**
+ * Repair / reconcile approved customer proof/design responses with the
+ * dedicated Proofing Approval / Design Approval workflow stage.
+ *
+ * This also repairs older records where the public photo approval was saved
+ * as Approved but a later sync error left the approval stage Pending.
+ */
+function jcvReconcileApprovedPhotoApprovals(mysqli $conn, array $job): void
+{
+    $jobId = (int)($job['id'] ?? 0);
+
+    if (
+        $jobId <= 0 ||
+        !jcvTableExists($conn, 'job_tracking_photo_approvals') ||
+        !jcvTableExists($conn, 'job_tracking') ||
+        !jcvTableExists($conn, 'workflow_steps') ||
+        !jcvTableExists($conn, 'customer_approvals')
+    ) {
+        return;
+    }
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT
+                pa.job_card_id,
+                pa.workflow_step_id,
+                pa.customer_name,
+                pa.mobile,
+                pa.customer_remarks,
+                pa.responded_at,
+                ws.step_key,
+                ws.step_name,
+                ws.sort_order,
+                ws.order_type
+            FROM job_tracking_photo_approvals pa
+            LEFT JOIN workflow_steps ws
+                ON ws.id = pa.workflow_step_id
+            WHERE pa.job_card_id = ?
+              AND LOWER(COALESCE(pa.status, '')) = 'approved'
+            ORDER BY pa.id ASC
+        ");
+        $stmt->bind_param('i', $jobId);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        $approvedRows = [];
+        while ($row = $res->fetch_assoc()) {
+            $approvedRows[] = $row;
+        }
+        $stmt->close();
+
+        if (!$approvedRows) {
+            return;
         }
 
-        if ($orderType !== '') {
+        $changed = false;
+        $conn->begin_transaction();
+
+        foreach ($approvedRows as $photoApproval) {
+            $sourceStep = [
+                'workflow_step_id' => (int)($photoApproval['workflow_step_id'] ?? 0),
+                'step_key' => (string)($photoApproval['step_key'] ?? ''),
+                'step_name' => (string)($photoApproval['step_name'] ?? ''),
+                'sort_order' => (int)($photoApproval['sort_order'] ?? 0),
+                'order_type' => (string)($photoApproval['order_type'] ?? ($job['order_type'] ?? ''))
+            ];
+
+            $target = jcvFindApprovalWorkflowStepForPhoto($conn, $job, $sourceStep);
+            if (!$target) {
+                continue;
+            }
+
+            $approvalWorkflowStepId = (int)($target['id'] ?? 0);
+            if ($approvalWorkflowStepId <= 0) {
+                continue;
+            }
+
+            $approvalType = jcvApprovalTypeFromStepKey((string)($target['step_key'] ?? ''));
+            $customerName = trim((string)($photoApproval['customer_name'] ?? ''));
+            if ($customerName === '') {
+                $customerName = trim((string)($job['customer_name'] ?? ''));
+            }
+
+            $mobile = trim((string)($photoApproval['mobile'] ?? ''));
+            if ($mobile === '') {
+                $mobile = trim((string)($job['mobile'] ?? ''));
+            }
+
+            $customerRemarks = trim((string)($photoApproval['customer_remarks'] ?? ''));
+
             $stmt = $conn->prepare("
-                SELECT id, step_key, step_name
-                FROM workflow_steps
-                WHERE order_type = ?
-                  AND is_active = 1
-                  AND (is_approval_step = 1 OR step_key IN ('proofing_approval','design_approval'))
-                  AND sort_order >= ?
-                ORDER BY sort_order ASC, id ASC
+                SELECT id, status, approved_by_customer, approved_by_call
+                FROM customer_approvals
+                WHERE job_card_id = ?
+                  AND workflow_step_id = ?
+                  AND approval_type = ?
+                ORDER BY id DESC
                 LIMIT 1
             ");
-            $stmt->bind_param('si', $orderType, $sourceSort);
+            $stmt->bind_param('iis', $jobId, $approvalWorkflowStepId, $approvalType);
             $stmt->execute();
-            $row = $stmt->get_result()->fetch_assoc();
+            $existingApproval = $stmt->get_result()->fetch_assoc();
             $stmt->close();
-            if ($row) return $row;
-        }
-    } catch (Throwable $e) {}
 
-    return null;
+            if ($existingApproval) {
+                $approvalId = (int)$existingApproval['id'];
+                $stmt = $conn->prepare("
+                    UPDATE customer_approvals
+                    SET status = 'approved',
+                        customer_name = ?,
+                        mobile = ?,
+                        approved_by_customer = 1,
+                        customer_remarks = CASE
+                            WHEN ? <> '' THEN ?
+                            ELSE customer_remarks
+                        END,
+                        approved_at = COALESCE(approved_at, NOW()),
+                        rejected_at = NULL,
+                        updated_at = NOW()
+                    WHERE id = ?
+                ");
+                $stmt->bind_param('ssssi', $customerName, $mobile, $customerRemarks, $customerRemarks, $approvalId);
+                $stmt->execute();
+                if ($stmt->affected_rows > 0) {
+                    $changed = true;
+                }
+                $stmt->close();
+            } else {
+                $approvalToken = jcvRandomToken();
+                $stmt = $conn->prepare("
+                    INSERT INTO customer_approvals
+                    (
+                        job_card_id,
+                        workflow_step_id,
+                        approval_type,
+                        approval_token,
+                        customer_name,
+                        mobile,
+                        status,
+                        approved_by_customer,
+                        approved_by_call,
+                        customer_remarks,
+                        approved_at,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES
+                    (?, ?, ?, ?, ?, ?, 'approved', 1, 0, ?, NOW(), NOW(), NOW())
+                ");
+                $stmt->bind_param(
+                    'iisssss',
+                    $jobId,
+                    $approvalWorkflowStepId,
+                    $approvalType,
+                    $approvalToken,
+                    $customerName,
+                    $mobile,
+                    $customerRemarks
+                );
+                $stmt->execute();
+                $stmt->close();
+                $changed = true;
+            }
+
+            $trackingRemark = $customerRemarks !== ''
+                ? $customerRemarks
+                : 'Customer approved uploaded design/proofing photos. Approval stage completed automatically.';
+
+            $stmt = $conn->prepare("
+                UPDATE job_tracking
+                SET status = 'completed',
+                    remarks = CASE
+                        WHEN TRIM(COALESCE(remarks, '')) = '' THEN ?
+                        ELSE remarks
+                    END,
+                    actual_start_at = COALESCE(actual_start_at, NOW()),
+                    actual_completed_at = COALESCE(actual_completed_at, NOW()),
+                    updated_at = NOW()
+                WHERE job_card_id = ?
+                  AND workflow_step_id = ?
+                  AND status NOT IN ('completed','skipped','cancelled')
+                LIMIT 1
+            ");
+            $stmt->bind_param('sii', $trackingRemark, $jobId, $approvalWorkflowStepId);
+            $stmt->execute();
+            if ($stmt->affected_rows > 0) {
+                $changed = true;
+            }
+            $stmt->close();
+        }
+
+        if ($changed) {
+            jcvRefreshJobCardProgressAfterPhotoCancel($conn, $jobId, 0);
+        }
+
+        $conn->commit();
+    } catch (Throwable $e) {
+        try {
+            $conn->rollback();
+        } catch (Throwable $rollbackError) {
+            // Ignore rollback failure.
+        }
+        error_log('jcvReconcileApprovedPhotoApprovals: ' . $e->getMessage());
+    }
 }
 
 function jcvRefreshJobCardProgressAfterPhotoCancel(mysqli $conn, int $jobId, int $userId = 0): void
@@ -1853,7 +2086,15 @@ $isSpecificPrintingRole = in_array($roleKey, $printingRoleKeys, true);
 $isGeneralPrintingRole = $roleKey === 'printing';
 
 $canUpdateJob = false;
-$canManualCustomerApproval = in_array($roleKey, ['admin', 'sales'], true);
+$manualApprovalRoleKeys = [
+    'admin',
+    'sales',
+    'designing_proofing',
+    'design_proofing',
+    'designing',
+    'proofing'
+];
+$canManualCustomerApproval = in_array($roleKey, $manualApprovalRoleKeys, true);
 
 try {
     $canUpdateJob = is_admin_user() || can_update($conn, 'job_cards.php');
@@ -2054,6 +2295,15 @@ if ($jobId <= 0) {
         $messageType = 'danger';
         $job = null;
     }
+}
+
+/*
+ * Approved customer photo responses should never leave the dedicated
+ * Proofing/Design Approval stage pending. Reconcile on normal page load as a
+ * safety net for records created before this fix.
+ */
+if ($job && $_SERVER['REQUEST_METHOD'] !== 'POST') {
+    jcvReconcileApprovedPhotoApprovals($conn, $job);
 }
 
 if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'send_photo_approval_api') {
@@ -2268,7 +2518,7 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                             $approvalRemarks = trim((string)($_POST['approval_remarks'] ?? ''));
 
                             if (!$canManualCustomerApproval) {
-                                throw new RuntimeException('Customer approval is required before completing this stage. Admin or Sales can manually confirm if the customer approved by call.');
+                                throw new RuntimeException('Customer approval is required before completing this stage. If online approval has not happened, an authorised Admin / Sales / Designing user can confirm direct approval using the checkbox.');
                             }
 
                             if ($manualConfirm !== 1) {
@@ -4069,12 +4319,12 @@ if ($message !== '' && $toastTitle === 'Info') {
                                         <div class="small mt-1">
                                             <?php if ($approvalDone): ?>
                                             <?php if ((int)($step['approved_by_customer'] ?? 0) === 1): ?>
-                                            Approved by customer link.
+                                            Approved by customer link. This approval stage is completed automatically; no manual status update is required.
                                             <?php elseif ((int)($step['approved_by_call'] ?? 0) === 1): ?>
                                             Manually approved by
                                             call<?= !empty($step['call_confirmed_by_name']) ? ' by ' . e($step['call_confirmed_by_name']) : '' ?>.
                                             <?php endif; ?>
-                                            <?= !empty($step['approved_at']) ? ' Manual/customer approved time: ' . e(jcvDateTime($step['approved_at'])) : '' ?>
+                                            <?= !empty($step['approved_at']) ? ' Approval time: ' . e(jcvDateTime($step['approved_at'])) : '' ?>
                                             <?php elseif ($approvalRejected): ?>
                                             Customer denied / requested correction. This approval stage is locked and
                                             the next stage will not open until approval is received.
@@ -4082,8 +4332,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                                             <br><strong>Customer Remark:</strong> <?= e($step['customer_remarks']) ?>
                                             <?php endif; ?>
                                             <?php else: ?>
-                                            This approval stage cannot be completed until the customer approves it, or
-                                            Admin/Sales confirms approval by call.
+                                            Waiting for customer approval. If the customer does not approve through the link but confirms directly,
+                                            use the manual approval checkbox below to complete this stage.
                                             <?php endif; ?>
                                         </div>
 
@@ -4382,7 +4632,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                                 value="1" id="manualApproval<?= (int)$step['id'] ?>">
                                                             <label class="form-check-label fw-bold"
                                                                 for="manualApproval<?= (int)$step['id'] ?>">
-                                                                Customer approved by call / direct confirmation
+                                                                Customer has NOT approved online, but confirmed by call / direct confirmation
                                                                 <span class="required-star">*</span>
                                                             </label>
                                                         </div>
@@ -4396,8 +4646,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                     </div>
                                                     <?php else: ?>
                                                     <div class="approval-box">
-                                                        Customer approval is pending. Admin or Sales must confirm
-                                                        customer approval before this stage can be completed.
+                                                        Customer approval is pending. An authorised Admin / Sales / Designing user
+                                                        must receive direct customer confirmation before completing this stage.
                                                     </div>
                                                     <?php endif; ?>
                                                 </div>

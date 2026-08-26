@@ -140,7 +140,7 @@ function cpa_refresh_job_card_progress(mysqli $conn, int $jobId): void
     }
 }
 
-function cpa_sync_customer_approval_from_photo(mysqli $conn, string $token, string $photoStatus, string $remarks): void
+function cpa_sync_customer_approval_from_photo(mysqli $conn, string $token, string $photoStatus, string $remarks, bool $manageTransaction = true): void
 {
     if (!cpa_table_exists($conn, 'customer_approvals')) {
         throw new RuntimeException('customer_approvals table is missing.');
@@ -164,23 +164,36 @@ function cpa_sync_customer_approval_from_photo(mysqli $conn, string $token, stri
     $preferredStepKey = $orderType === 'readymade' ? 'proofing_approval' : 'design_approval';
     $target = null;
 
-    $stmt = $conn->prepare("\n        SELECT id, step_key\n        FROM workflow_steps\n        WHERE order_type = ?\n          AND step_key = ?\n          AND is_active = 1\n        LIMIT 1\n    ");
-    $stmt->bind_param('ss', $orderType, $preferredStepKey);
+    /*
+     * Resolve from the actual Job Card tracking rows first. This prevents an
+     * approved photo from completing only the source Proofing/Design stage when
+     * the workflow master row is inactive or has changed after Job Card creation.
+     */
+    $stmt = $conn->prepare("\n        SELECT\n            jt.workflow_step_id AS id,\n            ws.step_key,\n            ws.step_name,\n            ws.sort_order\n        FROM job_tracking jt\n        INNER JOIN workflow_steps ws ON ws.id = jt.workflow_step_id\n        WHERE jt.job_card_id = ?\n          AND ws.step_key = ?\n        ORDER BY jt.id ASC\n        LIMIT 1\n    ");
+    $stmt->bind_param('is', $jobId, $preferredStepKey);
     $stmt->execute();
     $target = $stmt->get_result()->fetch_assoc();
     $stmt->close();
 
     if (!$target) {
-        $stmt = $conn->prepare("\n            SELECT id, step_key\n            FROM workflow_steps\n            WHERE order_type = ?\n              AND is_active = 1\n              AND (is_approval_step = 1 OR step_key IN ('proofing_approval','design_approval'))\n              AND sort_order >= ?\n            ORDER BY sort_order ASC, id ASC\n            LIMIT 1\n        ");
-        $stmt->bind_param('si', $orderType, $sourceSort);
+        $stmt = $conn->prepare("\n            SELECT\n                jt.workflow_step_id AS id,\n                ws.step_key,\n                ws.step_name,\n                ws.sort_order\n            FROM job_tracking jt\n            INNER JOIN workflow_steps ws ON ws.id = jt.workflow_step_id\n            WHERE jt.job_card_id = ?\n              AND jt.workflow_step_id <> ?\n              AND (\n                    COALESCE(ws.is_approval_step, 0) = 1\n                    OR ws.step_key IN ('proofing_approval','design_approval')\n                    OR LOWER(COALESCE(ws.step_name, '')) LIKE '%approval%'\n                  )\n              AND (? <= 0 OR ws.sort_order >= ?)\n            ORDER BY ws.sort_order ASC, jt.id ASC\n            LIMIT 1\n        ");
+        $stmt->bind_param('iiii', $jobId, $sourceStepId, $sourceSort, $sourceSort);
         $stmt->execute();
         $target = $stmt->get_result()->fetch_assoc();
         $stmt->close();
     }
 
-    $approvalWorkflowStepId = $target ? (int)$target['id'] : $sourceStepId;
-    $approvalStepKey = $target ? (string)$target['step_key'] : (string)($photoApproval['source_step_key'] ?? '');
+    if (!$target) {
+        throw new RuntimeException('Proofing Approval / Design Approval tracking stage was not found for this Job Card.');
+    }
+
+    $approvalWorkflowStepId = (int)($target['id'] ?? 0);
+    $approvalStepKey = (string)($target['step_key'] ?? '');
     $approvalType = cpa_approval_type_for_step_key($approvalStepKey);
+
+    if ($approvalWorkflowStepId <= 0) {
+        throw new RuntimeException('Invalid Proofing / Design Approval workflow stage.');
+    }
 
     $customerName = (string)($photoApproval['customer_name'] ?: ($photoApproval['jc_customer_name'] ?? ''));
     $mobile = (string)($photoApproval['mobile'] ?: ($photoApproval['jc_mobile'] ?? ''));
@@ -190,7 +203,9 @@ function cpa_sync_customer_approval_from_photo(mysqli $conn, string $token, stri
     $rejectedAtSql = $status === 'rejected' ? 'NOW()' : 'NULL';
     $approvedAtSql = $status === 'approved' ? 'NOW()' : 'NULL';
 
-    $conn->begin_transaction();
+    if ($manageTransaction) {
+        $conn->begin_transaction();
+    }
 
     try {
         $stmt = $conn->prepare("\n            SELECT id\n            FROM customer_approvals\n            WHERE job_card_id = ?\n              AND workflow_step_id = ?\n              AND approval_type = ?\n            ORDER BY id DESC\n            LIMIT 1\n        ");
@@ -218,7 +233,37 @@ function cpa_sync_customer_approval_from_photo(mysqli $conn, string $token, stri
                 $stmt = $conn->prepare("\n                    UPDATE job_tracking\n                    SET status = 'completed',\n                        remarks = ?,\n                        actual_start_at = COALESCE(actual_start_at, NOW()),\n                        actual_completed_at = NOW(),\n                        updated_at = NOW()\n                    WHERE job_card_id = ?\n                      AND workflow_step_id = ?\n                      AND status NOT IN ('completed','skipped','cancelled')\n                    LIMIT 1\n                ");
                 $stmt->bind_param('sii', $trackingRemark, $jobId, $approvalWorkflowStepId);
                 $stmt->execute();
+                $trackingAffected = $stmt->affected_rows;
                 $stmt->close();
+
+                /*
+                 * If no row was changed, confirm that the approval workflow row
+                 * actually exists and is already complete. This prevents the photo
+                 * response from being saved as Approved while the approval stage is
+                 * silently left Pending.
+                 */
+                if ($trackingAffected === 0) {
+                    $stmt = $conn->prepare("
+                        SELECT status
+                        FROM job_tracking
+                        WHERE job_card_id = ?
+                          AND workflow_step_id = ?
+                        LIMIT 1
+                    ");
+                    $stmt->bind_param('ii', $jobId, $approvalWorkflowStepId);
+                    $stmt->execute();
+                    $trackingRow = $stmt->get_result()->fetch_assoc();
+                    $stmt->close();
+
+                    if (!$trackingRow) {
+                        throw new RuntimeException('Proofing / Design Approval tracking stage is missing for this Job Card.');
+                    }
+
+                    $existingTrackingStatus = strtolower(trim((string)($trackingRow['status'] ?? '')));
+                    if (!in_array($existingTrackingStatus, ['completed', 'skipped'], true)) {
+                        throw new RuntimeException('Unable to automatically complete the Proofing / Design Approval stage.');
+                    }
+                }
             } else {
                 $trackingRemark = trim($remarks) !== '' ? $remarks : 'Customer rejected uploaded design/proofing photos.';
                 $stmt = $conn->prepare("\n                    UPDATE job_tracking\n                    SET status = CASE WHEN status = 'completed' THEN status ELSE 'pending' END,\n                        remarks = ?,\n                        actual_completed_at = CASE WHEN status = 'completed' THEN actual_completed_at ELSE NULL END,\n                        updated_at = NOW()\n                    WHERE job_card_id = ?\n                      AND workflow_step_id = ?\n                    LIMIT 1\n                ");
@@ -229,9 +274,18 @@ function cpa_sync_customer_approval_from_photo(mysqli $conn, string $token, stri
         }
 
         cpa_refresh_job_card_progress($conn, $jobId);
-        $conn->commit();
+
+        if ($manageTransaction) {
+            $conn->commit();
+        }
     } catch (Throwable $e) {
-        $conn->rollback();
+        if ($manageTransaction) {
+            try {
+                $conn->rollback();
+            } catch (Throwable $rollbackError) {
+                // Ignore rollback failure; original exception is more useful.
+            }
+        }
         throw $e;
     }
 }
@@ -260,23 +314,38 @@ if ($token === '') {
                 $ip = $_SERVER['REMOTE_ADDR'] ?? '';
                 $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
 
+                /*
+                 * Keep the customer photo response + customer_approvals +
+                 * approval-stage tracking update atomic. If any part fails, none
+                 * of the records are left in a half-synchronised state.
+                 */
+                $conn->begin_transaction();
+
                 $stmt = $conn->prepare("\n                    UPDATE job_tracking_photo_approvals\n                    SET status = ?,\n                        customer_remarks = ?,\n                        responded_at = NOW(),\n                        ip_address = ?,\n                        user_agent = ?,\n                        updated_at = NOW()\n                    WHERE approval_token = ?\n                      AND status = 'pending'\n                    LIMIT 1\n                ");
                 $stmt->bind_param('sssss', $status, $remarks, $ip, $ua, $token);
                 $stmt->execute();
                 $affected = $stmt->affected_rows;
                 $stmt->close();
 
-                if ($affected > 0) {
-                    cpa_sync_customer_approval_from_photo($conn, $token, $status, $remarks);
-                    $message = $status === 'approved'
-                        ? 'Thank you. Photos approved successfully. The related Proofing Approval / Design Approval is now marked as customer approved.'
-                        : 'Your rejection has been submitted. The related Proofing Approval / Design Approval is now marked as rejected.';
-                    $messageType = $status === 'approved' ? 'success' : 'danger';
-                } else {
+                if ($affected <= 0) {
+                    $conn->rollback();
                     $message = 'This approval link is already responded or not available.';
                     $messageType = 'warning';
+                } else {
+                    cpa_sync_customer_approval_from_photo($conn, $token, $status, $remarks, false);
+                    $conn->commit();
+
+                    $message = $status === 'approved'
+                        ? 'Thank you. Photos approved successfully. The Proofing Approval / Design Approval stage has been completed automatically.'
+                        : 'Your rejection has been submitted. The approval stage remains open for staff action / corrected proof.';
+                    $messageType = $status === 'approved' ? 'success' : 'danger';
                 }
             } catch (Throwable $e) {
+                try {
+                    $conn->rollback();
+                } catch (Throwable $rollbackError) {
+                    // Ignore rollback failure.
+                }
                 $message = 'Unable to save response: ' . $e->getMessage();
                 $messageType = 'danger';
             }

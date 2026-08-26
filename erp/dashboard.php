@@ -221,6 +221,163 @@ $displayName = trim((string)($_SESSION['name'] ?? $_SESSION['username'] ?? 'User
 $today = date('Y-m-d');
 
 // -----------------------------------------------------------------------------
+// Customer Approved - Continue Job Card reminder
+//
+// Purpose:
+// - Customer has approved the Proofing / Design Approval.
+// - Approval workflow stage is already completed automatically.
+// - The NEXT workflow stage is still Pending.
+// - Admin + Designing / Proofing team get a popup so they continue the Job Card.
+// - As soon as the next stage becomes In Progress / Completed, this reminder
+//   disappears automatically because it no longer matches the query.
+// -----------------------------------------------------------------------------
+$customerApprovalReminderRows = [];
+$customerApprovalReminderTotal = 0;
+$showCustomerApprovalReminder = false;
+$customerApprovalReminderCanView = dash_can_page($conn, 'can_view', 'job_cards.php');
+$customerApprovalQueueCanView = dash_can_page($conn, 'can_view', 'customer_approvals.php');
+
+if (
+    $customerApprovalReminderCanView &&
+    in_array($roleGroup, ['admin', 'design'], true) &&
+    dash_table_exists($conn, 'job_cards') &&
+    dash_table_exists($conn, 'job_tracking') &&
+    dash_table_exists($conn, 'workflow_steps') &&
+    dash_table_exists($conn, 'customer_approvals')
+) {
+    try {
+        $approvalReminderSql = "
+            SELECT
+                ca.id AS approval_id,
+                ca.status AS approval_status,
+                ca.approved_by_customer,
+                ca.approved_by_call,
+                ca.customer_remarks,
+                ca.internal_remarks,
+                ca.approved_at,
+                ca.updated_at AS approval_updated_at,
+
+                jc.id AS job_card_id,
+                jc.job_card_no,
+                jc.customer_name,
+                jc.mobile,
+                jc.order_type,
+                jc.delivery_date,
+
+                jt.id AS approval_tracking_id,
+                jt.status AS approval_tracking_status,
+
+                ws.id AS approval_workflow_step_id,
+                ws.step_name AS approval_step_name,
+                ws.step_key AS approval_step_key,
+                ws.sort_order AS approval_sort_order,
+
+                next_ws.id AS next_workflow_step_id,
+                next_ws.step_name AS next_step_name,
+                next_ws.step_key AS next_step_key,
+
+                next_jt.id AS next_tracking_id,
+                next_jt.status AS next_tracking_status,
+
+                COALESCE(NULLIF(designer.username, ''), NULLIF(designer.name, ''), '-') AS designer_name
+
+            FROM customer_approvals ca
+
+            INNER JOIN job_cards jc
+                ON jc.id = ca.job_card_id
+
+            INNER JOIN job_tracking jt
+                ON jt.job_card_id = ca.job_card_id
+               AND jt.workflow_step_id = ca.workflow_step_id
+
+            INNER JOIN workflow_steps ws
+                ON ws.id = ca.workflow_step_id
+
+            LEFT JOIN workflow_steps next_ws
+                ON next_ws.id = (
+                    SELECT ws2.id
+                    FROM workflow_steps ws2
+                    WHERE ws2.order_type = ws.order_type
+                      AND ws2.is_active = 1
+                      AND ws2.sort_order > ws.sort_order
+                    ORDER BY ws2.sort_order ASC, ws2.id ASC
+                    LIMIT 1
+                )
+
+            LEFT JOIN job_tracking next_jt
+                ON next_jt.job_card_id = jc.id
+               AND next_jt.workflow_step_id = next_ws.id
+
+            LEFT JOIN users designer
+                ON designer.id = jc.assigned_design_user_id
+
+            WHERE ca.id = (
+                    SELECT MAX(ca2.id)
+                    FROM customer_approvals ca2
+                    WHERE ca2.job_card_id = ca.job_card_id
+                      AND ca2.workflow_step_id = ca.workflow_step_id
+                )
+
+              AND (
+                    COALESCE(ws.is_approval_step, 0) = 1
+                    OR LOWER(COALESCE(ws.step_key, '')) IN ('proofing_approval','design_approval')
+                    OR LOWER(COALESCE(ws.step_name, '')) LIKE '%approval%'
+                  )
+
+              AND (
+                    LOWER(COALESCE(ca.status, '')) = 'approved'
+                    OR COALESCE(ca.approved_by_customer, 0) = 1
+                    OR COALESCE(ca.approved_by_call, 0) = 1
+                  )
+
+              AND LOWER(COALESCE(jt.status, '')) IN ('completed','skipped')
+
+              AND next_ws.id IS NOT NULL
+              AND next_jt.id IS NOT NULL
+              AND LOWER(COALESCE(next_jt.status, 'pending')) = 'pending'
+
+              AND jc.completed_at IS NULL
+
+            ORDER BY
+                COALESCE(ca.approved_at, ca.updated_at) DESC,
+                jc.id DESC
+
+            LIMIT 25
+        ";
+
+        $customerApprovalReminderRows = dash_fetch_all($conn, $approvalReminderSql);
+        $customerApprovalReminderTotal = count($customerApprovalReminderRows);
+
+        /*
+         * Show once for the current set of newly-approved items in this login session.
+         * If another customer approves later, the approval IDs change and the popup
+         * can appear again for the new approval.
+         */
+        $approvalReminderIds = [];
+        foreach ($customerApprovalReminderRows as $approvalReminderRow) {
+            $approvalReminderIds[] = (int)($approvalReminderRow['approval_id'] ?? 0);
+        }
+
+        sort($approvalReminderIds);
+        $approvalReminderFingerprint = md5(implode(',', $approvalReminderIds));
+        $approvalReminderSessionKey = 'customer_approved_continue_reminder_' . $approvalReminderFingerprint;
+
+        if (
+            $customerApprovalReminderTotal > 0 &&
+            empty($_SESSION[$approvalReminderSessionKey])
+        ) {
+            $showCustomerApprovalReminder = true;
+            $_SESSION[$approvalReminderSessionKey] = 1;
+        }
+    } catch (Throwable $e) {
+        error_log('Dashboard customer approved reminder error: ' . $e->getMessage());
+        $customerApprovalReminderRows = [];
+        $customerApprovalReminderTotal = 0;
+        $showCustomerApprovalReminder = false;
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Follow-up login reminder
 // Shows once per login/session and includes today's + overdue pending follow-ups.
 // Effective reminder time = next_callback_at when scheduled, otherwise followup_at.
@@ -1736,6 +1893,114 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
         }
     }
     </style>
+
+<style>
+/* Customer approved - continue Job Card reminder popup */
+.customer-approval-reminder-modal .modal-dialog {
+    max-width: 780px;
+}
+.customer-approval-reminder-modal .modal-content {
+    border: 0;
+    border-radius: 22px;
+    overflow: hidden;
+    box-shadow: 0 28px 80px rgba(15, 23, 42, .20);
+}
+.customer-approval-reminder-modal .modal-header {
+    padding: 18px 20px;
+    border-bottom: 1px solid var(--border-soft);
+    background: color-mix(in srgb, #22c55e 8%, var(--card-bg));
+}
+.customer-approval-reminder-head-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 42px;
+    color: #15803d;
+    background: #dcfce7;
+}
+.customer-approval-reminder-head-icon svg {
+    width: 20px;
+    height: 20px;
+}
+.customer-approval-reminder-list {
+    max-height: min(62vh, 540px);
+    overflow-y: auto;
+    padding: 12px;
+    background: color-mix(in srgb, var(--body-bg) 54%, var(--card-bg));
+}
+.customer-approval-reminder-item {
+    border: 1px solid #bbf7d0;
+    border-radius: 16px;
+    padding: 13px 14px;
+    margin-bottom: 9px;
+    background: color-mix(in srgb, #dcfce7 18%, var(--card-bg));
+}
+.customer-approval-reminder-item:last-child {
+    margin-bottom: 0;
+}
+.customer-approval-reminder-name {
+    font-size: 13px;
+    font-weight: 800;
+    color: var(--text-main);
+}
+.customer-approval-reminder-meta {
+    margin-top: 2px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+.customer-approval-reminder-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border-radius: 999px;
+    padding: 4px 8px;
+    font-size: 10px;
+    font-weight: 800;
+    white-space: nowrap;
+    color: #166534;
+    background: #dcfce7;
+    border: 1px solid #86efac;
+}
+.customer-approval-reminder-next {
+    margin-top: 9px;
+    padding: 9px 11px;
+    border-radius: 11px;
+    border: 1px solid #bfdbfe;
+    background: color-mix(in srgb, #dbeafe 40%, var(--card-bg));
+    font-size: 11px;
+    color: var(--text-main);
+}
+.customer-approval-reminder-next strong {
+    color: #1d4ed8;
+}
+.customer-approval-reminder-remark {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    font-size: 11px;
+    color: var(--text-main);
+    background: color-mix(in srgb, var(--body-bg) 72%, var(--card-bg));
+}
+.customer-approval-reminder-modal .modal-footer {
+    padding: 13px 18px;
+    border-top: 1px solid var(--border-soft);
+}
+@media (max-width: 767.98px) {
+    .customer-approval-reminder-modal .modal-dialog {
+        margin: .75rem;
+    }
+    .customer-approval-reminder-modal .modal-header {
+        padding: 15px;
+    }
+    .customer-approval-reminder-list {
+        padding: 9px;
+    }
+}
+</style>
 </head>
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -2019,6 +2284,131 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
     <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
     </div>
 
+    <?php if ($customerApprovalReminderTotal > 0): ?>
+    <div class="modal fade customer-approval-reminder-modal" id="customerApprovalReminderModal" tabindex="-1"
+        aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header align-items-start">
+                    <div class="d-flex gap-3 align-items-start">
+                        <div class="customer-approval-reminder-head-icon">
+                            <i data-lucide="circle-check-big"></i>
+                        </div>
+
+                        <div>
+                            <div class="d-flex flex-wrap align-items-center gap-2">
+                                <h5 class="modal-title mb-0" style="font-weight:900">
+                                    Customer Approved - Continue Job Card
+                                </h5>
+
+                                <span class="badge rounded-pill text-bg-success">
+                                    <?= number_format($customerApprovalReminderTotal) ?>
+                                </span>
+                            </div>
+
+                            <small class="text-muted-custom">
+                                Customer approval is completed. Please continue the next Job Card stage.
+                            </small>
+                        </div>
+                    </div>
+
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+
+                <div class="customer-approval-reminder-list">
+                    <?php foreach ($customerApprovalReminderRows as $approvalReminder): ?>
+                    <?php
+                        $jobCardReminderId = (int)($approvalReminder['job_card_id'] ?? 0);
+                        $approvedAt = $approvalReminder['approved_at']
+                            ?? $approvalReminder['approval_updated_at']
+                            ?? null;
+
+                        $approvedMethod = (int)($approvalReminder['approved_by_customer'] ?? 0) === 1
+                            ? 'Customer Approved Online'
+                            : ((int)($approvalReminder['approved_by_call'] ?? 0) === 1
+                                ? 'Approval Confirmed by Call'
+                                : 'Approved');
+                    ?>
+
+                    <div class="customer-approval-reminder-item">
+                        <div class="d-flex justify-content-between gap-3 align-items-start">
+                            <div>
+                                <div class="customer-approval-reminder-name">
+                                    <?= e($approvalReminder['job_card_no'] ?? '-') ?> ·
+                                    <?= e($approvalReminder['customer_name'] ?? '-') ?>
+                                </div>
+
+                                <div class="customer-approval-reminder-meta">
+                                    <?= e($approvalReminder['mobile'] ?? '-') ?> ·
+                                    <?= e($approvalReminder['approval_step_name'] ?? 'Customer Approval') ?>
+                                </div>
+
+                                <div class="customer-approval-reminder-meta">
+                                    Order: <?= e(ucwords((string)($approvalReminder['order_type'] ?? '-'))) ?> ·
+                                    Designer: <?= e($approvalReminder['designer_name'] ?? '-') ?> ·
+                                    Delivery: <?= e(dash_date($approvalReminder['delivery_date'] ?? null)) ?>
+                                </div>
+
+                                <div class="customer-approval-reminder-meta">
+                                    Approved: <?= e(!empty($approvedAt) ? date('d-m-Y h:i A', strtotime((string)$approvedAt)) : '-') ?>
+                                </div>
+                            </div>
+
+                            <span class="customer-approval-reminder-status">
+                                <i data-lucide="check" style="width:12px;height:12px"></i>
+                                <?= e($approvedMethod) ?>
+                            </span>
+                        </div>
+
+                        <div class="customer-approval-reminder-next">
+                            <strong>Next Stage:</strong>
+                            <?= e($approvalReminder['next_step_name'] ?? '-') ?>
+                            <span class="text-muted-custom">
+                                · Waiting for Designing / Proofing team to continue.
+                            </span>
+                        </div>
+
+                        <?php
+                            $approvalRemark = trim((string)($approvalReminder['customer_remarks'] ?? ''));
+                            if ($approvalRemark === '') {
+                                $approvalRemark = trim((string)($approvalReminder['internal_remarks'] ?? ''));
+                            }
+                        ?>
+
+                        <?php if ($approvalRemark !== ''): ?>
+                        <div class="customer-approval-reminder-remark">
+                            <strong>Customer Remark:</strong> <?= e($approvalRemark) ?>
+                        </div>
+                        <?php endif; ?>
+
+                        <div class="d-flex flex-wrap gap-2 mt-3">
+                            <a href="job_card_view.php?id=<?= $jobCardReminderId ?>"
+                                class="btn btn-sm btn-success rounded-pill fw-bold px-3">
+                                <i data-lucide="arrow-right-circle" style="width:15px;height:15px"></i>
+                                Open & Continue Job Card
+                            </a>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+
+                <div class="modal-footer justify-content-between">
+                    <small class="text-muted-custom">
+                        This reminder automatically disappears after the next workflow stage is started.
+                    </small>
+
+                    <?php if ($customerApprovalQueueCanView): ?>
+                    <a href="customer_approvals.php"
+                        class="btn btn-outline-success rounded-pill fw-bold px-4">
+                        Approval History
+                    </a>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
+
     <?php if ($followupReminderTotal > 0): ?>
     <div class="modal fade followup-reminder-modal" id="todayFollowupReminderModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
@@ -2127,6 +2517,7 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
 
         refreshIcons();
 
+        const approvalReminderModalEl = document.getElementById('customerApprovalReminderModal');
         const reminderModalEl = document.getElementById('todayFollowupReminderModal');
         const reminderList = document.getElementById('followupReminderList');
         const reminderCount = document.getElementById('followupReminderCount');
@@ -2241,15 +2632,51 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
             });
         });
 
+        const autoShowApprovalReminder = <?= $showCustomerApprovalReminder ? 'true' : 'false' ?>;
         const autoShowReminder = <?= $showFollowupReminder ? 'true' : 'false' ?>;
-        if (autoShowReminder && reminderModalEl && window.bootstrap && bootstrap.Modal) {
+
+        function showFollowupReminderModal() {
+            if (!autoShowReminder || !reminderModalEl || !window.bootstrap || !bootstrap.Modal) {
+                return;
+            }
+
+            bootstrap.Modal.getOrCreateInstance(reminderModalEl, {
+                backdrop: true,
+                keyboard: true
+            }).show();
+            refreshIcons();
+        }
+
+        if (
+            (autoShowApprovalReminder && approvalReminderModalEl) ||
+            (autoShowReminder && reminderModalEl)
+        ) {
             window.addEventListener('load', function() {
                 setTimeout(function() {
-                    bootstrap.Modal.getOrCreateInstance(reminderModalEl, {
-                        backdrop: true,
-                        keyboard: true
-                    }).show();
-                    refreshIcons();
+                    if (
+                        autoShowApprovalReminder &&
+                        approvalReminderModalEl &&
+                        window.bootstrap &&
+                        bootstrap.Modal
+                    ) {
+                        const approvalModal = bootstrap.Modal.getOrCreateInstance(approvalReminderModalEl, {
+                            backdrop: true,
+                            keyboard: true
+                        });
+
+                        if (autoShowReminder && reminderModalEl) {
+                            approvalReminderModalEl.addEventListener('hidden.bs.modal', function() {
+                                setTimeout(showFollowupReminderModal, 180);
+                            }, {
+                                once: true
+                            });
+                        }
+
+                        approvalModal.show();
+                        refreshIcons();
+                    } else {
+                        showFollowupReminderModal();
+                    }
                 }, 280);
             });
         }
