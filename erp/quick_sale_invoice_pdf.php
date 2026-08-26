@@ -1,109 +1,41 @@
 <?php
+/**
+ * quick_sale_invoice_pdf.php
+ *
+ * Dedicated Quick Sale / Cash Invoice.
+ *
+ * IMPORTANT:
+ * - No Proforma Bill layout.
+ * - No Proforma DB record.
+ * - No stock reservation.
+ * - No Job Card / workflow.
+ * - Supports normal ERP access by ?id=
+ * - Supports secure customer/WhatsApp access by ?token=
+ */
+
 require_once __DIR__ . '/includes/db.php';
 
 $invoiceToken = trim((string)($_GET['token'] ?? ''));
-$publicAccess = $invoiceToken !== '';
-
-if (!$publicAccess) {
-    require_once __DIR__ . '/includes/auth.php';
-
-    function qsi_is_admin_role(mysqli $conn): bool
-    {
-        $roleKey = strtolower(trim((string)(
-            $_SESSION['role_key']
-            ?? $_SESSION['role']
-            ?? $_SESSION['user_role']
-            ?? ''
-        )));
-        $roleName = strtolower(trim((string)($_SESSION['role_name'] ?? '')));
-
-        if (
-            in_array(
-                $roleKey,
-                ['admin', 'super_admin', 'superadmin', 'business_admin'],
-                true
-            )
-            || $roleName === 'admin'
-        ) {
-            return true;
-        }
-
-        $roleId = (int)($_SESSION['role_id'] ?? 0);
-        if ($roleId <= 0) return false;
-
-        try {
-            $stmt = $conn->prepare("
-                SELECT role_key, role_name
-                FROM roles
-                WHERE id = ?
-                LIMIT 1
-            ");
-            $stmt->bind_param('i', $roleId);
-            $stmt->execute();
-            $row = $stmt->get_result()->fetch_assoc();
-            $stmt->close();
-
-            if (!$row) return false;
-
-            $dbKey = strtolower(trim((string)($row['role_key'] ?? '')));
-            $dbName = strtolower(trim((string)($row['role_name'] ?? '')));
-
-            return
-                in_array(
-                    $dbKey,
-                    ['admin', 'super_admin', 'superadmin', 'business_admin'],
-                    true
-                )
-                || $dbName === 'admin';
-        } catch (Throwable $e) {
-            return false;
-        }
-    }
-
-    if (!qsi_is_admin_role($conn)) {
-        $allowed = false;
-
-        foreach (['can_view', 'can_print'] as $fn) {
-            if (!function_exists($fn)) continue;
-
-            try {
-                if ((bool)$fn($conn, 'quick-sale.php')) {
-                    $allowed = true;
-                    break;
-                }
-            } catch (ArgumentCountError $e) {
-                try {
-                    if ((bool)$fn('quick-sale.php')) {
-                        $allowed = true;
-                        break;
-                    }
-                } catch (Throwable $inner) {
-                }
-            } catch (Throwable $e) {
-            }
-        }
-
-        if (!$allowed && function_exists('require_permission')) {
-            require_permission($conn, 'can_view', 'quick-sale.php');
-            $allowed = true;
-        }
-
-        if (!$allowed) {
-            http_response_code(403);
-            die('Access denied.');
-        }
-    }
-}
-
 $quickSaleId = (int)($_GET['id'] ?? 0);
 
-if (!$publicAccess && $quickSaleId <= 0) {
+/*
+ * WhatsApp/Wabbs approved button format:
+ *   https://subhikshacards.in/erp/quick_sale_invoice_pdf.php?id={{1}}
+ *
+ * Therefore ?id= must be readable without an ERP login. The endpoint only
+ * renders this Quick Sale invoice; it does not expose ERP navigation/actions.
+ * Secure token links remain supported for older messages.
+ */
+$publicAccess = $invoiceToken !== '' || $quickSaleId > 0;
+
+
+if ($invoiceToken === '' && $quickSaleId <= 0) {
     http_response_code(400);
     die('Invalid Quick Sale.');
 }
 
 if (
-    $publicAccess
+    $invoiceToken !== ''
     && !preg_match('/^[a-f0-9]{48}$/i', $invoiceToken)
 ) {
     http_response_code(400);
@@ -116,7 +48,7 @@ try {
     // ---------------------------------------------------------------
     // Quick Sale Header + Customer
     // ---------------------------------------------------------------
-    if ($publicAccess) {
+    if ($invoiceToken !== '') {
         $stmt = $conn->prepare("
             SELECT
                 qs.id,

@@ -167,7 +167,7 @@ function qs_api_send_invoice_whatsapp(
 
     return subhiksha_send_template_whatsapp(
         $conn,
-        'quick_sale_invoice',
+        'purchase_new',
         $mobile,
         $variables,
         [
@@ -178,7 +178,7 @@ function qs_api_send_invoice_whatsapp(
             'language_code' => 'en',
             'extra_payload' => [
                 'type' => 'template',
-                'template_key' => 'quick_sale_invoice',
+                'template_key' => 'purchase_new',
                 'quick_sale_id' => $quickSaleId,
                 'quick_sale_invoice_link' => $invoiceUrl,
             ],
@@ -757,20 +757,247 @@ function qs_api_next_no(mysqli $conn): string
     return $prefix . str_pad((string)$next, 4, '0', STR_PAD_LEFT);
 }
 
+function qs_api_require_action_permission(mysqli $conn, string $action): void
+{
+    if (qs_api_is_admin_role($conn)) {
+        return;
+    }
+
+    $permission = match ($action) {
+        'update_customer' => 'can_edit',
+        'delete' => 'can_delete',
+        'send_whatsapp' => 'can_view',
+        default => 'can_create',
+    };
+
+    if (function_exists('permission_allowed')) {
+        if (!permission_allowed($conn, $permission, 'quick-sale.php')) {
+            throw new RuntimeException('You do not have permission for this Quick Sale action.');
+        }
+        return;
+    }
+
+    $fallbackMap = [
+        'can_create' => 'can_create',
+        'can_edit' => 'can_edit',
+        'can_delete' => 'can_delete',
+        'can_view' => 'can_view',
+    ];
+    $fn = $fallbackMap[$permission] ?? '';
+    if ($fn !== '' && function_exists($fn)) {
+        try {
+            if (!(bool)$fn($conn, 'quick-sale.php')) {
+                throw new RuntimeException('You do not have permission for this Quick Sale action.');
+            }
+        } catch (ArgumentCountError $e) {
+            if (!(bool)$fn('quick-sale.php')) {
+                throw new RuntimeException('You do not have permission for this Quick Sale action.');
+            }
+        }
+    }
+}
+
+function qs_api_load_sale_for_whatsapp(mysqli $conn, int $quickSaleId): array
+{
+    $stmt = $conn->prepare("
+        SELECT
+            qs.id,
+            qs.sale_no,
+            qs.customer_name,
+            qs.mobile,
+            qs.address,
+            qs.total_amount
+        FROM quick_sales qs
+        WHERE qs.id = ?
+        LIMIT 1
+    ");
+    $stmt->bind_param('i', $quickSaleId);
+    $stmt->execute();
+    $sale = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$sale) {
+        throw new RuntimeException('Quick Sale not found.');
+    }
+
+    $items = [];
+    $stmt = $conn->prepare("
+        SELECT product_id, product_name, qty, rate, amount
+        FROM quick_sale_items
+        WHERE quick_sale_id = ?
+        ORDER BY id ASC
+    ");
+    $stmt->bind_param('i', $quickSaleId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    while ($row = $res->fetch_assoc()) {
+        $items[] = $row;
+    }
+    $stmt->close();
+
+    $paidAmount = 0.0;
+    if (qs_api_table_exists($conn, 'quick_sale_payments')) {
+        $stmt = $conn->prepare("
+            SELECT COALESCE(SUM(amount), 0) AS paid_amount
+            FROM quick_sale_payments
+            WHERE quick_sale_id = ?
+        ");
+        $stmt->bind_param('i', $quickSaleId);
+        $stmt->execute();
+        $pay = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        $paidAmount = (float)($pay['paid_amount'] ?? 0);
+    }
+
+    $sale['items'] = $items;
+    $sale['paid_amount'] = round($paidAmount, 2);
+    $sale['balance_amount'] = max(0, round((float)$sale['total_amount'] - $paidAmount, 2));
+    return $sale;
+}
+
+function qs_api_save_whatsapp_result(mysqli $conn, int $quickSaleId, array $whatsapp): void
+{
+    $status = !empty($whatsapp['success']) ? 'sent' : 'failed';
+    $logId = !empty($whatsapp['log_id']) ? (int)$whatsapp['log_id'] : null;
+
+    if ($status === 'sent') {
+        $stmt = $conn->prepare("
+            UPDATE quick_sales
+            SET whatsapp_status = 'sent',
+                whatsapp_log_id = ?,
+                whatsapp_sent_at = NOW()
+            WHERE id = ?
+        ");
+    } else {
+        $stmt = $conn->prepare("
+            UPDATE quick_sales
+            SET whatsapp_status = 'failed',
+                whatsapp_log_id = ?,
+                whatsapp_sent_at = NULL
+            WHERE id = ?
+        ");
+    }
+    $stmt->bind_param('ii', $logId, $quickSaleId);
+    $stmt->execute();
+    $stmt->close();
+}
+
+function qs_api_delete_quick_sale(mysqli $conn, int $quickSaleId, int $userId): string
+{
+    $stmt = $conn->prepare("
+        SELECT id, sale_no
+        FROM quick_sales
+        WHERE id = ?
+        LIMIT 1
+        FOR UPDATE
+    ");
+    $stmt->bind_param('i', $quickSaleId);
+    $stmt->execute();
+    $sale = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$sale) {
+        throw new RuntimeException('Quick Sale not found.');
+    }
+
+    $saleNo = (string)$sale['sale_no'];
+
+    $stmt = $conn->prepare("
+        SELECT product_id, product_name, qty
+        FROM quick_sale_items
+        WHERE quick_sale_id = ?
+        ORDER BY id ASC
+    ");
+    $stmt->bind_param('i', $quickSaleId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $items = [];
+    while ($row = $res->fetch_assoc()) {
+        $items[] = $row;
+    }
+    $stmt->close();
+
+    foreach ($items as $item) {
+        $productId = (int)($item['product_id'] ?? 0);
+        $qty = max(0, (float)($item['qty'] ?? 0));
+        if ($productId <= 0 || $qty <= 0) continue;
+
+        $stmt = $conn->prepare("
+            SELECT on_hand_stock, reserved_stock
+            FROM product_stock
+            WHERE product_id = ?
+            LIMIT 1
+            FOR UPDATE
+        ");
+        $stmt->bind_param('i', $productId);
+        $stmt->execute();
+        $stock = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$stock) continue;
+
+        $onHandBefore = (float)($stock['on_hand_stock'] ?? 0);
+        $reservedBefore = (float)($stock['reserved_stock'] ?? 0);
+        $onHandAfter = round($onHandBefore + $qty, 2);
+
+        $stmt = $conn->prepare("
+            UPDATE product_stock
+            SET on_hand_stock = ?, updated_at = NOW()
+            WHERE product_id = ?
+        ");
+        $stmt->bind_param('di', $onHandAfter, $productId);
+        $stmt->execute();
+        $stmt->close();
+
+        $type = 'quick_sale_delete_restore';
+        $referenceType = 'quick_sale_deleted';
+        $description = 'Stock restored after deleting Quick Sale ' . $saleNo;
+        $stmt = $conn->prepare("
+            INSERT INTO stock_transactions
+                (product_id, transaction_type, quantity, on_hand_before, on_hand_after,
+                 reserved_before, reserved_after, reference_type, reference_id, reference_no,
+                 description, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        ");
+        $stmt->bind_param(
+            'isdddddsissi',
+            $productId,
+            $type,
+            $qty,
+            $onHandBefore,
+            $onHandAfter,
+            $reservedBefore,
+            $reservedBefore,
+            $referenceType,
+            $quickSaleId,
+            $saleNo,
+            $description,
+            $userId
+        );
+        $stmt->execute();
+        $stmt->close();
+    }
+
+    /* Items/payments/denominations cascade from quick_sales. */
+    $stmt = $conn->prepare("DELETE FROM quick_sales WHERE id = ?");
+    $stmt->bind_param('i', $quickSaleId);
+    $stmt->execute();
+    $stmt->close();
+
+    return $saleNo;
+}
+
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
         throw new RuntimeException('Invalid request method.');
     }
 
-    if (!qs_api_is_admin_role($conn)) {
-        if (function_exists('permission_allowed')) {
-            if (!permission_allowed($conn, 'can_create', 'quick-sale.php')) {
-                throw new RuntimeException('You do not have permission to create Quick Sale.');
-            }
-        } elseif (function_exists('can_create') && !can_create($conn, 'quick-sale.php')) {
-            throw new RuntimeException('You do not have permission to create Quick Sale.');
-        }
+    $action = strtolower(trim((string)($_POST['action'] ?? 'create')));
+    if (!in_array($action, ['create', 'send_whatsapp', 'update_customer', 'delete'], true)) {
+        throw new RuntimeException('Invalid Quick Sale action.');
     }
+
+    qs_api_require_action_permission($conn, $action);
 
     $csrf = (string)($_POST['csrf_token'] ?? '');
     $sessionCsrf = (string)($_SESSION['quick_sale_csrf'] ?? '');
@@ -806,9 +1033,95 @@ try {
         );
     }
 
+    if ($action === 'send_whatsapp') {
+        $quickSaleId = (int)($_POST['quick_sale_id'] ?? 0);
+        if ($quickSaleId <= 0) {
+            throw new RuntimeException('Invalid Quick Sale.');
+        }
+
+        $sale = qs_api_load_sale_for_whatsapp($conn, $quickSaleId);
+        $userId = (int)($_SESSION['user_id'] ?? 0);
+        $whatsapp = qs_api_send_invoice_whatsapp(
+            $conn,
+            $quickSaleId,
+            (string)$sale['sale_no'],
+            (string)$sale['customer_name'],
+            (string)$sale['mobile'],
+            (array)$sale['items'],
+            (float)$sale['total_amount'],
+            (float)$sale['paid_amount'],
+            (float)$sale['balance_amount'],
+            $userId > 0 ? $userId : null
+        );
+        qs_api_save_whatsapp_result($conn, $quickSaleId, $whatsapp);
+
+        if (empty($whatsapp['success'])) {
+            throw new RuntimeException((string)($whatsapp['message'] ?? 'WhatsApp sending failed.'));
+        }
+
+        qs_api_response(true, 'Quick Sale invoice sent through WhatsApp.', [
+            'quick_sale_id' => $quickSaleId,
+            'whatsapp_log_id' => (int)($whatsapp['log_id'] ?? 0),
+            'template' => 'purchase_new'
+        ]);
+    }
+
+    if ($action === 'update_customer') {
+        $quickSaleId = (int)($_POST['quick_sale_id'] ?? 0);
+        $customerName = trim((string)($_POST['customer_name'] ?? ''));
+        $customerMobile = preg_replace('/\D+/', '', (string)($_POST['customer_mobile'] ?? ''));
+        $customerVenue = trim((string)($_POST['customer_venue'] ?? $_POST['customer_address'] ?? ''));
+
+        if ($quickSaleId <= 0) throw new RuntimeException('Invalid Quick Sale.');
+        if ($customerName === '') throw new RuntimeException('Customer Name is required.');
+        if (!preg_match('/^\d{10}$/', $customerMobile)) {
+            throw new RuntimeException('Please enter a valid 10 digit customer mobile number.');
+        }
+        if ((function_exists('mb_strlen') ? mb_strlen($customerVenue) : strlen($customerVenue)) > 1000) {
+            throw new RuntimeException('Venue is too long.');
+        }
+
+        $stmt = $conn->prepare("
+            UPDATE quick_sales
+            SET customer_name = ?, mobile = ?, address = ?
+            WHERE id = ?
+        ");
+        $stmt->bind_param('sssi', $customerName, $customerMobile, $customerVenue, $quickSaleId);
+        $stmt->execute();
+        if ($stmt->affected_rows < 0) {
+            $stmt->close();
+            throw new RuntimeException('Unable to update Quick Sale customer details.');
+        }
+        $stmt->close();
+
+        qs_api_response(true, 'Quick Sale customer and venue updated successfully.', [
+            'quick_sale_id' => $quickSaleId
+        ]);
+    }
+
+    if ($action === 'delete') {
+        $quickSaleId = (int)($_POST['quick_sale_id'] ?? 0);
+        if ($quickSaleId <= 0) throw new RuntimeException('Invalid Quick Sale.');
+
+        $userId = (int)($_SESSION['user_id'] ?? 0);
+        $conn->begin_transaction();
+        try {
+            $saleNo = qs_api_delete_quick_sale($conn, $quickSaleId, $userId);
+            $conn->commit();
+        } catch (Throwable $deleteError) {
+            $conn->rollback();
+            throw $deleteError;
+        }
+
+        qs_api_response(true, 'Quick Sale deleted and stock restored successfully.', [
+            'quick_sale_id' => $quickSaleId,
+            'sale_no' => $saleNo
+        ]);
+    }
+
     $customerName = trim((string)($_POST['customer_name'] ?? ''));
     $customerMobile = preg_replace('/\D+/', '', (string)($_POST['customer_mobile'] ?? ''));
-    $customerAddress = trim((string)($_POST['customer_address'] ?? ''));
+    $customerVenue = trim((string)($_POST['customer_venue'] ?? $_POST['customer_address'] ?? ''));
 
     if ($customerName === '') {
         throw new RuntimeException('Customer Name is required.');
@@ -823,9 +1136,9 @@ try {
         throw new RuntimeException('Please enter a valid 10 digit customer mobile number.');
     }
 
-    $customerAddressLength = function_exists('mb_strlen') ? mb_strlen($customerAddress) : strlen($customerAddress);
-    if ($customerAddressLength > 1000) {
-        throw new RuntimeException('Customer Address is too long.');
+    $customerVenueLength = function_exists('mb_strlen') ? mb_strlen($customerVenue) : strlen($customerVenue);
+    if ($customerVenueLength > 1000) {
+        throw new RuntimeException('Venue is too long.');
     }
 
     $rawJson = trim((string)($_POST['items_json'] ?? ''));
@@ -960,7 +1273,7 @@ try {
             $saleNo,
             $customerName,
             $customerMobile,
-            $customerAddress,
+            $customerVenue,
             $invoiceToken,
             $createdBy
         );
