@@ -491,35 +491,51 @@ $canRespond = $approval && $status === 'pending';
     }
 
     .pdf-card {
+        width: 100%;
+        min-width: 0;
         background: #fff;
         border: 1px solid #e2e8f0;
         border-radius: 18px;
-        padding: 12px
+        padding: 12px;
+        overflow: hidden;
+    }
+
+    .pdf-viewer-wrap {
+        width: 100%;
+        min-width: 0;
+        overflow: hidden;
+        border-radius: 14px;
+        background: #f8fafc;
     }
 
     .pdf-preview {
+        display: block;
         width: 100%;
-        height: 650px;
+        max-width: 100%;
+        height: min(70vh, 650px);
+        min-height: 520px;
         border: 1px solid #cbd5e1;
         border-radius: 14px;
-        background: #f8fafc
+        background: #f8fafc;
     }
 
     .pdf-actions {
         display: flex;
         flex-wrap: wrap;
         gap: 10px;
-        margin-top: 10px
+        margin-top: 12px;
     }
 
     .pdf-btn {
         display: inline-flex;
         align-items: center;
         justify-content: center;
+        min-height: 44px;
         padding: 10px 16px;
         border-radius: 999px;
         text-decoration: none;
-        font-weight: 900
+        font-weight: 900;
+        text-align: center;
     }
 
     .pdf-btn-open {
@@ -534,11 +550,13 @@ $canRespond = $approval && $status === 'pending';
     }
 
     .file-name {
-        margin-top: 8px;
+        margin-top: 10px;
         font-size: 12px;
+        line-height: 1.45;
         color: #64748b;
         font-weight: 800;
-        overflow-wrap: anywhere
+        overflow-wrap: anywhere;
+        word-break: break-word;
     }
 
     .action-box {
@@ -550,25 +568,128 @@ $canRespond = $approval && $status === 'pending';
     }
 
     @media(max-width:767px) {
+
+        html,
+        body {
+            max-width: 100%;
+            overflow-x: hidden
+        }
+
         .page {
-            padding: 12px
+            width: 100%;
+            max-width: 100%;
+            padding: 8px;
         }
 
         .hero {
-            padding: 16px;
-            border-radius: 18px
+            width: 100%;
+            max-width: 100%;
+            padding: 14px;
+            border-radius: 16px;
         }
 
         .title {
-            font-size: 22px
+            font-size: 20px;
+            line-height: 1.2;
+        }
+
+        .muted {
+            font-size: 13px;
+            line-height: 1.45;
+        }
+
+        .row {
+            --bs-gutter-x: 10px;
+            --bs-gutter-y: 10px;
+        }
+
+        .info {
+            padding: 11px;
+            border-radius: 14px;
+        }
+
+        .photo-card {
+            width: 100%;
+            padding: 8px;
+            border-radius: 14px;
         }
 
         .photo-card img {
-            height: 210px
+            width: 100%;
+            height: auto;
+            max-height: 380px;
+            object-fit: contain;
+        }
+
+        .pdf-card {
+            width: 100%;
+            max-width: 100%;
+            padding: 8px;
+            border-radius: 14px;
+        }
+
+        .pdf-viewer-wrap {
+            width: 100%;
+            max-width: 100%;
+            border-radius: 12px;
         }
 
         .pdf-preview {
-            height: 460px
+            width: 100%;
+            max-width: 100%;
+            height: 62vh;
+            min-height: 380px;
+            max-height: 560px;
+            border-radius: 12px;
+        }
+
+        .pdf-actions {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 8px;
+            width: 100%;
+        }
+
+        .pdf-btn {
+            width: 100%;
+            border-radius: 12px;
+            min-height: 46px;
+            font-size: 15px;
+        }
+
+        .file-name {
+            font-size: 11px;
+            margin-top: 8px;
+        }
+
+        .action-box {
+            padding: 14px;
+            border-radius: 16px;
+        }
+
+        .action-box .btn {
+            width: 100%;
+            min-height: 46px;
+        }
+    }
+
+    @media(max-width:420px) {
+        .page {
+            padding: 6px
+        }
+
+        .hero {
+            padding: 12px
+        }
+
+        .title {
+            font-size: 19px
+        }
+
+        .pdf-preview {
+            height: 58vh;
+            min-height: 340px;
+            max-height: 500px;
         }
     }
     </style>
@@ -634,7 +755,7 @@ $canRespond = $approval && $status === 'pending';
             </div>
         </div>
 
-        <div class="hero mb-3">
+        <div class="hero mb-3 uploaded-files-section">
             <h2 class="h5 fw-black fw-bold mb-3">Uploaded Proof / Design Files</h2>
             <?php if (!$photos): ?>
             <div class="alert alert-warning rounded-4 fw-bold mb-0">No proof/design files found for this approval link.
@@ -658,7 +779,10 @@ $canRespond = $approval && $status === 'pending';
                 <?php if ($isPdf): ?>
                 <div class="col-12">
                     <div class="pdf-card">
-                        <iframe src="<?= e($filePath) ?>" class="pdf-preview" title="Proofing PDF"></iframe>
+                        <div class="pdf-viewer-wrap">
+                            <iframe src="<?= e($filePath) ?>" class="pdf-preview" title="Proofing PDF"
+                                loading="lazy"></iframe>
+                        </div>
 
                         <div class="pdf-actions">
                             <a href="<?= e($filePath) ?>" target="_blank" rel="noopener" class="pdf-btn pdf-btn-open">
