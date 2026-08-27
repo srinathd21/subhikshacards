@@ -1636,6 +1636,15 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
             transition-duration: .01ms !important;
         }
     }
+
+    /* Loaded tracking number is display-only. */
+    #job_card_no[readonly] {
+        background: #f3f6fa;
+        color: #334155;
+        cursor: default;
+        user-select: text;
+        caret-color: transparent;
+    }
     </style>
 </head>
 
@@ -1665,7 +1674,7 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
             <div class="search-row">
                 <input type="text" id="job_card_no" name="job_card_no"
                     value="<?= e($job['job_card_no'] ?? $displayJobNo) ?>" placeholder="Example: SC-JOB-260807-0001"
-                    required>
+                    <?= $job ? 'readonly aria-readonly="true"' : '' ?> required>
                 <button type="submit">Track</button>
             </div>
         </form>
