@@ -634,6 +634,10 @@ $canRespond = $approval && $status === 'pending';
             border-radius: 12px;
         }
 
+        .pdf-desktop-preview {
+            display: none;
+        }
+
         .pdf-preview {
             width: 100%;
             max-width: 100%;
@@ -779,7 +783,7 @@ $canRespond = $approval && $status === 'pending';
                 <?php if ($isPdf): ?>
                 <div class="col-12">
                     <div class="pdf-card">
-                        <div class="pdf-viewer-wrap">
+                        <div class="pdf-viewer-wrap pdf-desktop-preview">
                             <iframe src="<?= e($filePath) ?>" class="pdf-preview" title="Proofing PDF"
                                 loading="lazy"></iframe>
                         </div>
@@ -793,6 +797,8 @@ $canRespond = $approval && $status === 'pending';
                                 Download PDF
                             </a>
                         </div>
+
+                        <div class="file-name d-md-none">Mobile view shows only Open PDF and Download PDF buttons.</div>
 
                         <?php if ($fileName !== ''): ?>
                         <div class="file-name"><?= e($fileName) ?></div>
