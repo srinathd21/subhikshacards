@@ -1027,8 +1027,8 @@ function jcvSaveTrackingPhotos(mysqli $conn, int $jobId, int $trackingId, int $w
         throw new RuntimeException('Unable to create tracking photo upload folder.');
     }
 
-    $allowedExt = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
-    $allowedMime = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    $allowedExt = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'pdf'];
+    $allowedMime = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf'];
 
     foreach ($_FILES[$fieldName]['name'] as $index => $originalName) {
         $originalName = trim((string)$originalName);
@@ -1039,22 +1039,22 @@ function jcvSaveTrackingPhotos(mysqli $conn, int $jobId, int $trackingId, int $w
         }
 
         if ($error !== UPLOAD_ERR_OK) {
-            throw new RuntimeException('Photo upload failed. Please upload valid image files.');
+            throw new RuntimeException('Proof/design file upload failed. Please upload a valid image or PDF file.');
         }
 
         $tmpPath = (string)($_FILES[$fieldName]['tmp_name'][$index] ?? '');
         $fileSize = (int)($_FILES[$fieldName]['size'][$index] ?? 0);
         if ($tmpPath === '' || !is_uploaded_file($tmpPath)) {
-            throw new RuntimeException('Invalid uploaded photo.');
+            throw new RuntimeException('Invalid uploaded proof/design file.');
         }
 
         if ($fileSize <= 0) {
-            throw new RuntimeException('Uploaded photo is empty. Please upload a valid image file.');
+            throw new RuntimeException('Uploaded proof/design file is empty.');
         }
 
         $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
         if (!in_array($ext, $allowedExt, true)) {
-            throw new RuntimeException('Only JPG, PNG, WEBP or GIF photos are allowed.');
+            throw new RuntimeException('Only JPG, PNG, WEBP, GIF or PDF files are allowed.');
         }
 
         $mime = '';
@@ -1066,7 +1066,7 @@ function jcvSaveTrackingPhotos(mysqli $conn, int $jobId, int $trackingId, int $w
             }
         }
         if ($mime !== '' && !in_array($mime, $allowedMime, true)) {
-            throw new RuntimeException('Invalid image type uploaded.');
+            throw new RuntimeException('Invalid proof/design file type uploaded.');
         }
 
         $safeName = 'tracking_' . $jobId . '_' . $trackingId . '_' . date('YmdHis') . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
@@ -1074,7 +1074,7 @@ function jcvSaveTrackingPhotos(mysqli $conn, int $jobId, int $trackingId, int $w
         $relativePath = 'uploads/job_tracking_photos/' . $safeName;
 
         if (!move_uploaded_file($tmpPath, $targetPath)) {
-            throw new RuntimeException('Unable to save uploaded photo.');
+            throw new RuntimeException('Unable to save uploaded proof/design file.');
         }
 
         $stmt = $conn->prepare("
@@ -1221,7 +1221,7 @@ function jcvDesignPhotoWhatsappUrl(mysqli $conn, array $job, array $step, array 
         . "Subhiksha Cards has uploaded {$stage} photos for your job card {$jobNo}.\n\n"
         . "Please open the link below to view the photos and Approve or Reject.\n"
         . "{$link}\n\n"
-        . "Note: Images are available inside the link. We are not attaching images in WhatsApp.\n\n"
+        . "Images and PDF files are available inside the approval link. Customer can review all uploaded files before Approve / Reject.\n\n"
         . "Thank you,\nSubhiksha Cards";
 
     return 'https://wa.me/' . $mobile . '?text=' . rawurlencode($message);
@@ -1245,6 +1245,20 @@ function jcvHasTrackingPhotos(mysqli $conn, int $jobId, int $trackingId): bool
         return false;
     }
 }
+
+
+function jcvTrackingFileIsPdf(array $file): bool
+{
+    $mime = strtolower(trim((string)($file['mime_type'] ?? '')));
+    $name = trim((string)($file['original_name'] ?? ''));
+    $path = trim((string)($file['file_path'] ?? ''));
+
+    if ($mime === 'application/pdf') return true;
+
+    $candidate = $name !== '' ? $name : $path;
+    return strtolower(pathinfo($candidate, PATHINFO_EXTENSION)) === 'pdf';
+}
+
 
 function jcvCustomerTrackingUrl(mysqli $conn, array $job): string
 {
@@ -2504,7 +2518,7 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                     $existingProofPhotos = jcvHasTrackingPhotos($conn, $jobId, $trackingId);
 
                     if ($requiresDesignPhotoUpload && $newStatus === 'completed' && !$uploadedProofPhotos && !$existingProofPhotos) {
-                        throw new RuntimeException('Please upload proof/design photo before completing this stage. In Progress / Pending / Delayed status does not require photo upload.');
+                        throw new RuntimeException('Please upload a proof/design image or PDF before completing this stage. In Progress / Pending / Delayed status does not require file upload.');
                     }
 
                     jcvAssertDispatchPaymentAllowed($conn, $job, $stepRow, $newStatus);
@@ -3404,6 +3418,48 @@ if ($message !== '' && $toastTitle === 'Info') {
         padding: 5px;
         background: #fff;
         box-shadow: 0 8px 18px rgba(15, 23, 42, .06);
+    }
+
+    .tracking-pdf-link {
+        display: block;
+        text-decoration: none;
+    }
+
+    .tracking-pdf-thumb {
+        width: 108px;
+        min-height: 110px;
+        border: 1px solid #fecaca;
+        border-radius: 14px;
+        background: #fff7f7;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 10px;
+        text-align: center;
+    }
+
+    .tracking-pdf-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 52px;
+        height: 34px;
+        padding: 0 8px;
+        border-radius: 8px;
+        background: #dc2626;
+        color: #fff;
+        font-size: 12px;
+        font-weight: 900;
+    }
+
+    .tracking-pdf-thumb small {
+        max-width: 90px;
+        font-size: 10px;
+        color: #475569;
+        font-weight: 800;
+        overflow-wrap: anywhere;
     }
 
     .tracking-photo-item .tracking-photo-thumb {
@@ -4319,7 +4375,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                                         <div class="small mt-1">
                                             <?php if ($approvalDone): ?>
                                             <?php if ((int)($step['approved_by_customer'] ?? 0) === 1): ?>
-                                            Approved by customer link. This approval stage is completed automatically; no manual status update is required.
+                                            Approved by customer link. This approval stage is completed automatically;
+                                            no manual status update is required.
                                             <?php elseif ((int)($step['approved_by_call'] ?? 0) === 1): ?>
                                             Manually approved by
                                             call<?= !empty($step['call_confirmed_by_name']) ? ' by ' . e($step['call_confirmed_by_name']) : '' ?>.
@@ -4332,7 +4389,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                                             <br><strong>Customer Remark:</strong> <?= e($step['customer_remarks']) ?>
                                             <?php endif; ?>
                                             <?php else: ?>
-                                            Waiting for customer approval. If the customer does not approve through the link but confirms directly,
+                                            Waiting for customer approval. If the customer does not approve through the
+                                            link but confirms directly,
                                             use the manual approval checkbox below to complete this stage.
                                             <?php endif; ?>
                                         </div>
@@ -4445,8 +4503,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                                             class="d-flex flex-column flex-md-row justify-content-between gap-3 align-items-md-center">
                                             <div class="photo-approval-head">
                                                 <small class="text-muted-custom fw-bold text-uppercase">Uploaded Design
-                                                    / Proofing Photos</small>
-                                                <strong><?= count($stepPhotos) ?> photo(s) uploaded</strong>
+                                                    / Proofing Files</small>
+                                                <strong><?= count($stepPhotos) ?> file(s) uploaded</strong>
                                                 <div class="photo-status-row">
                                                     <span class="photo-status-chip <?= e($photoStatusClass) ?>">
                                                         <?= $photoStatusClass === 'approved' ? '✓' : ($photoStatusClass === 'rejected' ? '!' : ($photoStatusClass === 'expired' ? '×' : '⏱')) ?>
@@ -4490,11 +4548,21 @@ if ($message !== '' && $toastTitle === 'Info') {
                                         <div class="tracking-photo-list">
                                             <?php foreach ($stepPhotos as $photo): ?>
                                             <div class="tracking-photo-item">
+                                                <?php if (jcvTrackingFileIsPdf($photo)): ?>
+                                                <a href="<?= e($photo['file_path'] ?? '#') ?>" target="_blank"
+                                                    rel="noopener" class="tracking-pdf-link">
+                                                    <div class="tracking-pdf-thumb">
+                                                        <span class="tracking-pdf-icon">PDF</span>
+                                                        <small><?= e($photo['original_name'] ?? 'Proofing PDF') ?></small>
+                                                    </div>
+                                                </a>
+                                                <?php else: ?>
                                                 <a href="<?= e($photo['file_path'] ?? '#') ?>" target="_blank"
                                                     rel="noopener">
                                                     <img src="<?= e($photo['file_path'] ?? '') ?>"
                                                         class="tracking-photo-thumb" alt="Tracking photo">
                                                 </a>
+                                                <?php endif; ?>
                                                 <?php if ($canCancelUploadedPhoto): ?>
                                                 <form method="post" class="photo-cancel-form"
                                                     onsubmit="return confirm('Cancel this uploaded proof/design photo? If this is the last photo, the customer approval link will expire and this stage will move back for fresh upload.');">
@@ -4595,18 +4663,18 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                 <div class="col-12 design-photo-upload-field">
                                                     <div class="design-photo-box">
                                                         <div class="design-photo-title">
-                                                            <strong>Designing / Proofing Photos <span
+                                                            <strong>Designing / Proofing Files <span
                                                                     class="required-star">*</span></strong>
                                                             <button type="button"
                                                                 class="btn btn-sm btn-outline-primary rounded-pill fw-bold js-add-photo-input">
-                                                                + Add More Image
+                                                                + Add More File
                                                             </button>
                                                         </div>
                                                         <div class="js-photo-input-list">
                                                             <div class="photo-input-row">
                                                                 <input type="file" name="tracking_photos[]"
                                                                     class="form-control js-tracking-photos"
-                                                                    accept="image/jpeg,image/png,image/webp,image/gif"
+                                                                    accept="image/jpeg,image/png,image/webp,image/gif,application/pdf"
                                                                     data-required-on-completed="1">
                                                                 <button type="button"
                                                                     class="btn btn-outline-danger photo-input-remove js-remove-photo-input"
@@ -4614,9 +4682,10 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                             </div>
                                                         </div>
                                                         <div class="photo-help-text">
-                                                            Photo upload is required only when this stage is marked
+                                                            Proof/design file upload is required only when this stage is
+                                                            marked
                                                             Completed. Pending / In Progress / Delayed updates do not
-                                                            require photos. Allowed: JPG, PNG, WEBP, GIF.
+                                                            require files. Allowed: JPG, PNG, WEBP, GIF, PDF.
                                                         </div>
                                                     </div>
                                                 </div>
@@ -4632,7 +4701,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                                 value="1" id="manualApproval<?= (int)$step['id'] ?>">
                                                             <label class="form-check-label fw-bold"
                                                                 for="manualApproval<?= (int)$step['id'] ?>">
-                                                                Customer has NOT approved online, but confirmed by call / direct confirmation
+                                                                Customer has NOT approved online, but confirmed by call
+                                                                / direct confirmation
                                                                 <span class="required-star">*</span>
                                                             </label>
                                                         </div>
@@ -4646,8 +4716,10 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                     </div>
                                                     <?php else: ?>
                                                     <div class="approval-box">
-                                                        Customer approval is pending. An authorised Admin / Sales / Designing user
-                                                        must receive direct customer confirmation before completing this stage.
+                                                        Customer approval is pending. An authorised Admin / Sales /
+                                                        Designing user
+                                                        must receive direct customer confirmation before completing this
+                                                        stage.
                                                     </div>
                                                     <?php endif; ?>
                                                 </div>
@@ -4821,7 +4893,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                 const row = document.createElement('div');
                 row.className = 'photo-input-row';
                 row.innerHTML =
-                    '<input type="file" name="tracking_photos[]" class="form-control js-tracking-photos" accept="image/jpeg,image/png,image/webp,image/gif"><button type="button" class="btn btn-outline-danger photo-input-remove js-remove-photo-input" title="Remove image">×</button>';
+                    '<input type="file" name="tracking_photos[]" class="form-control js-tracking-photos" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf"><button type="button" class="btn btn-outline-danger photo-input-remove js-remove-photo-input" title="Remove file">×</button>';
                 list.appendChild(row);
                 refreshDelayFields(form);
             });

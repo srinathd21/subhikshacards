@@ -336,7 +336,7 @@ if ($token === '') {
                     $conn->commit();
 
                     $message = $status === 'approved'
-                        ? 'Thank you. Photos approved successfully. The Proofing Approval / Design Approval stage has been completed automatically.'
+                        ? 'Thank you. Proof/design approved successfully. The Proofing Approval / Design Approval stage has been completed automatically.'
                         : 'Your rejection has been submitted. The approval stage remains open for staff action / corrected proof.';
                     $messageType = $status === 'approved' ? 'success' : 'danger';
                 }
@@ -381,95 +381,342 @@ $canRespond = $approval && $status === 'pending';
 ?>
 <!doctype html>
 <html lang="en">
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Design Photo Approval - Subhiksha Cards</title>
+    <title>Design / Proofing Approval - Subhiksha Cards</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body{background:#f8fafc;color:#0f172a;font-family:Arial,sans-serif}
-        .page{max-width:1080px;margin:0 auto;padding:22px}
-        .hero{background:#fff;border:1px solid #e2e8f0;border-radius:24px;padding:22px;box-shadow:0 18px 45px rgba(15,23,42,.08)}
-        .title{font-size:26px;font-weight:900;margin:0}.muted{color:#64748b;font-weight:700}
-        .info{border:1px solid #e2e8f0;border-radius:16px;padding:13px;background:#fff;height:100%}.info small{display:block;font-size:11px;text-transform:uppercase;font-weight:900;color:#64748b;margin-bottom:5px}.info strong,.info span{font-weight:900;word-break:break-word}
-        .status{border-radius:999px;padding:7px 13px;font-size:12px;font-weight:900;text-transform:uppercase}.status.pending{background:#fef3c7;color:#92400e}.status.approved{background:#dcfce7;color:#166534}.status.rejected{background:#fee2e2;color:#991b1b}.status.expired{background:#e5e7eb;color:#374151}
-        .photo-card{background:#fff;border:1px solid #e2e8f0;border-radius:18px;padding:10px}.photo-card img{width:100%;height:260px;object-fit:contain;background:#f1f5f9;border-radius:14px}.photo-card a{font-weight:900;text-decoration:none}
-        .action-box{background:#fff;border:1px solid #e2e8f0;border-radius:22px;padding:18px;box-shadow:0 14px 35px rgba(15,23,42,.07)}
-        @media(max-width:767px){.page{padding:12px}.hero{padding:16px;border-radius:18px}.title{font-size:22px}.photo-card img{height:210px}}
+    body {
+        background: #f8fafc;
+        color: #0f172a;
+        font-family: Arial, sans-serif
+    }
+
+    .page {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 22px
+    }
+
+    .hero {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 24px;
+        padding: 22px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, .08)
+    }
+
+    .title {
+        font-size: 26px;
+        font-weight: 900;
+        margin: 0
+    }
+
+    .muted {
+        color: #64748b;
+        font-weight: 700
+    }
+
+    .info {
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        padding: 13px;
+        background: #fff;
+        height: 100%
+    }
+
+    .info small {
+        display: block;
+        font-size: 11px;
+        text-transform: uppercase;
+        font-weight: 900;
+        color: #64748b;
+        margin-bottom: 5px
+    }
+
+    .info strong,
+    .info span {
+        font-weight: 900;
+        word-break: break-word
+    }
+
+    .status {
+        border-radius: 999px;
+        padding: 7px 13px;
+        font-size: 12px;
+        font-weight: 900;
+        text-transform: uppercase
+    }
+
+    .status.pending {
+        background: #fef3c7;
+        color: #92400e
+    }
+
+    .status.approved {
+        background: #dcfce7;
+        color: #166534
+    }
+
+    .status.rejected {
+        background: #fee2e2;
+        color: #991b1b
+    }
+
+    .status.expired {
+        background: #e5e7eb;
+        color: #374151
+    }
+
+    .photo-card {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
+        padding: 10px
+    }
+
+    .photo-card img {
+        width: 100%;
+        height: 260px;
+        object-fit: contain;
+        background: #f1f5f9;
+        border-radius: 14px
+    }
+
+    .photo-card a {
+        font-weight: 900;
+        text-decoration: none
+    }
+
+    .pdf-card {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
+        padding: 12px
+    }
+
+    .pdf-preview {
+        width: 100%;
+        height: 650px;
+        border: 1px solid #cbd5e1;
+        border-radius: 14px;
+        background: #f8fafc
+    }
+
+    .pdf-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 10px
+    }
+
+    .pdf-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 10px 16px;
+        border-radius: 999px;
+        text-decoration: none;
+        font-weight: 900
+    }
+
+    .pdf-btn-open {
+        background: #dc2626;
+        color: #fff
+    }
+
+    .pdf-btn-download {
+        background: #f1f5f9;
+        color: #0f172a;
+        border: 1px solid #cbd5e1
+    }
+
+    .file-name {
+        margin-top: 8px;
+        font-size: 12px;
+        color: #64748b;
+        font-weight: 800;
+        overflow-wrap: anywhere
+    }
+
+    .action-box {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 22px;
+        padding: 18px;
+        box-shadow: 0 14px 35px rgba(15, 23, 42, .07)
+    }
+
+    @media(max-width:767px) {
+        .page {
+            padding: 12px
+        }
+
+        .hero {
+            padding: 16px;
+            border-radius: 18px
+        }
+
+        .title {
+            font-size: 22px
+        }
+
+        .photo-card img {
+            height: 210px
+        }
+
+        .pdf-preview {
+            height: 460px
+        }
+    }
     </style>
 </head>
+
 <body>
-<div class="page">
-    <div class="hero mb-3">
-        <div class="d-flex flex-column flex-md-row justify-content-between gap-3 align-items-md-start">
-            <div>
-                <h1 class="title">Design / Proofing Photo Approval</h1>
-                <div class="muted">Please review the uploaded photos. Approval will update the related Proofing Approval / Design Approval stage in the job card.</div>
+    <div class="page">
+        <div class="hero mb-3">
+            <div class="d-flex flex-column flex-md-row justify-content-between gap-3 align-items-md-start">
+                <div>
+                    <h1 class="title">Design / Proofing Approval</h1>
+                    <div class="muted">Please review the uploaded proof/design file before approving. Approval will
+                        update the related Proofing Approval / Design Approval stage in the job card.</div>
+                </div>
+                <?php if ($approval): ?>
+                <span class="status <?= e(cpa_status_badge($status)) ?>"><?= e(ucwords($status)) ?></span>
+                <?php endif; ?>
             </div>
-            <?php if ($approval): ?>
-            <span class="status <?= e(cpa_status_badge($status)) ?>"><?= e(ucwords($status)) ?></span>
-            <?php endif; ?>
         </div>
-    </div>
 
-    <?php if ($message !== ''): ?>
-    <div class="alert alert-<?= e($messageType === 'success' ? 'success' : ($messageType === 'warning' ? 'warning' : 'danger')) ?> rounded-4 fw-bold">
-        <?= e($message) ?>
-    </div>
-    <?php endif; ?>
+        <?php if ($message !== ''): ?>
+        <div
+            class="alert alert-<?= e($messageType === 'success' ? 'success' : ($messageType === 'warning' ? 'warning' : 'danger')) ?> rounded-4 fw-bold">
+            <?= e($message) ?>
+        </div>
+        <?php endif; ?>
 
-    <?php if ($approval): ?>
-    <div class="row g-3 mb-3">
-        <div class="col-md-3"><div class="info"><small>Job Card No</small><strong><?= e($approval['job_card_no'] ?? '-') ?></strong></div></div>
-        <div class="col-md-3"><div class="info"><small>Customer</small><strong><?= e($approval['customer_name'] ?? '-') ?></strong></div></div>
-        <div class="col-md-3"><div class="info"><small>Mobile</small><strong><?= e($approval['mobile'] ?? '-') ?></strong></div></div>
-        <div class="col-md-3"><div class="info"><small>Delivery Date</small><strong><?= e(cpa_date($approval['delivery_date'] ?? null)) ?></strong></div></div>
-        <div class="col-md-4"><div class="info"><small>Stage</small><strong><?= e($approval['step_name'] ?? '-') ?></strong></div></div>
-        <div class="col-md-4"><div class="info"><small>Product</small><strong><?= e($approval['product_name'] ?? '-') ?></strong></div></div>
-        <div class="col-md-4"><div class="info"><small>Final Amount</small><strong><?= e(cpa_money($approval['final_amount'] ?? 0)) ?></strong></div></div>
-        <div class="col-md-6"><div class="info"><small>Uploaded / Link Created</small><strong><?= e(cpa_datetime($approval['created_at'] ?? null)) ?></strong></div></div>
-        <div class="col-md-6"><div class="info"><small>Responded At</small><strong><?= e(cpa_datetime($approval['responded_at'] ?? null)) ?></strong></div></div>
-    </div>
-
-    <div class="hero mb-3">
-        <h2 class="h5 fw-black fw-bold mb-3">Uploaded Photos</h2>
-        <?php if (!$photos): ?>
-        <div class="alert alert-warning rounded-4 fw-bold mb-0">No photos found for this approval link.</div>
-        <?php else: ?>
-        <div class="row g-3">
-            <?php foreach ($photos as $photo): ?>
-            <div class="col-md-4 col-sm-6">
-                <div class="photo-card">
-                    <a href="<?= e($photo['file_path'] ?? '#') ?>" target="_blank" rel="noopener">
-                        <img src="<?= e($photo['file_path'] ?? '') ?>" alt="Design photo">
-                        <span class="d-block mt-2">Open Image</span>
-                    </a>
+        <?php if ($approval): ?>
+        <div class="row g-3 mb-3">
+            <div class="col-md-3">
+                <div class="info"><small>Job Card No</small><strong><?= e($approval['job_card_no'] ?? '-') ?></strong>
                 </div>
             </div>
-            <?php endforeach; ?>
+            <div class="col-md-3">
+                <div class="info"><small>Customer</small><strong><?= e($approval['customer_name'] ?? '-') ?></strong>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="info"><small>Mobile</small><strong><?= e($approval['mobile'] ?? '-') ?></strong></div>
+            </div>
+            <div class="col-md-3">
+                <div class="info"><small>Delivery
+                        Date</small><strong><?= e(cpa_date($approval['delivery_date'] ?? null)) ?></strong></div>
+            </div>
+            <div class="col-md-4">
+                <div class="info"><small>Stage</small><strong><?= e($approval['step_name'] ?? '-') ?></strong></div>
+            </div>
+            <div class="col-md-4">
+                <div class="info"><small>Product</small><strong><?= e($approval['product_name'] ?? '-') ?></strong>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="info"><small>Final
+                        Amount</small><strong><?= e(cpa_money($approval['final_amount'] ?? 0)) ?></strong></div>
+            </div>
+            <div class="col-md-6">
+                <div class="info"><small>Uploaded / Link
+                        Created</small><strong><?= e(cpa_datetime($approval['created_at'] ?? null)) ?></strong></div>
+            </div>
+            <div class="col-md-6">
+                <div class="info"><small>Responded
+                        At</small><strong><?= e(cpa_datetime($approval['responded_at'] ?? null)) ?></strong></div>
+            </div>
+        </div>
+
+        <div class="hero mb-3">
+            <h2 class="h5 fw-black fw-bold mb-3">Uploaded Proof / Design Files</h2>
+            <?php if (!$photos): ?>
+            <div class="alert alert-warning rounded-4 fw-bold mb-0">No proof/design files found for this approval link.
+            </div>
+            <?php else: ?>
+            <div class="row g-3">
+                <?php foreach ($photos as $photo): ?>
+                <?php
+                $filePath = trim((string)($photo['file_path'] ?? ''));
+                $fileMime = strtolower(trim((string)($photo['mime_type'] ?? '')));
+                $fileName = trim((string)($photo['original_name'] ?? ''));
+
+                if ($fileName === '') {
+                    $fileName = basename(parse_url($filePath, PHP_URL_PATH) ?: $filePath);
+                }
+
+                $fileExt = strtolower(pathinfo($fileName !== '' ? $fileName : $filePath, PATHINFO_EXTENSION));
+                $isPdf = $fileMime === 'application/pdf' || $fileExt === 'pdf';
+            ?>
+
+                <?php if ($isPdf): ?>
+                <div class="col-12">
+                    <div class="pdf-card">
+                        <iframe src="<?= e($filePath) ?>" class="pdf-preview" title="Proofing PDF"></iframe>
+
+                        <div class="pdf-actions">
+                            <a href="<?= e($filePath) ?>" target="_blank" rel="noopener" class="pdf-btn pdf-btn-open">
+                                Open PDF
+                            </a>
+
+                            <a href="<?= e($filePath) ?>" download class="pdf-btn pdf-btn-download">
+                                Download PDF
+                            </a>
+                        </div>
+
+                        <?php if ($fileName !== ''): ?>
+                        <div class="file-name"><?= e($fileName) ?></div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <?php else: ?>
+                <div class="col-md-4 col-sm-6">
+                    <div class="photo-card">
+                        <a href="<?= e($filePath ?: '#') ?>" target="_blank" rel="noopener">
+                            <img src="<?= e($filePath) ?>" alt="Design / Proofing image">
+                            <span class="d-block mt-2">Open Image</span>
+                        </a>
+
+                        <?php if ($fileName !== ''): ?>
+                        <div class="file-name"><?= e($fileName) ?></div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <?php endif; ?>
+                <?php endforeach; ?>
+            </div>
+            <?php endif; ?>
+        </div>
+
+        <div class="action-box">
+            <?php if ($canRespond): ?>
+            <form method="post">
+                <input type="hidden" name="token" value="<?= e($token) ?>">
+                <label class="form-label fw-bold">Remarks</label>
+                <textarea name="customer_remarks" class="form-control rounded-4 mb-3" rows="3"
+                    placeholder="Enter remarks if any"></textarea>
+                <div class="d-flex flex-column flex-sm-row gap-2 justify-content-end">
+                    <button type="submit" name="action" value="reject"
+                        class="btn btn-outline-danger rounded-pill px-4 fw-bold">Reject</button>
+                    <button type="submit" name="action" value="approve"
+                        class="btn btn-success rounded-pill px-4 fw-bold">Approve</button>
+                </div>
+            </form>
+            <?php else: ?>
+            <div class="fw-bold">This approval request is already <?= e(ucwords($status)) ?>.</div>
+            <?php if (!empty($approval['customer_remarks'])): ?>
+            <div class="mt-2 muted">Remarks: <?= e($approval['customer_remarks']) ?></div>
+            <?php endif; ?>
+            <?php endif; ?>
         </div>
         <?php endif; ?>
     </div>
-
-    <div class="action-box">
-        <?php if ($canRespond): ?>
-        <form method="post">
-            <input type="hidden" name="token" value="<?= e($token) ?>">
-            <label class="form-label fw-bold">Remarks</label>
-            <textarea name="customer_remarks" class="form-control rounded-4 mb-3" rows="3" placeholder="Enter remarks if any"></textarea>
-            <div class="d-flex flex-column flex-sm-row gap-2 justify-content-end">
-                <button type="submit" name="action" value="reject" class="btn btn-outline-danger rounded-pill px-4 fw-bold">Reject</button>
-                <button type="submit" name="action" value="approve" class="btn btn-success rounded-pill px-4 fw-bold">Approve</button>
-            </div>
-        </form>
-        <?php else: ?>
-        <div class="fw-bold">This approval request is already <?= e(ucwords($status)) ?>.</div>
-        <?php if (!empty($approval['customer_remarks'])): ?>
-        <div class="mt-2 muted">Remarks: <?= e($approval['customer_remarks']) ?></div>
-        <?php endif; ?>
-        <?php endif; ?>
-    </div>
-    <?php endif; ?>
-</div>
 </body>
+
 </html>
