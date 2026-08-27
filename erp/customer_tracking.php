@@ -493,6 +493,26 @@ if ($openStepIndex === -1) {
 
 $progressPercent = $totalSteps > 0 ? round(($completedSteps / $totalSteps) * 100) : 0;
 $progressPercent = max(0, min(100, $progressPercent));
+
+/*
+ * Customer-facing timeline runs from BOTTOM to TOP:
+ * first workflow stage (Enquiry) is shown at the bottom,
+ * latest/final stage is shown at the top.
+ *
+ * IMPORTANT: $steps remains in normal workflow order for all calculations.
+ */
+$displaySteps = array_reverse($steps);
+$displayOpenStepIndex = -1;
+
+if ($totalSteps > 0) {
+    if ($openStepIndex >= 0) {
+        $displayOpenStepIndex = ($totalSteps - 1) - $openStepIndex;
+    } else {
+        // Fully completed workflow: current/final visible stage is at the top.
+        $displayOpenStepIndex = 0;
+    }
+}
+
 $currentStage = $steps ? ctCurrentStatusText($steps) : '-';
 $publicStatus = $job ? ctPublicStatusLabel($job, $steps) : '';
 $paymentSnapshot = $job ? ctPaymentSnapshot($conn, $job) : ['label' => '-', 'balance_amount' => 0, 'paid_amount' => 0, 'is_paid' => false];
@@ -935,10 +955,13 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
     }
 
     .timeline-route-fill {
+        position: absolute;
+        left: 0;
+        bottom: 0;
         width: 100%;
         height: 0;
         border-radius: inherit;
-        background: linear-gradient(180deg,
+        background: linear-gradient(0deg,
                 var(--green) 0%,
                 var(--green) 72%,
                 var(--brand-orange) 100%);
@@ -1719,7 +1742,7 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
             </div>
         </section>
 
-        <section class="timeline" id="trackingTimeline" data-current-index="<?= (int)$openStepIndex ?>">
+        <section class="timeline" id="trackingTimeline" data-current-index="<?= (int)$displayOpenStepIndex ?>">
             <?php if (!$steps): ?>
 
             <div class="message">No tracking stages found for this job card.</div>
@@ -1759,10 +1782,10 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
                 </div>
             </div>
 
-            <?php foreach ($steps as $index => $step): ?>
+            <?php foreach ($displaySteps as $index => $step): ?>
             <?php
                 $status = strtolower((string)($step['status'] ?? 'pending'));
-                $isOpen = $index === $openStepIndex;
+                $isOpen = $index === $displayOpenStepIndex;
                 $isDispatchPaymentPending = ctDispatchPaymentPending($step, $paymentSnapshot);
 
                 $displayStatus = ($isOpen && $status === 'pending')
@@ -1780,7 +1803,9 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
                     in_array($class, ['live', 'delay', 'payment'], true)
                     || $isOpen;
 
-                $icon = $isDone ? '✓' : (string)($index + 1);
+                // Display is reversed, but workflow numbering stays 1..N from bottom to top.
+                $workflowNumber = max(1, $totalSteps - $index);
+                $icon = $isDone ? '✓' : (string)$workflowNumber;
 
                 $statusText = $isDispatchPaymentPending
                     ? 'Payment Pending'
@@ -2044,10 +2069,16 @@ $displayJobNo = $jobCardNo !== '' ? $jobCardNo : ($job['job_card_no'] ?? '');
                 currentNodeCenter - Math.round(planeHeight / 2)
             );
 
+            /*
+             * Timeline is displayed bottom -> top.
+             * Fill the route from the bottom (Enquiry) up to the current stage.
+             */
             const routeTop = 33;
+            const routeBottom = Math.max(routeTop, timeline.offsetHeight - 36);
+            const routeHeight = Math.max(0, routeBottom - routeTop);
             const fillHeight = Math.max(
                 0,
-                currentNodeCenter - routeTop
+                Math.min(routeHeight, routeBottom - currentNodeCenter)
             );
 
             routeFill.style.height = fillHeight + 'px';
