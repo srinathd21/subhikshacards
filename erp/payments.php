@@ -1,18 +1,4 @@
 <?php
-/**
- * payments.php
- * Subhiksha Cards ERP - Unified Payments page.
- *
- * One list only:
- * - Paid Proforma bills
- * - Unpaid / Partially Paid Proforma bills
- * - Paid Quick Sales
- * - Cancelled payment entries (when Cancelled filter is selected)
- *
- * No separate Pending Payments section.
- * Pagination and all summary values work on the currently selected filters.
- */
-
 require_once __DIR__ . '/includes/auth.php';
 require_permission($conn, 'can_view', 'proforma_bills.php');
 
@@ -81,9 +67,47 @@ function payEnsureCancelColumns(mysqli $conn): void
     }
 }
 
+function payIndianNumber($value, int $decimals = 2): string
+{
+    $number = (float)$value;
+    $negative = $number < 0;
+    $number = abs($number);
+
+    $fixed = number_format($number, $decimals, '.', '');
+    $parts = explode('.', $fixed, 2);
+
+    $integer = $parts[0];
+    $decimal = $parts[1] ?? '';
+
+    if (strlen($integer) > 3) {
+        $lastThree = substr($integer, -3);
+        $remaining = substr($integer, 0, -3);
+        $groups = [];
+
+        while (strlen($remaining) > 2) {
+            array_unshift($groups, substr($remaining, -2));
+            $remaining = substr($remaining, 0, -2);
+        }
+
+        if ($remaining !== '') {
+            array_unshift($groups, $remaining);
+        }
+
+        $integer = implode(',', $groups) . ',' . $lastThree;
+    }
+
+    $formatted = $integer;
+
+    if ($decimals > 0) {
+        $formatted .= '.' . str_pad($decimal, $decimals, '0');
+    }
+
+    return ($negative ? '-' : '') . $formatted;
+}
+
 function payMoney($value): string
 {
-    return '₹' . number_format((float)$value, 2);
+    return '₹' . payIndianNumber($value, 2);
 }
 
 function payDate($value): string

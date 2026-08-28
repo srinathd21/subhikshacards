@@ -95,22 +95,81 @@ function dash_sum(mysqli $conn, string $table, string $column, string $where = '
     return (float)dash_scalar($conn, "SELECT COALESCE(SUM(`{$column}`),0) FROM `{$table}` WHERE {$where}", 0);
 }
 
+function dash_indian_number($value, int $decimals = 2): string
+{
+    $number = (float)$value;
+    $negative = $number < 0;
+    $number = abs($number);
+
+    $fixed = number_format($number, $decimals, '.', '');
+    $parts = explode('.', $fixed, 2);
+    $integer = $parts[0];
+    $decimal = $parts[1] ?? '';
+
+    if (strlen($integer) > 3) {
+        $lastThree = substr($integer, -3);
+        $remaining = substr($integer, 0, -3);
+        $groups = [];
+
+        while (strlen($remaining) > 2) {
+            array_unshift($groups, substr($remaining, -2));
+            $remaining = substr($remaining, 0, -2);
+        }
+
+        if ($remaining !== '') {
+            array_unshift($groups, $remaining);
+        }
+
+        $integer = implode(',', $groups) . ',' . $lastThree;
+    }
+
+    $formatted = $integer;
+
+    if ($decimals > 0) {
+        $formatted .= '.' . str_pad($decimal, $decimals, '0');
+    }
+
+    return ($negative ? '-' : '') . $formatted;
+}
+
 function dash_money($amount): string
 {
-    return '₹' . number_format((float)$amount, 2);
+    return '₹' . dash_indian_number($amount, 2);
 }
 
 function dash_short_money($amount): string
 {
     $amount = (float)$amount;
-    if (abs($amount) >= 10000000) return '₹' . number_format($amount / 10000000, 2) . ' Cr';
-    if (abs($amount) >= 100000) return '₹' . number_format($amount / 100000, 2) . ' L';
+    if (abs($amount) >= 10000000) return '₹' . dash_indian_number($amount / 10000000, 2) . ' Cr';
+    if (abs($amount) >= 100000) return '₹' . dash_indian_number($amount / 100000, 2) . ' L';
     return dash_money($amount);
 }
 
 function dash_date($value): string
 {
     return !empty($value) ? date('d-m-Y', strtotime((string)$value)) : '-';
+}
+
+function dash_datetime_ist($value): string
+{
+    if (empty($value)) {
+        return '-';
+    }
+
+    try {
+        $utc = new DateTimeZone('UTC');
+        $ist = new DateTimeZone('Asia/Kolkata');
+
+        $dt = DateTime::createFromFormat('Y-m-d H:i:s', (string)$value, $utc);
+        if (!$dt) {
+            $dt = new DateTime((string)$value, $utc);
+        }
+
+        $dt->setTimezone($ist);
+        return $dt->format('d-m-Y h:i A');
+    } catch (Throwable $e) {
+        return (string)$value;
+    }
 }
 
 function dash_user_role(mysqli $conn): array
@@ -1894,113 +1953,130 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
     }
     </style>
 
-<style>
-/* Customer approved - continue Job Card reminder popup */
-.customer-approval-reminder-modal .modal-dialog {
-    max-width: 780px;
-}
-.customer-approval-reminder-modal .modal-content {
-    border: 0;
-    border-radius: 22px;
-    overflow: hidden;
-    box-shadow: 0 28px 80px rgba(15, 23, 42, .20);
-}
-.customer-approval-reminder-modal .modal-header {
-    padding: 18px 20px;
-    border-bottom: 1px solid var(--border-soft);
-    background: color-mix(in srgb, #22c55e 8%, var(--card-bg));
-}
-.customer-approval-reminder-head-icon {
-    width: 42px;
-    height: 42px;
-    border-radius: 14px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex: 0 0 42px;
-    color: #15803d;
-    background: #dcfce7;
-}
-.customer-approval-reminder-head-icon svg {
-    width: 20px;
-    height: 20px;
-}
-.customer-approval-reminder-list {
-    max-height: min(62vh, 540px);
-    overflow-y: auto;
-    padding: 12px;
-    background: color-mix(in srgb, var(--body-bg) 54%, var(--card-bg));
-}
-.customer-approval-reminder-item {
-    border: 1px solid #bbf7d0;
-    border-radius: 16px;
-    padding: 13px 14px;
-    margin-bottom: 9px;
-    background: color-mix(in srgb, #dcfce7 18%, var(--card-bg));
-}
-.customer-approval-reminder-item:last-child {
-    margin-bottom: 0;
-}
-.customer-approval-reminder-name {
-    font-size: 13px;
-    font-weight: 800;
-    color: var(--text-main);
-}
-.customer-approval-reminder-meta {
-    margin-top: 2px;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-muted);
-}
-.customer-approval-reminder-status {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    border-radius: 999px;
-    padding: 4px 8px;
-    font-size: 10px;
-    font-weight: 800;
-    white-space: nowrap;
-    color: #166534;
-    background: #dcfce7;
-    border: 1px solid #86efac;
-}
-.customer-approval-reminder-next {
-    margin-top: 9px;
-    padding: 9px 11px;
-    border-radius: 11px;
-    border: 1px solid #bfdbfe;
-    background: color-mix(in srgb, #dbeafe 40%, var(--card-bg));
-    font-size: 11px;
-    color: var(--text-main);
-}
-.customer-approval-reminder-next strong {
-    color: #1d4ed8;
-}
-.customer-approval-reminder-remark {
-    margin-top: 8px;
-    padding: 8px 10px;
-    border-radius: 10px;
-    font-size: 11px;
-    color: var(--text-main);
-    background: color-mix(in srgb, var(--body-bg) 72%, var(--card-bg));
-}
-.customer-approval-reminder-modal .modal-footer {
-    padding: 13px 18px;
-    border-top: 1px solid var(--border-soft);
-}
-@media (max-width: 767.98px) {
+    <style>
+    /* Customer approved - continue Job Card reminder popup */
     .customer-approval-reminder-modal .modal-dialog {
-        margin: .75rem;
+        max-width: 780px;
     }
+
+    .customer-approval-reminder-modal .modal-content {
+        border: 0;
+        border-radius: 22px;
+        overflow: hidden;
+        box-shadow: 0 28px 80px rgba(15, 23, 42, .20);
+    }
+
     .customer-approval-reminder-modal .modal-header {
-        padding: 15px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--border-soft);
+        background: color-mix(in srgb, #22c55e 8%, var(--card-bg));
     }
+
+    .customer-approval-reminder-head-icon {
+        width: 42px;
+        height: 42px;
+        border-radius: 14px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 42px;
+        color: #15803d;
+        background: #dcfce7;
+    }
+
+    .customer-approval-reminder-head-icon svg {
+        width: 20px;
+        height: 20px;
+    }
+
     .customer-approval-reminder-list {
-        padding: 9px;
+        max-height: min(62vh, 540px);
+        overflow-y: auto;
+        padding: 12px;
+        background: color-mix(in srgb, var(--body-bg) 54%, var(--card-bg));
     }
-}
-</style>
+
+    .customer-approval-reminder-item {
+        border: 1px solid #bbf7d0;
+        border-radius: 16px;
+        padding: 13px 14px;
+        margin-bottom: 9px;
+        background: color-mix(in srgb, #dcfce7 18%, var(--card-bg));
+    }
+
+    .customer-approval-reminder-item:last-child {
+        margin-bottom: 0;
+    }
+
+    .customer-approval-reminder-name {
+        font-size: 13px;
+        font-weight: 800;
+        color: var(--text-main);
+    }
+
+    .customer-approval-reminder-meta {
+        margin-top: 2px;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-muted);
+    }
+
+    .customer-approval-reminder-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        border-radius: 999px;
+        padding: 4px 8px;
+        font-size: 10px;
+        font-weight: 800;
+        white-space: nowrap;
+        color: #166534;
+        background: #dcfce7;
+        border: 1px solid #86efac;
+    }
+
+    .customer-approval-reminder-next {
+        margin-top: 9px;
+        padding: 9px 11px;
+        border-radius: 11px;
+        border: 1px solid #bfdbfe;
+        background: color-mix(in srgb, #dbeafe 40%, var(--card-bg));
+        font-size: 11px;
+        color: var(--text-main);
+    }
+
+    .customer-approval-reminder-next strong {
+        color: #1d4ed8;
+    }
+
+    .customer-approval-reminder-remark {
+        margin-top: 8px;
+        padding: 8px 10px;
+        border-radius: 10px;
+        font-size: 11px;
+        color: var(--text-main);
+        background: color-mix(in srgb, var(--body-bg) 72%, var(--card-bg));
+    }
+
+    .customer-approval-reminder-modal .modal-footer {
+        padding: 13px 18px;
+        border-top: 1px solid var(--border-soft);
+    }
+
+    @media (max-width: 767.98px) {
+        .customer-approval-reminder-modal .modal-dialog {
+            margin: .75rem;
+        }
+
+        .customer-approval-reminder-modal .modal-header {
+            padding: 15px;
+        }
+
+        .customer-approval-reminder-list {
+            padding: 9px;
+        }
+    }
+    </style>
 </head>
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -2350,7 +2426,7 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                 </div>
 
                                 <div class="customer-approval-reminder-meta">
-                                    Approved: <?= e(!empty($approvedAt) ? date('d-m-Y h:i A', strtotime((string)$approvedAt)) : '-') ?>
+                                    Approved: <?= e(dash_datetime_ist($approvedAt)) ?>
                                 </div>
                             </div>
 
@@ -2398,8 +2474,7 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                     </small>
 
                     <?php if ($customerApprovalQueueCanView): ?>
-                    <a href="customer_approvals.php"
-                        class="btn btn-outline-success rounded-pill fw-bold px-4">
+                    <a href="customer_approvals.php" class="btn btn-outline-success rounded-pill fw-bold px-4">
                         Approval History
                     </a>
                     <?php endif; ?>
@@ -2659,10 +2734,11 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                         window.bootstrap &&
                         bootstrap.Modal
                     ) {
-                        const approvalModal = bootstrap.Modal.getOrCreateInstance(approvalReminderModalEl, {
-                            backdrop: true,
-                            keyboard: true
-                        });
+                        const approvalModal = bootstrap.Modal.getOrCreateInstance(
+                            approvalReminderModalEl, {
+                                backdrop: true,
+                                keyboard: true
+                            });
 
                         if (autoShowReminder && reminderModalEl) {
                             approvalReminderModalEl.addEventListener('hidden.bs.modal', function() {

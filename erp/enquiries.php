@@ -9,6 +9,33 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+/*
+|--------------------------------------------------------------------------
+| Enquiry Timezone Policy
+|--------------------------------------------------------------------------
+| Database timestamps are stored in UTC.
+| All ERP/system times shown to users are Asia/Kolkata (IST).
+*/
+if (!defined('ENQ_SYSTEM_TIMEZONE')) {
+    define('ENQ_SYSTEM_TIMEZONE', 'Asia/Kolkata');
+}
+
+if (!defined('ENQ_DATABASE_TIMEZONE')) {
+    define('ENQ_DATABASE_TIMEZONE', 'UTC');
+}
+
+/* Date-only/current-day operations on this page use ERP local time. */
+date_default_timezone_set(ENQ_SYSTEM_TIMEZONE);
+
+/*
+ * Keep timestamp defaults/writes from this page in UTC.
+ */
+try {
+    $conn->query("SET time_zone = '+00:00'");
+} catch (Throwable $e) {
+    // Explicit UTC_TIMESTAMP()/UTC helpers below still keep writes consistent.
+}
+
 if (!function_exists('e')) {
     function e($value): string
     {
@@ -199,7 +226,7 @@ function enqFunctionTypeId(mysqli $conn, string $value): int
             INSERT INTO function_types
                 (function_name, function_key, field_group, is_active, sort_order, created_at)
             VALUES
-                (?, ?, ?, 1, ?, NOW())
+                (?, ?, ?, 1, ?, UTC_TIMESTAMP())
         ");
         $stmt->bind_param('sssi', $functionName, $functionKey, $fieldGroup, $sortOrder);
         $stmt->execute();
@@ -239,7 +266,7 @@ function enqCustomerId(mysqli $conn, string $customerName, string $mobile, strin
                 SET customer_name = ?,
                     address = IF(? = '', address, ?),
                     updated_by = ?,
-                    updated_at = NOW()
+                    updated_at = UTC_TIMESTAMP()
                 WHERE id = ?
             ");
             $stmt->bind_param('sssii', $customerName, $address, $address, $userId, $customerId);
@@ -255,7 +282,7 @@ function enqCustomerId(mysqli $conn, string $customerName, string $mobile, strin
             INSERT INTO customers
                 (customer_name, mobile, address, is_active, created_by, created_at)
             VALUES
-                (?, ?, ?, 1, ?, NOW())
+                (?, ?, ?, 1, ?, UTC_TIMESTAMP())
         ");
         $stmt->bind_param('sssi', $customerName, $mobile, $address, $createdBy);
         $stmt->execute();
@@ -300,7 +327,7 @@ function enqLog(mysqli $conn, string $actionKey, int $recordId, string $descript
             INSERT INTO activity_logs
                 (user_id, role_id, action_type_id, action_key, module_name, table_name, record_id, description, ip_address, user_agent, created_at)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())
         ");
         $stmt->bind_param(
             'iiisssisss',
@@ -500,7 +527,7 @@ function enqWhatsappLogManual(mysqli $conn, int $id): array
             'message' => 'Manual WhatsApp Web/App opened by user.'
         ]);
         $sentBy = (int)($_SESSION['user_id'] ?? 0);
-        $sentAt = date('Y-m-d H:i:s');
+        $sentAt = enqUtcNow();
 
         $stmt = $conn->prepare("
             INSERT INTO whatsapp_logs
@@ -519,7 +546,7 @@ function enqWhatsappLogManual(mysqli $conn, int $id): array
                     created_at
                 )
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())
         ");
 
         $stmt->bind_param(
@@ -787,7 +814,68 @@ function enqDate($value): string
 
 function enqDateTime($value): string
 {
-    return !empty($value) ? date('d-m-Y h:i A', strtotime($value)) : '-';
+    if (empty($value)) {
+        return '-';
+    }
+
+    try {
+        $dbTz = new DateTimeZone(ENQ_DATABASE_TIMEZONE);
+        $systemTz = new DateTimeZone(ENQ_SYSTEM_TIMEZONE);
+
+        $dt = DateTime::createFromFormat(
+            'Y-m-d H:i:s',
+            trim((string)$value),
+            $dbTz
+        );
+
+        if (!$dt) {
+            $dt = new DateTime((string)$value, $dbTz);
+        }
+
+        $dt->setTimezone($systemTz);
+
+        return $dt->format('d-m-Y h:i A');
+    } catch (Throwable $e) {
+        return (string)$value;
+    }
+}
+
+function enqDateTimeInput($value): string
+{
+    if (empty($value)) {
+        return '';
+    }
+
+    try {
+        $dbTz = new DateTimeZone(ENQ_DATABASE_TIMEZONE);
+        $systemTz = new DateTimeZone(ENQ_SYSTEM_TIMEZONE);
+
+        $dt = DateTime::createFromFormat(
+            'Y-m-d H:i:s',
+            trim((string)$value),
+            $dbTz
+        );
+
+        if (!$dt) {
+            $dt = new DateTime((string)$value, $dbTz);
+        }
+
+        $dt->setTimezone($systemTz);
+
+        return $dt->format('Y-m-d\\TH:i');
+    } catch (Throwable $e) {
+        return '';
+    }
+}
+
+function enqUtcNow(): string
+{
+    try {
+        return (new DateTime('now', new DateTimeZone(ENQ_DATABASE_TIMEZONE)))
+            ->format('Y-m-d H:i:s');
+    } catch (Throwable $e) {
+        return gmdate('Y-m-d H:i:s');
+    }
 }
 
 $defaultStatusId = $statuses[0]['id'] ?? '';
@@ -1271,6 +1359,57 @@ if ($autoOpenWhatsappId > 0) {
         color: #fff !important;
     }
 
+    .pagination-wrap {
+        border-top: 1px solid var(--border-soft);
+        padding-top: 14px;
+    }
+
+    #enquiryPagination .page-link {
+        border-radius: 10px;
+        margin: 2px;
+        min-width: 34px;
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 800;
+        color: var(--text-main);
+        background: var(--card-bg);
+        border-color: var(--border-soft);
+        box-shadow: none;
+    }
+
+    #enquiryPagination .page-item.active .page-link {
+        background: var(--brand-1);
+        border-color: var(--brand-1);
+        color: #fff;
+    }
+
+    #enquiryPagination .page-item.disabled .page-link {
+        opacity: .45;
+        pointer-events: none;
+    }
+
+    #enquiryPerPage {
+        border-radius: 10px;
+        font-weight: 800;
+    }
+
+    @media(max-width:767.98px) {
+        #enquiryPaginationWrap {
+            align-items: stretch !important;
+            text-align: center;
+        }
+
+        #enquiryPaginationWrap>div {
+            justify-content: center;
+        }
+
+        #enquiryPagination {
+            justify-content: center !important;
+        }
+    }
+
     @media(max-width:767.98px) {
 
         .mobile-card-actions .btn-action-icon,
@@ -1296,379 +1435,379 @@ if ($autoOpenWhatsappId > 0) {
     }
     </style>
 
-<style>
-/* ========================================================================
+    <style>
+    /* ========================================================================
    Compact module UI - tuned for comfortable use at 100% browser zoom.
    UI sizing only: no PHP, SQL, workflow, filters, pagination or API logic.
    ======================================================================== */
-#main .page-section {
-    font-size: 12.5px;
-}
+    #main .page-section {
+        font-size: 12.5px;
+    }
 
-#main .page-section .page-head {
-    padding: 16px 18px !important;
-    margin-bottom: 12px !important;
-    border-radius: 16px !important;
-}
-
-#main .page-section .page-head h1 {
-    font-size: 22px !important;
-    font-weight: 800 !important;
-    line-height: 1.15 !important;
-    letter-spacing: -.15px !important;
-    margin-bottom: 3px !important;
-}
-
-#main .page-section .page-head p,
-#main .page-section .page-head .text-muted-custom {
-    font-size: 11.5px !important;
-    font-weight: 500 !important;
-    line-height: 1.35 !important;
-}
-
-#main .page-section .module-card {
-    padding: 14px 15px !important;
-    border-radius: 16px !important;
-    margin-bottom: 12px !important;
-}
-
-#main .page-section .module-title {
-    font-size: 15px !important;
-    font-weight: 800 !important;
-    line-height: 1.2 !important;
-}
-
-#main .page-section .stat-card,
-#main .page-section .kpi-card {
-    min-height: 86px !important;
-    padding: 12px 13px !important;
-    border-radius: 14px !important;
-    gap: 10px !important;
-}
-
-#main .page-section .stat-icon {
-    width: 40px !important;
-    height: 40px !important;
-    min-width: 40px !important;
-    border-radius: 12px !important;
-}
-
-#main .page-section .stat-icon svg,
-#main .page-section .stat-icon i {
-    width: 19px !important;
-    height: 19px !important;
-}
-
-#main .page-section .stat-card span,
-#main .page-section .stat-card small,
-#main .page-section .kpi-card small {
-    font-size: 10px !important;
-    font-weight: 700 !important;
-    letter-spacing: .2px !important;
-}
-
-#main .page-section .stat-card strong,
-#main .page-section .kpi-card strong {
-    font-size: 18px !important;
-    font-weight: 800 !important;
-    line-height: 1.15 !important;
-}
-
-#main .page-section .filter-card {
-    padding: 12px !important;
-    border-radius: 14px !important;
-}
-
-#main .page-section .form-label,
-#main .page-section label.fw-bold {
-    font-size: 11px !important;
-    font-weight: 700 !important;
-    margin-bottom: 4px !important;
-}
-
-#main .page-section .form-control,
-#main .page-section .form-select,
-#main .page-section .select2-container--bootstrap-5 .select2-selection {
-    min-height: 38px !important;
-    font-size: 12px !important;
-    border-radius: 10px !important;
-}
-
-#main .page-section .form-control,
-#main .page-section .form-select {
-    padding-top: .38rem !important;
-    padding-bottom: .38rem !important;
-}
-
-#main .page-section textarea.form-control {
-    min-height: 68px !important;
-}
-
-#main .page-section .btn:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
-    font-size: 11.5px !important;
-    font-weight: 700 !important;
-    line-height: 1.2 !important;
-}
-
-#main .page-section .btn.rounded-pill:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
-    padding-top: 6px !important;
-    padding-bottom: 6px !important;
-}
-
-#main .page-section .table-ui,
-#main .page-section table {
-    font-size: 11.5px !important;
-}
-
-#main .page-section .table-ui th,
-#main .page-section table th {
-    font-size: 10px !important;
-    font-weight: 700 !important;
-    padding: 8px 9px !important;
-    line-height: 1.25 !important;
-}
-
-#main .page-section .table-ui td,
-#main .page-section table td {
-    font-size: 11.5px !important;
-    font-weight: 500 !important;
-    padding: 8px 9px !important;
-    line-height: 1.3 !important;
-}
-
-#main .page-section table td strong,
-#main .page-section .customer-name,
-#main .page-section .job-no,
-#main .page-section .mobile-card-title,
-#main .page-section .product-names,
-#main .page-section .amount-text,
-#main .page-section .balance-text,
-#main .page-section .paid-amount,
-#main .page-section .balance-amount {
-    font-weight: 700 !important;
-}
-
-#main .page-section .status-pill,
-#main .page-section .stock-pill,
-#main .page-section .badge-pill,
-#main .page-section .order-badge,
-#main .page-section .filter-tab {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-    padding: 4px 7px !important;
-}
-
-#main .page-section .mobile-card,
-#main .page-section .mobile-products .card-ui {
-    padding: 12px !important;
-    border-radius: 14px !important;
-    margin-bottom: 9px !important;
-}
-
-#main .page-section .mobile-card-title {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .mobile-card-subtitle,
-#main .page-section .muted-small,
-#main .page-section .small-muted,
-#main .page-section .meta {
-    font-size: 10.5px !important;
-    font-weight: 500 !important;
-    line-height: 1.35 !important;
-}
-
-#main .page-section .view-info-card,
-#main .page-section .amount-box,
-#main .page-section .profile-box,
-#main .page-section .summary-item,
-#main .page-section .hist-row {
-    border-radius: 13px !important;
-    padding: 11px !important;
-}
-
-#main .page-section .view-info-card small,
-#main .page-section .amount-box small,
-#main .page-section .summary-item small,
-#main .page-section .section-label {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .view-info-card span,
-#main .page-section .view-info-card strong,
-#main .page-section .amount-box strong,
-#main .page-section .summary-item strong {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .pagination-wrap,
-#main .page-section nav[aria-label*="Pagination" i] {
-    font-size: 11px !important;
-}
-
-#main .page-section .pagination .page-link,
-#main .page-section .product-pagination .page-link-ui {
-    min-width: 32px !important;
-    min-height: 32px !important;
-    padding: 5px 8px !important;
-    font-size: 10.5px !important;
-    font-weight: 700 !important;
-}
-
-/* Customer Management compact sizing */
-#main .customer-page .stats-grid {
-    gap: 10px !important;
-    margin-bottom: 12px !important;
-}
-
-#main .customer-page .stat-box {
-    padding: 11px 12px !important;
-    border-radius: 14px !important;
-}
-
-#main .customer-page .stat-box small {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .customer-page .stat-box strong {
-    font-size: 18px !important;
-    font-weight: 800 !important;
-    margin-top: 2px !important;
-}
-
-#main .customer-page .workspace {
-    gap: 12px !important;
-}
-
-#main .customer-page .pane {
-    border-radius: 16px !important;
-}
-
-#main .customer-page .pane-head,
-#main .customer-page .pane-body {
-    padding: 13px 14px !important;
-}
-
-#main .customer-page .customer-name,
-#main .customer-page .profile-name {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .customer-page .profile-grid,
-#main .customer-page .summary-grid {
-    gap: 9px !important;
-}
-
-#main .customer-page .tabs {
-    margin: 12px 0 9px !important;
-    gap: 5px !important;
-}
-
-#main .customer-page .tabs button {
-    padding: 5px 9px !important;
-    font-size: 10px !important;
-    font-weight: 700 !important;
-}
-
-/* Product master images and rows */
-#main .module-page .product-thumb,
-#main .module-page .placeholder-thumb {
-    width: 42px !important;
-    height: 42px !important;
-}
-
-/* Job Card shortcut controls */
-#main .module-page .shortcut-action-box {
-    padding: 10px !important;
-    border-radius: 13px !important;
-}
-
-#main .module-page .shortcut-btn {
-    min-height: 34px !important;
-    font-size: 10.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .module-page .shortcut-note,
-#main .module-page .shortcut-help-bar {
-    font-size: 10.5px !important;
-    font-weight: 500 !important;
-}
-
-/* Keep icon-only actions compact */
-#main .page-section .btn-action-icon,
-#main .page-section .btn-delete-icon,
-#main .page-section .btn-whatsapp-icon,
-#main .customer-page .actions .btn {
-    width: 32px !important;
-    height: 32px !important;
-    min-width: 32px !important;
-    max-width: 32px !important;
-    padding: 0 !important;
-}
-
-#main .page-section .btn-action-icon svg,
-#main .page-section .btn-delete-icon svg,
-#main .page-section .btn-whatsapp-icon svg,
-#main .customer-page .actions .btn svg {
-    width: 14px !important;
-    height: 14px !important;
-}
-
-/* Reduce heavy utility weight only inside module content */
-#main .page-section .fw-bold,
-#main .page-section strong {
-    font-weight: 700 !important;
-}
-
-/* Compact modal typography without changing modal workflow */
-#main ~ .modal .modal-title,
-.modal .modal-title {
-    font-size: 15px !important;
-    font-weight: 800 !important;
-}
-
-.modal .modal-header,
-.modal .modal-footer {
-    padding-top: 11px !important;
-    padding-bottom: 11px !important;
-}
-
-.modal .modal-body {
-    font-size: 12px !important;
-}
-
-@media (max-width: 767.98px) {
     #main .page-section .page-head {
-        padding: 14px !important;
+        padding: 16px 18px !important;
+        margin-bottom: 12px !important;
+        border-radius: 16px !important;
     }
 
     #main .page-section .page-head h1 {
-        font-size: 20px !important;
+        font-size: 22px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+        letter-spacing: -.15px !important;
+        margin-bottom: 3px !important;
+    }
+
+    #main .page-section .page-head p,
+    #main .page-section .page-head .text-muted-custom {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
     }
 
     #main .page-section .module-card {
-        padding: 12px !important;
+        padding: 14px 15px !important;
+        border-radius: 16px !important;
+        margin-bottom: 12px !important;
+    }
+
+    #main .page-section .module-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+        line-height: 1.2 !important;
     }
 
     #main .page-section .stat-card,
     #main .page-section .kpi-card {
-        min-height: 76px !important;
-        padding: 10px 11px !important;
+        min-height: 86px !important;
+        padding: 12px 13px !important;
+        border-radius: 14px !important;
+        gap: 10px !important;
     }
 
     #main .page-section .stat-icon {
-        width: 36px !important;
-        height: 36px !important;
-        min-width: 36px !important;
+        width: 40px !important;
+        height: 40px !important;
+        min-width: 40px !important;
+        border-radius: 12px !important;
     }
-}
-</style>
+
+    #main .page-section .stat-icon svg,
+    #main .page-section .stat-icon i {
+        width: 19px !important;
+        height: 19px !important;
+    }
+
+    #main .page-section .stat-card span,
+    #main .page-section .stat-card small,
+    #main .page-section .kpi-card small {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        letter-spacing: .2px !important;
+    }
+
+    #main .page-section .stat-card strong,
+    #main .page-section .kpi-card strong {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+    }
+
+    #main .page-section .filter-card {
+        padding: 12px !important;
+        border-radius: 14px !important;
+    }
+
+    #main .page-section .form-label,
+    #main .page-section label.fw-bold {
+        font-size: 11px !important;
+        font-weight: 700 !important;
+        margin-bottom: 4px !important;
+    }
+
+    #main .page-section .form-control,
+    #main .page-section .form-select,
+    #main .page-section .select2-container--bootstrap-5 .select2-selection {
+        min-height: 38px !important;
+        font-size: 12px !important;
+        border-radius: 10px !important;
+    }
+
+    #main .page-section .form-control,
+    #main .page-section .form-select {
+        padding-top: .38rem !important;
+        padding-bottom: .38rem !important;
+    }
+
+    #main .page-section textarea.form-control {
+        min-height: 68px !important;
+    }
+
+    #main .page-section .btn:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
+        font-size: 11.5px !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+    }
+
+    #main .page-section .btn.rounded-pill:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
+        padding-top: 6px !important;
+        padding-bottom: 6px !important;
+    }
+
+    #main .page-section .table-ui,
+    #main .page-section table {
+        font-size: 11.5px !important;
+    }
+
+    #main .page-section .table-ui th,
+    #main .page-section table th {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        padding: 8px 9px !important;
+        line-height: 1.25 !important;
+    }
+
+    #main .page-section .table-ui td,
+    #main .page-section table td {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        padding: 8px 9px !important;
+        line-height: 1.3 !important;
+    }
+
+    #main .page-section table td strong,
+    #main .page-section .customer-name,
+    #main .page-section .job-no,
+    #main .page-section .mobile-card-title,
+    #main .page-section .product-names,
+    #main .page-section .amount-text,
+    #main .page-section .balance-text,
+    #main .page-section .paid-amount,
+    #main .page-section .balance-amount {
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .status-pill,
+    #main .page-section .stock-pill,
+    #main .page-section .badge-pill,
+    #main .page-section .order-badge,
+    #main .page-section .filter-tab {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+        padding: 4px 7px !important;
+    }
+
+    #main .page-section .mobile-card,
+    #main .page-section .mobile-products .card-ui {
+        padding: 12px !important;
+        border-radius: 14px !important;
+        margin-bottom: 9px !important;
+    }
+
+    #main .page-section .mobile-card-title {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .mobile-card-subtitle,
+    #main .page-section .muted-small,
+    #main .page-section .small-muted,
+    #main .page-section .meta {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
+    }
+
+    #main .page-section .view-info-card,
+    #main .page-section .amount-box,
+    #main .page-section .profile-box,
+    #main .page-section .summary-item,
+    #main .page-section .hist-row {
+        border-radius: 13px !important;
+        padding: 11px !important;
+    }
+
+    #main .page-section .view-info-card small,
+    #main .page-section .amount-box small,
+    #main .page-section .summary-item small,
+    #main .page-section .section-label {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .view-info-card span,
+    #main .page-section .view-info-card strong,
+    #main .page-section .amount-box strong,
+    #main .page-section .summary-item strong {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .pagination-wrap,
+    #main .page-section nav[aria-label*="Pagination"i] {
+        font-size: 11px !important;
+    }
+
+    #main .page-section .pagination .page-link,
+    #main .page-section .product-pagination .page-link-ui {
+        min-width: 32px !important;
+        min-height: 32px !important;
+        padding: 5px 8px !important;
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Customer Management compact sizing */
+    #main .customer-page .stats-grid {
+        gap: 10px !important;
+        margin-bottom: 12px !important;
+    }
+
+    #main .customer-page .stat-box {
+        padding: 11px 12px !important;
+        border-radius: 14px !important;
+    }
+
+    #main .customer-page .stat-box small {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .customer-page .stat-box strong {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        margin-top: 2px !important;
+    }
+
+    #main .customer-page .workspace {
+        gap: 12px !important;
+    }
+
+    #main .customer-page .pane {
+        border-radius: 16px !important;
+    }
+
+    #main .customer-page .pane-head,
+    #main .customer-page .pane-body {
+        padding: 13px 14px !important;
+    }
+
+    #main .customer-page .customer-name,
+    #main .customer-page .profile-name {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .customer-page .profile-grid,
+    #main .customer-page .summary-grid {
+        gap: 9px !important;
+    }
+
+    #main .customer-page .tabs {
+        margin: 12px 0 9px !important;
+        gap: 5px !important;
+    }
+
+    #main .customer-page .tabs button {
+        padding: 5px 9px !important;
+        font-size: 10px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Product master images and rows */
+    #main .module-page .product-thumb,
+    #main .module-page .placeholder-thumb {
+        width: 42px !important;
+        height: 42px !important;
+    }
+
+    /* Job Card shortcut controls */
+    #main .module-page .shortcut-action-box {
+        padding: 10px !important;
+        border-radius: 13px !important;
+    }
+
+    #main .module-page .shortcut-btn {
+        min-height: 34px !important;
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .module-page .shortcut-note,
+    #main .module-page .shortcut-help-bar {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+    }
+
+    /* Keep icon-only actions compact */
+    #main .page-section .btn-action-icon,
+    #main .page-section .btn-delete-icon,
+    #main .page-section .btn-whatsapp-icon,
+    #main .customer-page .actions .btn {
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        max-width: 32px !important;
+        padding: 0 !important;
+    }
+
+    #main .page-section .btn-action-icon svg,
+    #main .page-section .btn-delete-icon svg,
+    #main .page-section .btn-whatsapp-icon svg,
+    #main .customer-page .actions .btn svg {
+        width: 14px !important;
+        height: 14px !important;
+    }
+
+    /* Reduce heavy utility weight only inside module content */
+    #main .page-section .fw-bold,
+    #main .page-section strong {
+        font-weight: 700 !important;
+    }
+
+    /* Compact modal typography without changing modal workflow */
+    #main~.modal .modal-title,
+    .modal .modal-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+    }
+
+    .modal .modal-header,
+    .modal .modal-footer {
+        padding-top: 11px !important;
+        padding-bottom: 11px !important;
+    }
+
+    .modal .modal-body {
+        font-size: 12px !important;
+    }
+
+    @media (max-width: 767.98px) {
+        #main .page-section .page-head {
+            padding: 14px !important;
+        }
+
+        #main .page-section .page-head h1 {
+            font-size: 20px !important;
+        }
+
+        #main .page-section .module-card {
+            padding: 12px !important;
+        }
+
+        #main .page-section .stat-card,
+        #main .page-section .kpi-card {
+            min-height: 76px !important;
+            padding: 10px 11px !important;
+        }
+
+        #main .page-section .stat-icon {
+            width: 36px !important;
+            height: 36px !important;
+            min-width: 36px !important;
+        }
+    }
+    </style>
 
 </head>
 
@@ -1781,16 +1920,24 @@ if ($autoOpenWhatsappId > 0) {
 
                             <tbody>
                                 <?php if (!$rows): ?>
-                                <tr>
+                                <tr id="enquiryEmptyRow">
                                     <td colspan="7" class="text-center text-muted-custom py-4">
                                         No enquiries found.
                                     </td>
                                 </tr>
                                 <?php endif; ?>
 
+                                <?php if ($rows): ?>
+                                <tr id="enquirySearchEmptyRow" style="display:none">
+                                    <td colspan="7" class="text-center text-muted-custom py-4">
+                                        No enquiries found for the current search.
+                                    </td>
+                                </tr>
+                                <?php endif; ?>
+
                                 <?php foreach ($rows as $row): ?>
                                 <?php $closed = in_array(strtolower((string)($row['status_key'] ?? '')), ['cancelled', 'closed'], true); ?>
-                                <tr>
+                                <tr class="js-enquiry-row">
                                     <td><strong><?= e($row['enquiry_no']) ?></strong></td>
                                     <td>
                                         <?= e($row['customer_name']) ?>
@@ -1835,7 +1982,7 @@ if ($autoOpenWhatsappId > 0) {
                                             data-enquiry-source="<?= e($row['enquiry_source']) ?>"
                                             data-enquiry-status-id="<?= e($row['enquiry_status_id']) ?>"
                                             data-assigned-sales-user-id="<?= e($row['assigned_sales_user_id']) ?>"
-                                            data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
+                                            data-next-callback-at="<?= e(enqDateTimeInput($row['next_callback_at'] ?? null)) ?>"
                                             data-remarks="<?= e($row['remarks']) ?>"><i
                                                 data-lucide="pencil"></i></button>
                                         <?php endif; ?>
@@ -1866,12 +2013,21 @@ if ($autoOpenWhatsappId > 0) {
 
                     <div class="mobile-cards" id="mobileCards">
                         <?php if (!$rows): ?>
-                        <div class="mobile-card text-center text-muted-custom">No enquiries found.</div>
+                        <div class="mobile-card text-center text-muted-custom" id="enquiryMobileEmpty">
+                            No enquiries found.
+                        </div>
+                        <?php endif; ?>
+
+                        <?php if ($rows): ?>
+                        <div class="mobile-card text-center text-muted-custom" id="enquiryMobileSearchEmpty"
+                            style="display:none">
+                            No enquiries found for the current search.
+                        </div>
                         <?php endif; ?>
 
                         <?php foreach ($rows as $row): ?>
                         <?php $closed = in_array(strtolower((string)($row['status_key'] ?? '')), ['cancelled', 'closed'], true); ?>
-                        <div class="mobile-card">
+                        <div class="mobile-card js-enquiry-card">
                             <div class="d-flex justify-content-between gap-2">
                                 <div>
                                     <div class="mobile-card-title"><?= e($row['customer_name']) ?></div>
@@ -1916,7 +2072,7 @@ if ($autoOpenWhatsappId > 0) {
                                     data-enquiry-source="<?= e($row['enquiry_source']) ?>"
                                     data-enquiry-status-id="<?= e($row['enquiry_status_id']) ?>"
                                     data-assigned-sales-user-id="<?= e($row['assigned_sales_user_id']) ?>"
-                                    data-next-callback-at="<?= !empty($row['next_callback_at']) ? e(date('Y-m-d\TH:i', strtotime($row['next_callback_at']))) : '' ?>"
+                                    data-next-callback-at="<?= e(enqDateTimeInput($row['next_callback_at'] ?? null)) ?>"
                                     data-remarks="<?= e($row['remarks']) ?>"><i data-lucide="pencil"></i></button>
                                 <?php endif; ?>
 
@@ -1937,6 +2093,29 @@ if ($autoOpenWhatsappId > 0) {
                         </div>
                         <?php endforeach; ?>
                     </div>
+
+                    <?php if ($rows): ?>
+                    <div class="pagination-wrap d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mt-3"
+                        id="enquiryPaginationWrap">
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <span class="text-muted-custom fw-bold" id="enquiryPaginationInfo">Showing 0-0 of 0</span>
+
+                            <label for="enquiryPerPage" class="text-muted-custom fw-bold mb-0">Rows:</label>
+                            <select id="enquiryPerPage" class="form-select form-select-sm"
+                                style="width:auto;min-width:76px">
+                                <option value="10" selected>10</option>
+                                <option value="25">25</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                            </select>
+                        </div>
+
+                        <nav aria-label="Enquiries Pagination">
+                            <ul class="pagination pagination-sm mb-0 flex-wrap justify-content-center"
+                                id="enquiryPagination"></ul>
+                        </nav>
+                    </div>
+                    <?php endif; ?>
                 </div>
             </section>
         </main>
@@ -2531,6 +2710,39 @@ if ($autoOpenWhatsappId > 0) {
             const form = this;
             const formData = new FormData(form);
 
+            /*
+             * The datetime-local field represents Asia/Kolkata system time.
+             * Convert it to UTC before sending it to the API so the database
+             * remains UTC while the UI remains IST.
+             */
+            const callbackLocal = String(formData.get('next_callback_at') || '').trim();
+
+            if (callbackLocal !== '') {
+                const match = callbackLocal.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+
+                if (match) {
+                    const utcMillis = Date.UTC(
+                        Number(match[1]),
+                        Number(match[2]) - 1,
+                        Number(match[3]),
+                        Number(match[4]),
+                        Number(match[5])
+                    ) - (330 * 60 * 1000);
+
+                    const utcDate = new Date(utcMillis);
+                    const pad = value => String(value).padStart(2, '0');
+
+                    const callbackUtc =
+                        utcDate.getUTCFullYear() + '-' +
+                        pad(utcDate.getUTCMonth() + 1) + '-' +
+                        pad(utcDate.getUTCDate()) + 'T' +
+                        pad(utcDate.getUTCHours()) + ':' +
+                        pad(utcDate.getUTCMinutes());
+
+                    formData.set('next_callback_at', callbackUtc);
+                }
+            }
+
             fetch('api/enquiries.php', {
                     method: 'POST',
                     body: formData,
@@ -2597,17 +2809,170 @@ if ($autoOpenWhatsappId > 0) {
         });
 
 
-        document.getElementById('tableSearch')?.addEventListener('input', function() {
-            const value = this.value.toLowerCase().trim();
+        /*
+         * Enquiries list pagination
+         * - Same page number for desktop rows and mobile cards.
+         * - Search works across all loaded enquiries, then pagination is applied.
+         * - Default 10 records per page.
+         */
+        (function initEnquiryPagination() {
+            const searchInput = document.getElementById('tableSearch');
+            const perPageSelect = document.getElementById('enquiryPerPage');
+            const pagination = document.getElementById('enquiryPagination');
+            const paginationInfo = document.getElementById('enquiryPaginationInfo');
+            const paginationWrap = document.getElementById('enquiryPaginationWrap');
+            const desktopRows = Array.from(document.querySelectorAll('#dataTable tbody .js-enquiry-row'));
+            const mobileCards = Array.from(document.querySelectorAll('#mobileCards .js-enquiry-card'));
+            const desktopSearchEmpty = document.getElementById('enquirySearchEmptyRow');
+            const mobileSearchEmpty = document.getElementById('enquiryMobileSearchEmpty');
 
-            document.querySelectorAll('#dataTable tbody tr').forEach(function(row) {
-                row.style.display = row.textContent.toLowerCase().includes(value) ? '' : 'none';
+            if (!desktopRows.length || !pagination || !perPageSelect) {
+                return;
+            }
+
+            let currentPage = 1;
+            let pageSize = parseInt(perPageSelect.value || '10', 10);
+
+            function searchableText(index) {
+                const desktopText = desktopRows[index]?.textContent || '';
+                const mobileText = mobileCards[index]?.textContent || '';
+                return (desktopText + ' ' + mobileText).toLowerCase();
+            }
+
+            function matchedIndexes() {
+                const term = String(searchInput?.value || '').toLowerCase().trim();
+                const matches = [];
+
+                desktopRows.forEach(function(row, index) {
+                    if (term === '' || searchableText(index).includes(term)) {
+                        matches.push(index);
+                    }
+                });
+
+                return matches;
+            }
+
+            function addPageButton(label, page, disabled, active, ariaLabel) {
+                const li = document.createElement('li');
+                li.className = 'page-item' +
+                    (disabled ? ' disabled' : '') +
+                    (active ? ' active' : '');
+
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'page-link';
+                button.textContent = label;
+                button.setAttribute('aria-label', ariaLabel || String(label));
+
+                if (active) {
+                    button.setAttribute('aria-current', 'page');
+                }
+
+                if (!disabled) {
+                    button.addEventListener('click', function() {
+                        currentPage = page;
+                        render();
+                    });
+                }
+
+                li.appendChild(button);
+                pagination.appendChild(li);
+            }
+
+            function renderPagination(totalPages) {
+                pagination.innerHTML = '';
+
+                addPageButton('‹', Math.max(1, currentPage - 1), currentPage <= 1, false, 'Previous page');
+
+                let startPage = Math.max(1, currentPage - 2);
+                let endPage = Math.min(totalPages, startPage + 4);
+                startPage = Math.max(1, endPage - 4);
+
+                if (startPage > 1) {
+                    addPageButton('1', 1, false, currentPage === 1, 'Page 1');
+
+                    if (startPage > 2) {
+                        addPageButton('…', currentPage, true, false, 'More pages');
+                    }
+                }
+
+                for (let page = startPage; page <= endPage; page++) {
+                    addPageButton(String(page), page, false, page === currentPage, 'Page ' + page);
+                }
+
+                if (endPage < totalPages) {
+                    if (endPage < totalPages - 1) {
+                        addPageButton('…', currentPage, true, false, 'More pages');
+                    }
+
+                    addPageButton(
+                        String(totalPages),
+                        totalPages,
+                        false,
+                        currentPage === totalPages,
+                        'Page ' + totalPages
+                    );
+                }
+
+                addPageButton('›', Math.min(totalPages, currentPage + 1), currentPage >= totalPages, false,
+                    'Next page');
+            }
+
+            function render() {
+                const matches = matchedIndexes();
+                const total = matches.length;
+                const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+                if (currentPage > totalPages) {
+                    currentPage = totalPages;
+                }
+
+                const start = total === 0 ? 0 : (currentPage - 1) * pageSize;
+                const end = Math.min(start + pageSize, total);
+                const visible = new Set(matches.slice(start, end));
+
+                desktopRows.forEach(function(row, index) {
+                    row.style.display = visible.has(index) ? '' : 'none';
+                });
+
+                mobileCards.forEach(function(card, index) {
+                    card.style.display = visible.has(index) ? '' : 'none';
+                });
+
+                if (desktopSearchEmpty) {
+                    desktopSearchEmpty.style.display = total === 0 ? '' : 'none';
+                }
+
+                if (mobileSearchEmpty) {
+                    mobileSearchEmpty.style.display = total === 0 ? '' : 'none';
+                }
+
+                if (paginationInfo) {
+                    paginationInfo.textContent = total === 0 ?
+                        'Showing 0 of 0' :
+                        'Showing ' + (start + 1) + '-' + end + ' of ' + total;
+                }
+
+                if (paginationWrap) {
+                    paginationWrap.style.display = total === 0 ? 'none' : '';
+                }
+
+                renderPagination(totalPages);
+            }
+
+            searchInput?.addEventListener('input', function() {
+                currentPage = 1;
+                render();
             });
 
-            document.querySelectorAll('#mobileCards .mobile-card').forEach(function(card) {
-                card.style.display = card.textContent.toLowerCase().includes(value) ? '' : 'none';
+            perPageSelect.addEventListener('change', function() {
+                pageSize = parseInt(this.value || '10', 10);
+                currentPage = 1;
+                render();
             });
-        });
+
+            render();
+        })();
 
         initSelect2AutoType(document);
 

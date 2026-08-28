@@ -9,6 +9,22 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+/*
+|--------------------------------------------------------------------------
+| Customer Approval Timezone Policy
+|--------------------------------------------------------------------------
+| Database DATETIME timestamps are stored in UTC.
+| All approval times shown in this page/modal are displayed in
+| Asia/Kolkata (IST).
+*/
+if (!defined('CA_DATABASE_TIMEZONE')) {
+    define('CA_DATABASE_TIMEZONE', 'UTC');
+}
+
+if (!defined('CA_SYSTEM_TIMEZONE')) {
+    define('CA_SYSTEM_TIMEZONE', 'Asia/Kolkata');
+}
+
 if (!function_exists('e')) {
     function e($value): string
     {
@@ -54,7 +70,30 @@ function caDate($value): string
 
 function caDateTime($value): string
 {
-    return !empty($value) ? date('d-m-Y h:i A', strtotime((string)$value)) : '-';
+    if (empty($value)) {
+        return '-';
+    }
+
+    try {
+        $dbTz = new DateTimeZone(CA_DATABASE_TIMEZONE);
+        $systemTz = new DateTimeZone(CA_SYSTEM_TIMEZONE);
+
+        $dt = DateTime::createFromFormat(
+            'Y-m-d H:i:s',
+            trim((string)$value),
+            $dbTz
+        );
+
+        if (!$dt) {
+            $dt = new DateTime((string)$value, $dbTz);
+        }
+
+        $dt->setTimezone($systemTz);
+
+        return $dt->format('d-m-Y h:i A');
+    } catch (Throwable $e) {
+        return (string)$value;
+    }
 }
 
 function caMoney($value): string
@@ -566,6 +605,57 @@ $pageTitle = 'Customer Approvals';
     .modal-header,
     .modal-footer {
         border-color: var(--border-soft)
+    }
+
+    .pagination-wrap {
+        border-top: 1px solid var(--border-soft);
+        padding-top: 14px;
+    }
+
+    #approvalPagination .page-link {
+        border-radius: 10px;
+        margin: 2px;
+        min-width: 34px;
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 800;
+        color: var(--text-main);
+        background: var(--card-bg);
+        border-color: var(--border-soft);
+        box-shadow: none;
+    }
+
+    #approvalPagination .page-item.active .page-link {
+        background: var(--brand-1);
+        border-color: var(--brand-1);
+        color: #fff;
+    }
+
+    #approvalPagination .page-item.disabled .page-link {
+        opacity: .45;
+        pointer-events: none;
+    }
+
+    #approvalPerPage {
+        border-radius: 10px;
+        font-weight: 800;
+    }
+
+    @media(max-width:767.98px) {
+        #approvalPaginationWrap {
+            align-items: stretch !important;
+            text-align: center;
+        }
+
+        #approvalPaginationWrap>div {
+            justify-content: center;
+        }
+
+        #approvalPagination {
+            justify-content: center !important;
+        }
     }
 
     @media(max-width:767.98px) {
@@ -1108,8 +1198,16 @@ $pageTitle = 'Customer Approvals';
                             </thead>
                             <tbody>
                                 <?php if (!$rows): ?>
-                                <tr>
+                                <tr id="approvalEmptyRow">
                                     <td colspan="8" class="text-center text-muted-custom py-4">No approvals found.</td>
+                                </tr>
+                                <?php endif; ?>
+
+                                <?php if ($rows): ?>
+                                <tr id="approvalSearchEmptyRow" style="display:none">
+                                    <td colspan="8" class="text-center text-muted-custom py-4">
+                                        No approvals found for the current search.
+                                    </td>
                                 </tr>
                                 <?php endif; ?>
                                 <?php foreach ($rows as $row): ?>
@@ -1119,7 +1217,7 @@ $pageTitle = 'Customer Approvals';
                                 $approvalType = (string)($row['computed_approval_type'] ?? 'confirmation');
                                 $statusClass = caStatusClass($status);
                             ?>
-                                <tr>
+                                <tr class="js-approval-row">
                                     <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong><small
                                             class="d-block text-muted-custom">#<?= e($row['job_card_id'] ?? '-') ?></small>
                                     </td>
@@ -1161,8 +1259,18 @@ $pageTitle = 'Customer Approvals';
                     </div>
 
                     <div class="mobile-cards" id="mobileCards">
-                        <?php if (!$rows): ?><div class="mobile-card text-center text-muted-custom">No approvals found.
-                        </div><?php endif; ?>
+                        <?php if (!$rows): ?>
+                        <div class="mobile-card text-center text-muted-custom" id="approvalMobileEmpty">
+                            No approvals found.
+                        </div>
+                        <?php endif; ?>
+
+                        <?php if ($rows): ?>
+                        <div class="mobile-card text-center text-muted-custom" id="approvalMobileSearchEmpty"
+                            style="display:none">
+                            No approvals found for the current search.
+                        </div>
+                        <?php endif; ?>
                         <?php foreach ($rows as $row): ?>
                         <?php
                         $bucket = (string)($row['computed_bucket'] ?? 'waiting');
@@ -1170,7 +1278,7 @@ $pageTitle = 'Customer Approvals';
                         $approvalType = (string)($row['computed_approval_type'] ?? 'confirmation');
                         $statusClass = caStatusClass($status);
                     ?>
-                        <div class="mobile-card">
+                        <div class="mobile-card js-approval-card">
                             <div class="d-flex justify-content-between gap-2">
                                 <div>
                                     <div class="mobile-card-title"><?= e($row['job_card_no'] ?? '-') ?></div>
@@ -1201,6 +1309,31 @@ $pageTitle = 'Customer Approvals';
                         </div>
                         <?php endforeach; ?>
                     </div>
+
+                    <?php if (count($rows) > 15): ?>
+                    <div class="pagination-wrap d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mt-3"
+                        id="approvalPaginationWrap">
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <span class="text-muted-custom fw-bold" id="approvalPaginationInfo">
+                                Showing 1-15 of <?= count($rows) ?>
+                            </span>
+
+                            <label for="approvalPerPage" class="text-muted-custom fw-bold mb-0">Rows:</label>
+                            <select id="approvalPerPage" class="form-select form-select-sm"
+                                style="width:auto;min-width:78px">
+                                <option value="15" selected>15</option>
+                                <option value="25">25</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                            </select>
+                        </div>
+
+                        <nav aria-label="Customer Approval Pagination">
+                            <ul class="pagination pagination-sm mb-0 flex-wrap justify-content-center"
+                                id="approvalPagination"></ul>
+                        </nav>
+                    </div>
+                    <?php endif; ?>
                 </div>
             </section>
         </main>
@@ -1360,14 +1493,53 @@ $pageTitle = 'Customer Approvals';
 
         function fmtDate(value, withTime) {
             if (!value || value === '-') return '-';
-            const d = new Date(String(value).replace(' ', 'T'));
+
+            const raw = String(value).trim();
+
+            /*
+             * DATE-only values such as delivery/planned date must not be shifted
+             * by timezone conversion.
+             */
+            if (!withTime && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+                const parts = raw.split('-');
+                return parts[2] + '-' + parts[1] + '-' + parts[0];
+            }
+
+            /*
+             * MySQL DATETIME values do not include timezone information.
+             * Stored timestamps are UTC, so append Z explicitly before parsing.
+             */
+            let iso = raw.replace(' ', 'T');
+
+            if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(iso)) {
+                iso += 'Z';
+            } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(iso)) {
+                iso += ':00Z';
+            }
+
+            const d = new Date(iso);
             if (isNaN(d.getTime())) return value;
-            const date = d.toLocaleDateString('en-GB').replace(/\//g, '-');
+
+            const dateParts = new Intl.DateTimeFormat('en-GB', {
+                timeZone: 'Asia/Kolkata',
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric'
+            }).formatToParts(d);
+
+            const part = type => dateParts.find(p => p.type === type)?.value || '';
+            const date = part('day') + '-' + part('month') + '-' + part('year');
+
             if (!withTime) return date;
-            return date + ' ' + d.toLocaleTimeString('en-IN', {
+
+            const time = new Intl.DateTimeFormat('en-IN', {
+                timeZone: 'Asia/Kolkata',
                 hour: '2-digit',
-                minute: '2-digit'
-            });
+                minute: '2-digit',
+                hour12: true
+            }).format(d);
+
+            return date + ' ' + time;
         }
 
         document.querySelectorAll('.js-view-record').forEach(function(btn) {
@@ -1403,7 +1575,7 @@ $pageTitle = 'Customer Approvals';
                 setText('m_planned_completion_date', fmtDate(btn.dataset.plannedCompletionDate ||
                     '', false));
                 setText('m_actual_completed_at', fmtDate(btn.dataset.actualCompletedAt || '',
-                true));
+                    true));
                 setText('m_ip_address', btn.dataset.ipAddress || '-');
                 setText('m_user_agent', btn.dataset.userAgent || '-');
                 const link = document.getElementById('modalJobLink');
@@ -1412,15 +1584,222 @@ $pageTitle = 'Customer Approvals';
             });
         });
 
-        document.getElementById('tableSearch')?.addEventListener('input', function() {
-            const value = this.value.toLowerCase().trim();
-            document.querySelectorAll('#dataTable tbody tr').forEach(function(row) {
-                row.style.display = row.textContent.toLowerCase().includes(value) ? '' : 'none';
+        /*
+         * Customer Approval pagination
+         * - Default 15 records per page.
+         * - Pagination is shown only when total rows are more than 15.
+         * - Search filters all loaded approvals first, then pagination is applied.
+         * - Desktop table and mobile cards stay on the same page.
+         */
+        (function initApprovalPagination() {
+            const searchInput = document.getElementById('tableSearch');
+            const perPageSelect = document.getElementById('approvalPerPage');
+            const pagination = document.getElementById('approvalPagination');
+            const paginationInfo = document.getElementById('approvalPaginationInfo');
+            const paginationWrap = document.getElementById('approvalPaginationWrap');
+
+            const desktopRows = Array.from(
+                document.querySelectorAll('#dataTable tbody .js-approval-row')
+            );
+
+            const mobileCards = Array.from(
+                document.querySelectorAll('#mobileCards .js-approval-card')
+            );
+
+            const desktopSearchEmpty = document.getElementById('approvalSearchEmptyRow');
+            const mobileSearchEmpty = document.getElementById('approvalMobileSearchEmpty');
+
+            if (!desktopRows.length) {
+                return;
+            }
+
+            let currentPage = 1;
+            let pageSize = perPageSelect ?
+                parseInt(perPageSelect.value || '15', 10) :
+                15;
+
+            function searchableText(index) {
+                const desktopText = desktopRows[index]?.textContent || '';
+                const mobileText = mobileCards[index]?.textContent || '';
+
+                return (desktopText + ' ' + mobileText).toLowerCase();
+            }
+
+            function getMatchedIndexes() {
+                const term = String(searchInput?.value || '').toLowerCase().trim();
+                const matches = [];
+
+                desktopRows.forEach(function(row, index) {
+                    if (term === '' || searchableText(index).includes(term)) {
+                        matches.push(index);
+                    }
+                });
+
+                return matches;
+            }
+
+            function addPageButton(label, page, disabled, active, ariaLabel) {
+                if (!pagination) return;
+
+                const li = document.createElement('li');
+
+                li.className = 'page-item' +
+                    (disabled ? ' disabled' : '') +
+                    (active ? ' active' : '');
+
+                const button = document.createElement('button');
+
+                button.type = 'button';
+                button.className = 'page-link';
+                button.textContent = label;
+                button.setAttribute('aria-label', ariaLabel || String(label));
+
+                if (active) {
+                    button.setAttribute('aria-current', 'page');
+                }
+
+                if (!disabled) {
+                    button.addEventListener('click', function() {
+                        currentPage = page;
+                        render();
+                    });
+                }
+
+                li.appendChild(button);
+                pagination.appendChild(li);
+            }
+
+            function renderPagination(totalPages) {
+                if (!pagination) return;
+
+                pagination.innerHTML = '';
+
+                addPageButton(
+                    '‹',
+                    Math.max(1, currentPage - 1),
+                    currentPage <= 1,
+                    false,
+                    'Previous page'
+                );
+
+                let startPage = Math.max(1, currentPage - 2);
+                let endPage = Math.min(totalPages, startPage + 4);
+
+                startPage = Math.max(1, endPage - 4);
+
+                if (startPage > 1) {
+                    addPageButton('1', 1, false, currentPage === 1, 'Page 1');
+
+                    if (startPage > 2) {
+                        addPageButton('…', currentPage, true, false, 'More pages');
+                    }
+                }
+
+                for (let page = startPage; page <= endPage; page++) {
+                    addPageButton(
+                        String(page),
+                        page,
+                        false,
+                        page === currentPage,
+                        'Page ' + page
+                    );
+                }
+
+                if (endPage < totalPages) {
+                    if (endPage < totalPages - 1) {
+                        addPageButton('…', currentPage, true, false, 'More pages');
+                    }
+
+                    addPageButton(
+                        String(totalPages),
+                        totalPages,
+                        false,
+                        currentPage === totalPages,
+                        'Page ' + totalPages
+                    );
+                }
+
+                addPageButton(
+                    '›',
+                    Math.min(totalPages, currentPage + 1),
+                    currentPage >= totalPages,
+                    false,
+                    'Next page'
+                );
+            }
+
+            function render() {
+                const matches = getMatchedIndexes();
+                const total = matches.length;
+
+                const totalPages = Math.max(
+                    1,
+                    Math.ceil(total / pageSize)
+                );
+
+                if (currentPage > totalPages) {
+                    currentPage = totalPages;
+                }
+
+                const start = total === 0 ?
+                    0 :
+                    (currentPage - 1) * pageSize;
+
+                const end = Math.min(start + pageSize, total);
+
+                const visibleIndexes = new Set(
+                    matches.slice(start, end)
+                );
+
+                desktopRows.forEach(function(row, index) {
+                    row.style.display = visibleIndexes.has(index) ? '' : 'none';
+                });
+
+                mobileCards.forEach(function(card, index) {
+                    card.style.display = visibleIndexes.has(index) ? '' : 'none';
+                });
+
+                if (desktopSearchEmpty) {
+                    desktopSearchEmpty.style.display =
+                        total === 0 ? '' : 'none';
+                }
+
+                if (mobileSearchEmpty) {
+                    mobileSearchEmpty.style.display =
+                        total === 0 ? '' : 'none';
+                }
+
+                if (paginationInfo) {
+                    paginationInfo.textContent = total === 0 ?
+                        'Showing 0 of 0' :
+                        'Showing ' + (start + 1) + '-' + end + ' of ' + total;
+                }
+
+                /*
+                 * Hide pagination when current search result has
+                 * 15 records or fewer.
+                 */
+                if (paginationWrap) {
+                    paginationWrap.style.display =
+                        total > 15 ? '' : 'none';
+                }
+
+                renderPagination(totalPages);
+            }
+
+            searchInput?.addEventListener('input', function() {
+                currentPage = 1;
+                render();
             });
-            document.querySelectorAll('#mobileCards .mobile-card').forEach(function(card) {
-                card.style.display = card.textContent.toLowerCase().includes(value) ? '' : 'none';
+
+            perPageSelect?.addEventListener('change', function() {
+                pageSize = parseInt(this.value || '15', 10);
+                currentPage = 1;
+                render();
             });
-        });
+
+            render();
+        })();
 
         if (window.lucide && typeof window.lucide.createIcons === 'function') window.lucide.createIcons();
     })();

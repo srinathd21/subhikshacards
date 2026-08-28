@@ -7,6 +7,35 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+/*
+|--------------------------------------------------------------------------
+| Job Card Timezone Policy
+|--------------------------------------------------------------------------
+| Database timestamps are stored in UTC.
+| All ERP/system display times use Asia/Kolkata (IST).
+| Keeping storage and display timezone separate prevents the 5:30 mismatch.
+*/
+if (!defined('JCV_SYSTEM_TIMEZONE')) {
+    define('JCV_SYSTEM_TIMEZONE', 'Asia/Kolkata');
+}
+
+if (!defined('JCV_DATABASE_TIMEZONE')) {
+    define('JCV_DATABASE_TIMEZONE', 'UTC');
+}
+
+/* Make all PHP date()/strtotime() operations on this page use ERP local time. */
+date_default_timezone_set(JCV_SYSTEM_TIMEZONE);
+
+/*
+ * Keep this MySQL connection in UTC so CURRENT_TIMESTAMP/default timestamp
+ * values created from this page also remain consistent with UTC storage.
+ */
+try {
+    $conn->query("SET time_zone = '+00:00'");
+} catch (Throwable $e) {
+    // UTC_TIMESTAMP() is also used explicitly below, so writes remain safe.
+}
+
 if (!function_exists('e')) {
     function e($value): string
     {
@@ -282,7 +311,35 @@ function jcvDate($value): string
 
 function jcvDateTime($value): string
 {
-    return !empty($value) ? date('d-m-Y h:i A', strtotime($value)) : '-';
+    if (empty($value)) {
+        return '-';
+    }
+
+    try {
+        $dbTz = new DateTimeZone(JCV_DATABASE_TIMEZONE);
+        $systemTz = new DateTimeZone(JCV_SYSTEM_TIMEZONE);
+
+        /*
+         * MySQL DATETIME values do not carry timezone information.
+         * Treat stored job timestamps as UTC, then convert them to the
+         * ERP/system timezone only when displaying them.
+         */
+        $dt = DateTime::createFromFormat(
+            'Y-m-d H:i:s',
+            trim((string)$value),
+            $dbTz
+        );
+
+        if (!$dt) {
+            $dt = new DateTime((string)$value, $dbTz);
+        }
+
+        $dt->setTimezone($systemTz);
+
+        return $dt->format('d-m-Y h:i A');
+    } catch (Throwable $e) {
+        return (string)$value;
+    }
 }
 
 function jcvMoney($value): string
@@ -405,7 +462,7 @@ function jcvCompleteDispatchGroup(mysqli $conn, int $jobId, int $userId, string 
         return;
     }
 
-    $stmt = $conn->prepare("\n        UPDATE job_tracking jt\n        INNER JOIN workflow_steps ws\n            ON ws.id = jt.workflow_step_id\n        SET\n            jt.status = 'completed',\n            jt.actual_start_at = COALESCE(jt.actual_start_at, NOW()),\n            jt.actual_completed_at = COALESCE(jt.actual_completed_at, NOW()),\n            jt.completed_by = COALESCE(jt.completed_by, ?),\n            jt.remarks = CASE\n                WHEN TRIM(COALESCE(jt.remarks, '')) = '' THEN ?\n                ELSE jt.remarks\n            END,\n            jt.updated_at = NOW()\n        WHERE jt.job_card_id = ?\n          AND jt.status NOT IN ('completed', 'skipped', 'cancelled')\n          AND (\n                ws.step_key IN ('ready_for_dispatch', 'dispatched', 'dispatch')\n                OR LOWER(ws.step_name) IN ('ready for dispatch', 'dispatched', 'dispatch')\n                OR (ws.step_key LIKE '%dispatch%' AND ws.step_key NOT LIKE 'send_to%')\n          )\n    ");
+    $stmt = $conn->prepare("\n        UPDATE job_tracking jt\n        INNER JOIN workflow_steps ws\n            ON ws.id = jt.workflow_step_id\n        SET\n            jt.status = 'completed',\n            jt.actual_start_at = COALESCE(jt.actual_start_at, UTC_TIMESTAMP()),\n            jt.actual_completed_at = COALESCE(jt.actual_completed_at, UTC_TIMESTAMP()),\n            jt.completed_by = COALESCE(jt.completed_by, ?),\n            jt.remarks = CASE\n                WHEN TRIM(COALESCE(jt.remarks, '')) = '' THEN ?\n                ELSE jt.remarks\n            END,\n            jt.updated_at = UTC_TIMESTAMP()\n        WHERE jt.job_card_id = ?\n          AND jt.status NOT IN ('completed', 'skipped', 'cancelled')\n          AND (\n                ws.step_key IN ('ready_for_dispatch', 'dispatched', 'dispatch')\n                OR LOWER(ws.step_name) IN ('ready for dispatch', 'dispatched', 'dispatch')\n                OR (ws.step_key LIKE '%dispatch%' AND ws.step_key NOT LIKE 'send_to%')\n          )\n    ");
     $stmt->bind_param('isi', $userId, $remarks, $jobId);
     $stmt->execute();
     $stmt->close();
@@ -454,7 +511,7 @@ function jcvAutoStartNextPendingStage(mysqli $conn, int $jobId, int $trackingId)
 
     if ($nextId <= 0) return;
 
-    $stmt = $conn->prepare("\n        UPDATE job_tracking\n        SET status = 'in_progress',\n            actual_start_at = COALESCE(actual_start_at, NOW()),\n            updated_at = NOW()\n        WHERE id = ?\n          AND job_card_id = ?\n          AND status = 'pending'\n    ");
+    $stmt = $conn->prepare("\n        UPDATE job_tracking\n        SET status = 'in_progress',\n            actual_start_at = COALESCE(actual_start_at, UTC_TIMESTAMP()),\n            updated_at = UTC_TIMESTAMP()\n        WHERE id = ?\n          AND job_card_id = ?\n          AND status = 'pending'\n    ");
     $stmt->bind_param('ii', $nextId, $jobId);
     $stmt->execute();
     $stmt->close();
@@ -860,8 +917,8 @@ function jcvSaveManualCustomerApproval(
                 approved_by_call = 1,
                 call_confirmed_by = ?,
                 internal_remarks = ?,
-                approved_at = COALESCE(approved_at, NOW()),
-                updated_at = NOW()
+                approved_at = COALESCE(approved_at, UTC_TIMESTAMP()),
+                updated_at = UTC_TIMESTAMP()
             WHERE id = ?
         ");
         $stmt->bind_param('isi', $userId, $remarks, $approvalId);
@@ -889,7 +946,7 @@ function jcvSaveManualCustomerApproval(
             created_at
         )
         VALUES
-        (?, ?, ?, ?, ?, ?, 'approved', 0, 1, ?, ?, NOW(), NOW())
+        (?, ?, ?, ?, ?, ?, 'approved', 0, 1, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())
     ");
     $stmt->bind_param('iissssis', $jobId, $workflowStepId, $approvalType, $token, $customerName, $mobile, $userId, $remarks);
     $stmt->execute();
@@ -1081,7 +1138,7 @@ function jcvSaveTrackingPhotos(mysqli $conn, int $jobId, int $trackingId, int $w
             INSERT INTO job_tracking_photos
                 (job_card_id, job_tracking_id, workflow_step_id, file_path, original_name, mime_type, file_size, uploaded_by, created_at)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                (?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())
         ");
         $stmt->bind_param('iiisssii', $jobId, $trackingId, $workflowStepId, $relativePath, $originalName, $mime, $fileSize, $userId);
         $stmt->execute();
@@ -1183,7 +1240,7 @@ function jcvGetOrCreatePhotoApproval(mysqli $conn, int $jobId, int $trackingId, 
         INSERT INTO job_tracking_photo_approvals
             (job_card_id, job_tracking_id, workflow_step_id, approval_token, customer_name, mobile, status, created_at)
         VALUES
-            (?, ?, ?, ?, ?, ?, 'pending', NOW())
+            (?, ?, ?, ?, ?, ?, 'pending', UTC_TIMESTAMP())
     ");
     $stmt->bind_param('iiisss', $jobId, $trackingId, $workflowStepId, $token, $customerName, $mobile);
     $stmt->execute();
@@ -1322,7 +1379,7 @@ function jcvSendPhotoApprovalByApi(mysqli $conn, array $job, array $step, array 
     if (!empty($result['success']) && !empty($approval['id']) && jcvTableExists($conn, 'job_tracking_photo_approvals')) {
         try {
             $approvalId = (int)$approval['id'];
-            $stmt = $conn->prepare("UPDATE job_tracking_photo_approvals SET link_sent_at = NOW(), link_sent_by = ?, updated_at = NOW() WHERE id = ?");
+            $stmt = $conn->prepare("UPDATE job_tracking_photo_approvals SET link_sent_at = UTC_TIMESTAMP(), link_sent_by = ?, updated_at = UTC_TIMESTAMP() WHERE id = ?");
             $stmt->bind_param('ii', $meta['sent_by'], $approvalId);
             $stmt->execute();
             $stmt->close();
@@ -1727,9 +1784,9 @@ function jcvReconcileApprovedPhotoApprovals(mysqli $conn, array $job): void
                             WHEN ? <> '' THEN ?
                             ELSE customer_remarks
                         END,
-                        approved_at = COALESCE(approved_at, NOW()),
+                        approved_at = COALESCE(approved_at, UTC_TIMESTAMP()),
                         rejected_at = NULL,
-                        updated_at = NOW()
+                        updated_at = UTC_TIMESTAMP()
                     WHERE id = ?
                 ");
                 $stmt->bind_param('ssssi', $customerName, $mobile, $customerRemarks, $customerRemarks, $approvalId);
@@ -1758,7 +1815,7 @@ function jcvReconcileApprovedPhotoApprovals(mysqli $conn, array $job): void
                         updated_at
                     )
                     VALUES
-                    (?, ?, ?, ?, ?, ?, 'approved', 1, 0, ?, NOW(), NOW(), NOW())
+                    (?, ?, ?, ?, ?, ?, 'approved', 1, 0, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP(), UTC_TIMESTAMP())
                 ");
                 $stmt->bind_param(
                     'iisssss',
@@ -1786,9 +1843,9 @@ function jcvReconcileApprovedPhotoApprovals(mysqli $conn, array $job): void
                         WHEN TRIM(COALESCE(remarks, '')) = '' THEN ?
                         ELSE remarks
                     END,
-                    actual_start_at = COALESCE(actual_start_at, NOW()),
-                    actual_completed_at = COALESCE(actual_completed_at, NOW()),
-                    updated_at = NOW()
+                    actual_start_at = COALESCE(actual_start_at, UTC_TIMESTAMP()),
+                    actual_completed_at = COALESCE(actual_completed_at, UTC_TIMESTAMP()),
+                    updated_at = UTC_TIMESTAMP()
                 WHERE job_card_id = ?
                   AND workflow_step_id = ?
                   AND status NOT IN ('completed','skipped','cancelled')
@@ -1890,9 +1947,9 @@ function jcvRefreshJobCardProgressAfterPhotoCancel(mysqli $conn, int $jobId, int
             SET current_workflow_step_id = ?,
                 job_card_status_id = ?,
                 is_delayed = ?,
-                completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, NOW()) ELSE NULL END,
+                completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, UTC_TIMESTAMP()) ELSE NULL END,
                 updated_by = CASE WHEN ? > 0 THEN ? ELSE updated_by END,
-                updated_at = NOW()
+                updated_at = UTC_TIMESTAMP()
             WHERE id = ?
         ");
         $stmt->bind_param('iiisiii', $currentWorkflowStepId, $jobStatusId, $isDelayed, $jobStatusKey, $userId, $userId, $jobId);
@@ -1903,9 +1960,9 @@ function jcvRefreshJobCardProgressAfterPhotoCancel(mysqli $conn, int $jobId, int
             UPDATE job_cards
             SET job_card_status_id = ?,
                 is_delayed = ?,
-                completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, NOW()) ELSE NULL END,
+                completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, UTC_TIMESTAMP()) ELSE NULL END,
                 updated_by = CASE WHEN ? > 0 THEN ? ELSE updated_by END,
-                updated_at = NOW()
+                updated_at = UTC_TIMESTAMP()
             WHERE id = ?
         ");
         $stmt->bind_param('iisiii', $jobStatusId, $isDelayed, $jobStatusKey, $userId, $userId, $jobId);
@@ -1988,7 +2045,7 @@ function jcvCancelUploadedTrackingPhoto(mysqli $conn, array $job, int $trackingI
                     UPDATE job_tracking_photo_approvals
                     SET status = 'expired',
                         customer_remarks = CASE WHEN COALESCE(customer_remarks, '') = '' THEN ? ELSE customer_remarks END,
-                        updated_at = NOW()
+                        updated_at = UTC_TIMESTAMP()
                     WHERE job_card_id = ?
                       AND job_tracking_id = ?
                       AND workflow_step_id = ?
@@ -2014,7 +2071,7 @@ function jcvCancelUploadedTrackingPhoto(mysqli $conn, array $job, int $trackingI
                             approved_at = NULL,
                             rejected_at = NULL,
                             internal_remarks = CASE WHEN COALESCE(internal_remarks, '') = '' THEN ? ELSE CONCAT(internal_remarks, '\n', ?) END,
-                            updated_at = NOW()
+                            updated_at = UTC_TIMESTAMP()
                         WHERE job_card_id = ?
                           AND workflow_step_id = ?
                           AND approval_type = ?
@@ -2034,7 +2091,7 @@ function jcvCancelUploadedTrackingPhoto(mysqli $conn, array $job, int $trackingI
                             remarks = ?,
                             actual_completed_at = NULL,
                             completed_by = NULL,
-                            updated_at = NOW()
+                            updated_at = UTC_TIMESTAMP()
                         WHERE job_card_id = ?
                           AND workflow_step_id = ?
                           AND status = 'completed'
@@ -2053,7 +2110,7 @@ function jcvCancelUploadedTrackingPhoto(mysqli $conn, array $job, int $trackingI
                     remarks = ?,
                     actual_completed_at = NULL,
                     completed_by = NULL,
-                    updated_at = NOW()
+                    updated_at = UTC_TIMESTAMP()
                 WHERE id = ?
                   AND job_card_id = ?
                   AND status = 'completed'
@@ -2581,10 +2638,10 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                             SET
                                 status = ?,
                                 remarks = ?,
-                                actual_start_at = COALESCE(actual_start_at, NOW()),
-                                actual_completed_at = NOW(),
+                                actual_start_at = COALESCE(actual_start_at, UTC_TIMESTAMP()),
+                                actual_completed_at = UTC_TIMESTAMP(),
                                 completed_by = ?,
-                                updated_at = NOW()
+                                updated_at = UTC_TIMESTAMP()
                             WHERE id = ?
                               AND job_card_id = ?
                         ");
@@ -2597,8 +2654,8 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                             SET
                                 status = ?,
                                 remarks = ?,
-                                actual_start_at = COALESCE(actual_start_at, NOW()),
-                                updated_at = NOW()
+                                actual_start_at = COALESCE(actual_start_at, UTC_TIMESTAMP()),
+                                updated_at = UTC_TIMESTAMP()
                             WHERE id = ?
                               AND job_card_id = ?
                         ");
@@ -2614,11 +2671,11 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                                 status = ?,
                                 remarks = ?,
                                 is_delayed = 1,
-                                delay_started_at = COALESCE(delay_started_at, NOW()),
+                                delay_started_at = COALESCE(delay_started_at, UTC_TIMESTAMP()),
                                 delay_days = ?,
                                 delay_reason_id = ?,
                                 delay_remarks = ?,
-                                updated_at = NOW()
+                                updated_at = UTC_TIMESTAMP()
                             WHERE id = ?
                               AND job_card_id = ?
                         ");
@@ -2642,7 +2699,7 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                             SET
                                 status = ?,
                                 remarks = ?,
-                                updated_at = NOW()
+                                updated_at = UTC_TIMESTAMP()
                             WHERE id = ?
                               AND job_card_id = ?
                         ");
@@ -2747,11 +2804,11 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                                 job_card_status_id = ?,
                                 is_delayed = ?,
                                 completed_at = CASE
-                                    WHEN ? = 'completed' THEN COALESCE(completed_at, NOW())
+                                    WHEN ? = 'completed' THEN COALESCE(completed_at, UTC_TIMESTAMP())
                                     ELSE completed_at
                                 END,
                                 updated_by = ?,
-                                updated_at = NOW()
+                                updated_at = UTC_TIMESTAMP()
                             WHERE id = ?
                         ");
                         $stmt->bind_param(
@@ -2772,11 +2829,11 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                                 job_card_status_id = ?,
                                 is_delayed = ?,
                                 completed_at = CASE
-                                    WHEN ? = 'completed' THEN COALESCE(completed_at, NOW())
+                                    WHEN ? = 'completed' THEN COALESCE(completed_at, UTC_TIMESTAMP())
                                     ELSE completed_at
                                 END,
                                 updated_by = ?,
-                                updated_at = NOW()
+                                updated_at = UTC_TIMESTAMP()
                             WHERE id = ?
                         ");
                         $stmt->bind_param(

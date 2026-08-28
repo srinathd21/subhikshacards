@@ -5,30 +5,210 @@ require_once __DIR__ . '/includes/product-stock-helper.php';
 require_permission($conn, 'can_view', 'stock-history.php');
 ps_require_module($conn);
 
-$productId=(int)($_GET['product_id']??0);
-$type=trim((string)($_GET['type']??''));
-$dateFrom=trim((string)($_GET['date_from']??''));
-$dateTo=trim((string)($_GET['date_to']??''));
+/*
+|--------------------------------------------------------------------------
+| Stock History Timezone Policy
+|--------------------------------------------------------------------------
+| Database DATETIME timestamps are stored in UTC.
+| All timestamps displayed to users are converted to Asia/Kolkata (IST).
+| Date filters are also interpreted as India-local calendar dates.
+*/
+if (!defined('SH_DATABASE_TIMEZONE')) {
+    define('SH_DATABASE_TIMEZONE', 'UTC');
+}
 
-$products=[];
-$res=$conn->query("SELECT id,product_name FROM products ORDER BY product_name ASC");
-while($r=$res->fetch_assoc())$products[]=$r;$res->free();
+if (!defined('SH_SYSTEM_TIMEZONE')) {
+    define('SH_SYSTEM_TIMEZONE', 'Asia/Kolkata');
+}
 
-$where=['1=1'];$params=[];$types='';
-if($productId>0){$where[]='st.product_id=?';$params[]=$productId;$types.='i';}
-if($type!==''){$where[]='st.transaction_type=?';$params[]=$type;$types.='s';}
-if($dateFrom!==''){$where[]='DATE(st.created_at)>=?';$params[]=$dateFrom;$types.='s';}
-if($dateTo!==''){$where[]='DATE(st.created_at)<=?';$params[]=$dateTo;$types.='s';}
+date_default_timezone_set(SH_SYSTEM_TIMEZONE);
 
-$sql="
-SELECT st.*,p.product_name,u.name user_name
-FROM stock_transactions st
-INNER JOIN products p ON p.id=st.product_id
-LEFT JOIN users u ON u.id=st.created_by
-WHERE ".implode(' AND ',$where)."
-ORDER BY st.id DESC
-LIMIT 1000";
-$stmt=$conn->prepare($sql);if($types!=='')$stmt->bind_param($types,...$params);$stmt->execute();$res=$stmt->get_result();$rows=[];while($r=$res->fetch_assoc())$rows[]=$r;$stmt->close();
+function sh_datetime_ist($value): string
+{
+    if (empty($value)) {
+        return '-';
+    }
+
+    try {
+        $dbTz = new DateTimeZone(SH_DATABASE_TIMEZONE);
+        $systemTz = new DateTimeZone(SH_SYSTEM_TIMEZONE);
+
+        $dt = DateTime::createFromFormat(
+            'Y-m-d H:i:s',
+            trim((string)$value),
+            $dbTz
+        );
+
+        if (!$dt) {
+            $dt = new DateTime((string)$value, $dbTz);
+        }
+
+        $dt->setTimezone($systemTz);
+
+        return $dt->format('d-m-Y h:i A');
+    } catch (Throwable $e) {
+        return (string)$value;
+    }
+}
+
+function sh_local_date_start_utc(string $date): ?string
+{
+    $date = trim($date);
+
+    if ($date === '') {
+        return null;
+    }
+
+    try {
+        $systemTz = new DateTimeZone(SH_SYSTEM_TIMEZONE);
+        $dbTz = new DateTimeZone(SH_DATABASE_TIMEZONE);
+
+        $dt = DateTime::createFromFormat('!Y-m-d', $date, $systemTz);
+
+        if (!$dt) {
+            return null;
+        }
+
+        $dt->setTimezone($dbTz);
+
+        return $dt->format('Y-m-d H:i:s');
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function sh_local_date_end_exclusive_utc(string $date): ?string
+{
+    $date = trim($date);
+
+    if ($date === '') {
+        return null;
+    }
+
+    try {
+        $systemTz = new DateTimeZone(SH_SYSTEM_TIMEZONE);
+        $dbTz = new DateTimeZone(SH_DATABASE_TIMEZONE);
+
+        $dt = DateTime::createFromFormat('!Y-m-d', $date, $systemTz);
+
+        if (!$dt) {
+            return null;
+        }
+
+        $dt->modify('+1 day');
+        $dt->setTimezone($dbTz);
+
+        return $dt->format('Y-m-d H:i:s');
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+$productId = (int)($_GET['product_id'] ?? 0);
+$type = trim((string)($_GET['type'] ?? ''));
+$dateFrom = trim((string)($_GET['date_from'] ?? ''));
+$dateTo = trim((string)($_GET['date_to'] ?? ''));
+
+$page = max(1, (int)($_GET['page'] ?? 1));
+$perPage = 20;
+
+$products = [];
+$res = $conn->query("SELECT id,product_name FROM products ORDER BY product_name ASC");
+while ($r = $res->fetch_assoc()) $products[] = $r;
+$res->free();
+
+$where = ['1=1'];
+$params = [];
+$types = '';
+
+if ($productId > 0) {
+    $where[] = 'st.product_id = ?';
+    $params[] = $productId;
+    $types .= 'i';
+}
+
+if ($type !== '') {
+    $where[] = 'st.transaction_type = ?';
+    $params[] = $type;
+    $types .= 's';
+}
+
+/*
+ * The filter inputs are India-local dates.
+ * Convert their boundaries to UTC before comparing with stored timestamps.
+ */
+$dateFromUtc = sh_local_date_start_utc($dateFrom);
+if ($dateFromUtc !== null) {
+    $where[] = 'st.created_at >= ?';
+    $params[] = $dateFromUtc;
+    $types .= 's';
+}
+
+$dateToUtcExclusive = sh_local_date_end_exclusive_utc($dateTo);
+if ($dateToUtcExclusive !== null) {
+    $where[] = 'st.created_at < ?';
+    $params[] = $dateToUtcExclusive;
+    $types .= 's';
+}
+
+$whereSql = implode(' AND ', $where);
+
+/* Count first so pagination is based on the complete filtered result. */
+$countSql = "
+    SELECT COUNT(*) AS total
+    FROM stock_transactions st
+    WHERE {$whereSql}
+";
+
+$countStmt = $conn->prepare($countSql);
+if ($types !== '') {
+    $countStmt->bind_param($types, ...$params);
+}
+$countStmt->execute();
+$countRow = $countStmt->get_result()->fetch_assoc();
+$countStmt->close();
+
+$totalRecords = (int)($countRow['total'] ?? 0);
+$totalPages = max(1, (int)ceil($totalRecords / $perPage));
+
+if ($page > $totalPages) {
+    $page = $totalPages;
+}
+
+$offset = ($page - 1) * $perPage;
+
+$sql = "
+    SELECT
+        st.*,
+        p.product_name,
+        u.name AS user_name
+    FROM stock_transactions st
+    INNER JOIN products p ON p.id = st.product_id
+    LEFT JOIN users u ON u.id = st.created_by
+    WHERE {$whereSql}
+    ORDER BY st.id DESC
+    LIMIT ? OFFSET ?
+";
+
+$dataParams = $params;
+$dataTypes = $types . 'ii';
+$dataParams[] = $perPage;
+$dataParams[] = $offset;
+
+$stmt = $conn->prepare($sql);
+$stmt->bind_param($dataTypes, ...$dataParams);
+$stmt->execute();
+$res = $stmt->get_result();
+
+$rows = [];
+while ($r = $res->fetch_assoc()) {
+    $rows[] = $r;
+}
+$stmt->close();
+
+$showPagination = $totalRecords > $perPage;
+$showingFrom = $totalRecords > 0 ? $offset + 1 : 0;
+$showingTo = min($offset + count($rows), $totalRecords);
 
 $transactionTypes=[];
 $res=$conn->query("SELECT DISTINCT transaction_type FROM stock_transactions ORDER BY transaction_type ASC");
@@ -121,6 +301,54 @@ $toastTitle = $messageType === 'danger' ? 'Unable to Continue' : ($messageType =
 
     .desktop-table th {
         white-space: nowrap
+    }
+
+    .stock-pagination-wrap {
+        border-top: 1px solid var(--border-soft);
+        padding: 12px 14px;
+        background: color-mix(in srgb, var(--card-bg) 97%, var(--body-bg));
+    }
+
+    .stock-pagination-wrap .pagination {
+        margin-bottom: 0;
+        gap: 3px;
+    }
+
+    .stock-pagination-wrap .page-link {
+        min-width: 34px;
+        height: 34px;
+        padding: 5px 8px;
+        border-radius: 9px !important;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        font-weight: 800;
+        color: var(--text-main);
+        background: var(--card-bg);
+        border-color: var(--border-soft);
+        box-shadow: none;
+    }
+
+    .stock-pagination-wrap .page-item.active .page-link {
+        background: var(--brand-1);
+        border-color: var(--brand-1);
+        color: #fff;
+    }
+
+    .stock-pagination-wrap .page-item.disabled .page-link {
+        opacity: .45;
+        pointer-events: none;
+    }
+
+    @media(max-width:767.98px) {
+        .stock-pagination-wrap {
+            text-align: center;
+        }
+
+        .stock-pagination-wrap .pagination {
+            justify-content: center;
+        }
     }
 
     @media(max-width:767.98px) {
@@ -353,16 +581,18 @@ $toastTitle = $messageType === 'danger' ? 'Unable to Continue' : ($messageType =
                                 </tr><?php endif; ?>
                                 <?php foreach($rows as $r): $qty=(float)$r['quantity'];$availableAfter=(float)$r['on_hand_after']-(float)$r['reserved_after']; ?>
                                 <tr>
-                                    <td><?= ps_e(date('d-m-Y h:i A',strtotime($r['created_at']))) ?></td>
+                                    <td><?= ps_e(sh_datetime_ist($r['created_at'] ?? null)) ?></td>
                                     <td class="fw-bold"><?= ps_e($r['product_name']) ?></td>
                                     <td><span class="history-type"><?= ps_e(sh_label($r['transaction_type'])) ?></span>
                                     </td>
                                     <td class="<?= $qty<0?'qty-minus':'qty-plus' ?>">
                                         <?= $qty>0?'+':'' ?><?= ps_e(ps_qty($qty)) ?></td>
                                     <td><?= ps_e(ps_qty($r['on_hand_before'])) ?> →
-                                        <strong><?= ps_e(ps_qty($r['on_hand_after'])) ?></strong></td>
+                                        <strong><?= ps_e(ps_qty($r['on_hand_after'])) ?></strong>
+                                    </td>
                                     <td><?= ps_e(ps_qty($r['reserved_before'])) ?> →
-                                        <strong><?= ps_e(ps_qty($r['reserved_after'])) ?></strong></td>
+                                        <strong><?= ps_e(ps_qty($r['reserved_after'])) ?></strong>
+                                    </td>
                                     <td class="<?= $availableAfter<0?'text-danger fw-bold':'fw-bold' ?>">
                                         <?= ps_e(ps_qty($availableAfter)) ?></td>
                                     <td><?= ps_e($r['reference_no']?:($r['reference_type']?:'-')) ?></td>
@@ -372,6 +602,79 @@ $toastTitle = $messageType === 'danger' ? 'Unable to Continue' : ($messageType =
                             </tbody>
                         </table>
                     </div>
+
+                    <?php if ($showPagination): ?>
+                    <?php
+                    $paginationParams = [
+                        'product_id' => $productId,
+                        'type' => $type,
+                        'date_from' => $dateFrom,
+                        'date_to' => $dateTo,
+                    ];
+
+                    $pageUrl = static function (int $targetPage) use ($paginationParams): string {
+                        $params = $paginationParams;
+                        $params['page'] = max(1, $targetPage);
+
+                        return 'stock-history.php?' . http_build_query($params);
+                    };
+
+                    $windowStart = max(1, $page - 2);
+                    $windowEnd = min($totalPages, $windowStart + 4);
+                    $windowStart = max(1, $windowEnd - 4);
+                    ?>
+                    <div
+                        class="stock-pagination-wrap d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-2">
+                        <div class="text-muted-custom fw-bold small">
+                            Showing <?= number_format($showingFrom) ?>-<?= number_format($showingTo) ?>
+                            of <?= number_format($totalRecords) ?> records
+                        </div>
+
+                        <nav aria-label="Stock History Pagination">
+                            <ul class="pagination pagination-sm flex-wrap">
+                                <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                                    <a class="page-link" href="<?= $page > 1 ? ps_e($pageUrl($page - 1)) : '#' ?>"
+                                        aria-label="Previous">‹</a>
+                                </li>
+
+                                <?php if ($windowStart > 1): ?>
+                                <li class="page-item">
+                                    <a class="page-link" href="<?= ps_e($pageUrl(1)) ?>">1</a>
+                                </li>
+                                <?php if ($windowStart > 2): ?>
+                                <li class="page-item disabled"><span class="page-link">…</span></li>
+                                <?php endif; ?>
+                                <?php endif; ?>
+
+                                <?php for ($p = $windowStart; $p <= $windowEnd; $p++): ?>
+                                <li class="page-item <?= $p === $page ? 'active' : '' ?>">
+                                    <a class="page-link" href="<?= ps_e($pageUrl($p)) ?>"
+                                        <?= $p === $page ? 'aria-current="page"' : '' ?>>
+                                        <?= $p ?>
+                                    </a>
+                                </li>
+                                <?php endfor; ?>
+
+                                <?php if ($windowEnd < $totalPages): ?>
+                                <?php if ($windowEnd < $totalPages - 1): ?>
+                                <li class="page-item disabled"><span class="page-link">…</span></li>
+                                <?php endif; ?>
+                                <li class="page-item">
+                                    <a class="page-link" href="<?= ps_e($pageUrl($totalPages)) ?>">
+                                        <?= $totalPages ?>
+                                    </a>
+                                </li>
+                                <?php endif; ?>
+
+                                <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
+                                    <a class="page-link"
+                                        href="<?= $page < $totalPages ? ps_e($pageUrl($page + 1)) : '#' ?>"
+                                        aria-label="Next">›</a>
+                                </li>
+                            </ul>
+                        </nav>
+                    </div>
+                    <?php endif; ?>
                 </div>
             </section>
         </main>

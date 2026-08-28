@@ -7,6 +7,22 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+if (!defined('DSP_DATABASE_TIMEZONE')) {
+    define('DSP_DATABASE_TIMEZONE', 'UTC');
+}
+
+if (!defined('DSP_SYSTEM_TIMEZONE')) {
+    define('DSP_SYSTEM_TIMEZONE', 'Asia/Kolkata');
+}
+
+date_default_timezone_set(DSP_SYSTEM_TIMEZONE);
+
+try {
+    $conn->query("SET time_zone = '+00:00'");
+} catch (Throwable $e) {
+    
+}
+
 if (!function_exists('e')) {
     function e($value): string
     {
@@ -68,7 +84,68 @@ function dspDate($value): string
 
 function dspDateTime($value): string
 {
-    return !empty($value) ? date('d-m-Y h:i A', strtotime((string)$value)) : '-';
+    if (empty($value)) {
+        return '-';
+    }
+
+    try {
+        $dbTz = new DateTimeZone(DSP_DATABASE_TIMEZONE);
+        $systemTz = new DateTimeZone(DSP_SYSTEM_TIMEZONE);
+
+        $dt = DateTime::createFromFormat(
+            'Y-m-d H:i:s',
+            trim((string)$value),
+            $dbTz
+        );
+
+        if (!$dt) {
+            $dt = new DateTime((string)$value, $dbTz);
+        }
+
+        $dt->setTimezone($systemTz);
+
+        return $dt->format('d-m-Y h:i A');
+    } catch (Throwable $e) {
+        return (string)$value;
+    }
+}
+
+function dspUtcNow(): string
+{
+    try {
+        return (new DateTime('now', new DateTimeZone(DSP_DATABASE_TIMEZONE)))
+            ->format('Y-m-d H:i:s');
+    } catch (Throwable $e) {
+        return gmdate('Y-m-d H:i:s');
+    }
+}
+
+function dspLocalDateCurrentTimeToUtc(string $localDate): string
+{
+    $localDate = trim($localDate);
+
+    try {
+        $systemTz = new DateTimeZone(DSP_SYSTEM_TIMEZONE);
+        $dbTz = new DateTimeZone(DSP_DATABASE_TIMEZONE);
+
+        $nowLocal = new DateTime('now', $systemTz);
+
+        $dt = DateTime::createFromFormat(
+            'Y-m-d H:i:s',
+            $localDate . ' ' . $nowLocal->format('H:i:s'),
+            $systemTz
+        );
+
+        if (!$dt) {
+            $dt = new DateTime('now', $systemTz);
+        }
+
+        $dt->setTimezone($dbTz);
+
+        return $dt->format('Y-m-d H:i:s');
+    } catch (Throwable $e) {
+        return dspUtcNow();
+    }
 }
 
 function dspMoney($value): string
@@ -138,7 +215,7 @@ function dspLog(mysqli $conn, string $actionKey, int $recordId, string $descript
                 INSERT INTO activity_logs
                     (user_id, role_id, action_key, module_name, record_id, description, ip_address, user_agent, created_at)
                 VALUES
-                    (?, ?, ?, 'Dispatch', ?, ?, ?, ?, NOW())
+                    (?, ?, ?, 'Dispatch', ?, ?, ?, ?, UTC_TIMESTAMP())
             ");
             $stmt->bind_param('iisisss', $userId, $roleId, $actionKey, $recordId, $description, $ip, $ua);
             $stmt->execute();
@@ -210,6 +287,75 @@ function dspFindDispatchTracking(mysqli $conn, int $jobId): ?array
     }
 }
 
+function dspCompleteFinalDispatchTracking(
+    mysqli $conn,
+    int $jobId,
+    int $userId,
+    string $completedAtUtc,
+    string $remarks = ''
+): void {
+    if (
+        $jobId <= 0 ||
+        !dspTableExists($conn, 'job_tracking') ||
+        !dspTableExists($conn, 'workflow_steps')
+    ) {
+        return;
+    }
+
+    try {
+        $finalRemarks = trim($remarks) !== ''
+            ? trim($remarks)
+            : 'Job card delivered and completed from Dispatch.';
+
+        $stmt = $conn->prepare("
+            UPDATE job_tracking jt
+            LEFT JOIN workflow_steps ws
+                ON ws.id = jt.workflow_step_id
+            SET
+                jt.status = 'completed',
+                jt.actual_start_at = COALESCE(jt.actual_start_at, ?),
+                jt.actual_completed_at = ?,
+                jt.completed_by = COALESCE(jt.completed_by, ?),
+                jt.remarks = CASE
+                    WHEN TRIM(COALESCE(jt.remarks, '')) = '' THEN ?
+                    ELSE jt.remarks
+                END,
+                jt.updated_at = ?
+            WHERE jt.job_card_id = ?
+              AND jt.status NOT IN ('completed', 'skipped', 'cancelled')
+              AND (
+                    LOWER(COALESCE(ws.step_key, '')) IN (
+                        'ready_for_dispatch',
+                        'ready_dispatch',
+                        'send_to_dispatch',
+                        'dispatch',
+                        'dispatched',
+                        'delivered',
+                        'completed'
+                    )
+                 OR LOWER(COALESCE(ws.step_name, '')) LIKE '%dispatch%'
+                 OR LOWER(COALESCE(ws.step_name, '')) LIKE '%deliver%'
+                 OR LOWER(COALESCE(ws.step_name, '')) = 'completed'
+              )
+        ");
+
+        $stmt->bind_param(
+            'ssissi',
+            $completedAtUtc,
+            $completedAtUtc,
+            $userId,
+            $finalRemarks,
+            $completedAtUtc,
+            $jobId
+        );
+
+        $stmt->execute();
+        $stmt->close();
+    } catch (Throwable $e) {
+        // Job Card completion itself must not fail only because a tracking row is absent.
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST'  && ($_POST['action'] ?? '') === 'mark_dispatched') {
     dspCsrf();
 
@@ -234,10 +380,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'  && ($_POST['action'] ?? '') === 'mark
                     UPDATE job_tracking
                     SET status = 'completed',
                         remarks = ?,
-                        actual_start_at = COALESCE(actual_start_at, NOW()),
-                        actual_completed_at = NOW(),
+                        actual_start_at = COALESCE(actual_start_at, UTC_TIMESTAMP()),
+                        actual_completed_at = UTC_TIMESTAMP(),
                         completed_by = ?,
-                        updated_at = NOW()
+                        updated_at = UTC_TIMESTAMP()
                     WHERE id = ?
                       AND job_card_id = ?
                 ");
@@ -249,8 +395,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'  && ($_POST['action'] ?? '') === 'mark
             $dispatchedStatusId = dspStatusId($conn, ['dispatched', 'dispatch']);
             $data = [
                 'updated_by' => $userId,
-                'updated_at' => date('Y-m-d H:i:s'),
-                'dispatched_at' => date('Y-m-d H:i:s', strtotime($dispatchDate . ' ' . date('H:i:s'))),
+                'updated_at' => dspUtcNow(),
+                'dispatched_at' => dspLocalDateCurrentTimeToUtc($dispatchDate),
                 'dispatch_date' => $dispatchDate,
                 'dispatch_status' => 'dispatched',
                 'delivery_mode' => $deliveryMode,
@@ -293,11 +439,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'mark_
         $toastTitle = 'Failed';
     } else {
         try {
-            $deliveredAt = date('Y-m-d H:i:s', strtotime($deliveredDate . ' ' . date('H:i:s')));
-            $deliveredStatusId = dspStatusId($conn, ['delivered', 'completed']);
+            $deliveredAt = dspLocalDateCurrentTimeToUtc($deliveredDate);
+
+            /*
+             * Delivered is the final Job Card action.
+             * Prefer the canonical Completed status when it exists.
+             */
+            $deliveredStatusId = dspStatusId($conn, ['completed', 'delivered']);
             $data = [
                 'updated_by' => $userId,
-                'updated_at' => date('Y-m-d H:i:s'),
+                'updated_at' => dspUtcNow(),
                 'delivered_at' => $deliveredAt,
                 'delivery_status' => 'delivered',
                 'dispatch_status' => 'delivered',
@@ -311,6 +462,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'mark_
             if ($deliveredStatusId) {
                 $data['job_card_status_id'] = $deliveredStatusId;
             }
+
+            /*
+             * Finalize the remaining Dispatch/Delivery workflow row using
+             * the same completion timestamp as the Job Card.
+             */
+            dspCompleteFinalDispatchTracking(
+                $conn,
+                $jobId,
+                $userId,
+                $deliveredAt,
+                $remarks
+            );
 
             dspUpdateColumns($conn, 'job_cards', $data, $jobId);
             dspLog($conn, 'deliver_job_card', $jobId, 'Job card marked as delivered/completed from dispatch page.');
@@ -634,6 +797,48 @@ if (dspTableExists($conn, 'job_cards')) {
         font-weight: 900
     }
 
+    .dispatch-pagination-wrap {
+        border-top: 1px solid var(--border-soft);
+        padding-top: 14px;
+    }
+
+    #dispatchPagination .page-link {
+        border-radius: 10px;
+        margin: 2px;
+        min-width: 34px;
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 800;
+        color: var(--text-main);
+        background: var(--card-bg);
+        border-color: var(--border-soft);
+        box-shadow: none;
+    }
+
+    #dispatchPagination .page-item.active .page-link {
+        background: var(--brand-1);
+        border-color: var(--brand-1);
+        color: #fff;
+    }
+
+    #dispatchPagination .page-item.disabled .page-link {
+        opacity: .45;
+        pointer-events: none;
+    }
+
+    @media(max-width:767.98px) {
+        #dispatchPaginationWrap {
+            align-items: stretch !important;
+            text-align: center;
+        }
+
+        #dispatchPagination {
+            justify-content: center !important;
+        }
+    }
+
     .dispatch-flow {
         border: 1px solid var(--border-soft);
         border-radius: 20px;
@@ -793,7 +998,7 @@ if (dspTableExists($conn, 'job_cards')) {
             height: 18px !important
         }
     }
-    
+
 
     /* =========================================================
        Dispatch Page Reference UI Alignment Patch
@@ -871,7 +1076,7 @@ if (dspTableExists($conn, 'job_cards')) {
         border-radius: 22px !important;
     }
 
-    .module-card > .d-flex:first-child {
+    .module-card>.d-flex:first-child {
         align-items: flex-start !important;
         margin-bottom: 18px !important;
     }
@@ -954,7 +1159,7 @@ if (dspTableExists($conn, 'job_cards')) {
     }
 
     @media (min-width: 992px) {
-        .module-card > .d-flex:first-child > div:first-child {
+        .module-card>.d-flex:first-child>div:first-child {
             min-width: 360px;
             max-width: 620px;
         }
@@ -969,7 +1174,7 @@ if (dspTableExists($conn, 'job_cards')) {
             padding: 16px;
         }
 
-        .module-card > .d-flex:first-child {
+        .module-card>.d-flex:first-child {
             align-items: stretch !important;
         }
 
@@ -1043,118 +1248,173 @@ if (dspTableExists($conn, 'job_cards')) {
             border-radius: 20px !important;
         }
     }
-</style>
+    </style>
 
-<style id="compact-ui-overrides">
-/* Compact 100% zoom UI override - visual sizing only */
-.module-page .page-head{
-    padding:16px 18px !important;
-    margin-bottom:12px !important;
-    border-radius:16px !important;
-}
-.module-page .page-head h1{
-    font-size:24px !important;
-    line-height:1.2 !important;
-    font-weight:800 !important;
-    letter-spacing:-.2px !important;
-}
-.module-page .page-head p,
-.module-page .text-muted-custom{
-    font-size:12px !important;
-    font-weight:500 !important;
-}
-.module-page .module-card{
-    padding:16px !important;
-    border-radius:16px !important;
-    margin-bottom:12px !important;
-}
-.module-page .module-title,
-.module-page .section-title{
-    font-size:15px !important;
-    line-height:1.25 !important;
-    font-weight:750 !important;
-    margin-bottom:10px !important;
-}
-.module-page .stat-card{
-    min-height:auto !important;
-    padding:12px 14px !important;
-    border-radius:14px !important;
-}
-.module-page .stat-card small,
-.module-page .stat-card span{
-    font-size:10px !important;
-    font-weight:700 !important;
-}
-.module-page .stat-card strong{
-    font-size:18px !important;
-    line-height:1.15 !important;
-    font-weight:800 !important;
-}
-.module-page .stat-icon{
-    width:38px !important;
-    height:38px !important;
-    border-radius:12px !important;
-}
-.module-page .stat-icon svg{width:19px !important;height:19px !important;}
-.module-page .form-label{
-    font-size:12px !important;
-    font-weight:700 !important;
-    margin-bottom:5px !important;
-}
-.module-page .form-control,
-.module-page .form-select,
-.module-page .input-group-text{
-    min-height:38px !important;
-    font-size:13px !important;
-    border-radius:10px !important;
-    padding:7px 10px !important;
-}
-.module-page textarea.form-control{min-height:72px !important;}
-.module-page .btn{
-    font-size:12px !important;
-    font-weight:700 !important;
-    line-height:1.2 !important;
-    padding:7px 12px !important;
-}
-.module-page .btn-sm{
-    font-size:11px !important;
-    padding:5px 9px !important;
-}
-.module-page .table-ui th,
-.module-page .table-ui td,
-.module-page .table th,
-.module-page .table td{
-    font-size:12px !important;
-    padding:9px 10px !important;
-}
-.module-page .table-ui th,
-.module-page .table th{
-    font-size:10.5px !important;
-    font-weight:750 !important;
-}
-.module-page .status-pill,
-.module-page .stock-pill,
-.module-page .filter-chip,
-.module-page .sidebar-filter-pill,
-.module-page .badge-soft,
-.module-page .sidebar-url-badge{
-    font-size:10px !important;
-    font-weight:700 !important;
-    padding:4px 8px !important;
-}
-.module-page .modal-title{font-size:16px !important;font-weight:800 !important;}
-.module-page .modal-header{padding:14px 16px !important;}
-.module-page .modal-body{padding:16px !important;}
-.module-page .modal-footer{padding:12px 16px !important;}
-.module-page .modal-content{border-radius:16px !important;}
-.module-page .toast-title{font-size:13px !important;font-weight:800 !important;}
-.module-page .toast-message{font-size:12px !important;font-weight:600 !important;}
-@media(max-width:767.98px){
-    .module-page .page-head{padding:14px !important;}
-    .module-page .page-head h1{font-size:21px !important;}
-    .module-page .module-card{padding:13px !important;}
-}
-</style><!-- compact-ui-overrides -->
+    <style id="compact-ui-overrides">
+    /* Compact 100% zoom UI override - visual sizing only */
+    .module-page .page-head {
+        padding: 16px 18px !important;
+        margin-bottom: 12px !important;
+        border-radius: 16px !important;
+    }
+
+    .module-page .page-head h1 {
+        font-size: 24px !important;
+        line-height: 1.2 !important;
+        font-weight: 800 !important;
+        letter-spacing: -.2px !important;
+    }
+
+    .module-page .page-head p,
+    .module-page .text-muted-custom {
+        font-size: 12px !important;
+        font-weight: 500 !important;
+    }
+
+    .module-page .module-card {
+        padding: 16px !important;
+        border-radius: 16px !important;
+        margin-bottom: 12px !important;
+    }
+
+    .module-page .module-title,
+    .module-page .section-title {
+        font-size: 15px !important;
+        line-height: 1.25 !important;
+        font-weight: 750 !important;
+        margin-bottom: 10px !important;
+    }
+
+    .module-page .stat-card {
+        min-height: auto !important;
+        padding: 12px 14px !important;
+        border-radius: 14px !important;
+    }
+
+    .module-page .stat-card small,
+    .module-page .stat-card span {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+    }
+
+    .module-page .stat-card strong {
+        font-size: 18px !important;
+        line-height: 1.15 !important;
+        font-weight: 800 !important;
+    }
+
+    .module-page .stat-icon {
+        width: 38px !important;
+        height: 38px !important;
+        border-radius: 12px !important;
+    }
+
+    .module-page .stat-icon svg {
+        width: 19px !important;
+        height: 19px !important;
+    }
+
+    .module-page .form-label {
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        margin-bottom: 5px !important;
+    }
+
+    .module-page .form-control,
+    .module-page .form-select,
+    .module-page .input-group-text {
+        min-height: 38px !important;
+        font-size: 13px !important;
+        border-radius: 10px !important;
+        padding: 7px 10px !important;
+    }
+
+    .module-page textarea.form-control {
+        min-height: 72px !important;
+    }
+
+    .module-page .btn {
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+        padding: 7px 12px !important;
+    }
+
+    .module-page .btn-sm {
+        font-size: 11px !important;
+        padding: 5px 9px !important;
+    }
+
+    .module-page .table-ui th,
+    .module-page .table-ui td,
+    .module-page .table th,
+    .module-page .table td {
+        font-size: 12px !important;
+        padding: 9px 10px !important;
+    }
+
+    .module-page .table-ui th,
+    .module-page .table th {
+        font-size: 10.5px !important;
+        font-weight: 750 !important;
+    }
+
+    .module-page .status-pill,
+    .module-page .stock-pill,
+    .module-page .filter-chip,
+    .module-page .sidebar-filter-pill,
+    .module-page .badge-soft,
+    .module-page .sidebar-url-badge {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        padding: 4px 8px !important;
+    }
+
+    .module-page .modal-title {
+        font-size: 16px !important;
+        font-weight: 800 !important;
+    }
+
+    .module-page .modal-header {
+        padding: 14px 16px !important;
+    }
+
+    .module-page .modal-body {
+        padding: 16px !important;
+    }
+
+    .module-page .modal-footer {
+        padding: 12px 16px !important;
+    }
+
+    .module-page .modal-content {
+        border-radius: 16px !important;
+    }
+
+    .module-page .toast-title {
+        font-size: 13px !important;
+        font-weight: 800 !important;
+    }
+
+    .module-page .toast-message {
+        font-size: 12px !important;
+        font-weight: 600 !important;
+    }
+
+    @media(max-width:767.98px) {
+        .module-page .page-head {
+            padding: 14px !important;
+        }
+
+        .module-page .page-head h1 {
+            font-size: 21px !important;
+        }
+
+        .module-page .module-card {
+            padding: 13px !important;
+        }
+    }
+    </style><!-- compact-ui-overrides -->
 </head>
 
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -1228,7 +1488,8 @@ if (dspTableExists($conn, 'job_cards')) {
                             <p class="text-muted-custom mb-0">Dispatch page handles only dispatch and delivery.
                                 Stage/status updates can still be checked from Job Card View.</p>
                         </div>
-                        <div class="dispatch-filter-area d-flex flex-wrap gap-2 align-items-center justify-content-lg-end">
+                        <div
+                            class="dispatch-filter-area d-flex flex-wrap gap-2 align-items-center justify-content-lg-end">
                             <a class="filter-chip <?= $filter === 'ready' ? 'active' : '' ?>"
                                 href="dispatch.php?filter=ready">Ready
                                 <small>(<?= number_format($totalReady) ?>)</small></a>
@@ -1258,9 +1519,17 @@ if (dspTableExists($conn, 'job_cards')) {
                             </thead>
                             <tbody>
                                 <?php if (!$rows): ?>
-                                <tr>
+                                <tr id="dispatchEmptyRow">
                                     <td colspan="7" class="text-center text-muted-custom py-4">No
                                         <?= e(strtolower($currentFilterLabel)) ?> job cards found.</td>
+                                </tr>
+                                <?php endif; ?>
+
+                                <?php if ($rows): ?>
+                                <tr id="dispatchSearchEmptyRow" style="display:none">
+                                    <td colspan="7" class="text-center text-muted-custom py-4">
+                                        No dispatch jobs found for the current search.
+                                    </td>
                                 </tr>
                                 <?php endif; ?>
                                 <?php foreach ($rows as $row): ?>
@@ -1281,7 +1550,7 @@ if (dspTableExists($conn, 'job_cards')) {
                                 $dispatchTime = !empty($row['dispatch_completed_at']) ? $row['dispatch_completed_at'] : ($row['dispatched_at'] ?? null);
                                 $deliveredTime = !empty($row['delivered_at'] ?? '') ? $row['delivered_at'] : ($row['completed_at'] ?? null);
                             ?>
-                                <tr>
+                                <tr class="js-dispatch-row">
                                     <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong><small
                                             class="d-block text-muted-custom">Current:
                                             <?= e($row['current_step_name'] ?? '-') ?></small></td>
@@ -1332,8 +1601,18 @@ if (dspTableExists($conn, 'job_cards')) {
                     </div>
 
                     <div class="mobile-cards" id="mobileCards">
-                        <?php if (!$rows): ?><div class="mobile-card text-center text-muted-custom">No
-                            <?= e(strtolower($currentFilterLabel)) ?> job cards found.</div><?php endif; ?>
+                        <?php if (!$rows): ?>
+                        <div class="mobile-card text-center text-muted-custom" id="dispatchMobileEmpty">
+                            No <?= e(strtolower($currentFilterLabel)) ?> job cards found.
+                        </div>
+                        <?php endif; ?>
+
+                        <?php if ($rows): ?>
+                        <div class="mobile-card text-center text-muted-custom" id="dispatchMobileSearchEmpty"
+                            style="display:none">
+                            No dispatch jobs found for the current search.
+                        </div>
+                        <?php endif; ?>
                         <?php foreach ($rows as $row): ?>
                         <?php
                         $isReady = (int)($row['_is_ready'] ?? 0) === 1;
@@ -1349,8 +1628,16 @@ if (dspTableExists($conn, 'job_cards')) {
                             $statusText = 'Ready for Dispatch';
                             $statusClass = 'ready';
                         }
+
+                        $dispatchTime = !empty($row['dispatch_completed_at'])
+                            ? $row['dispatch_completed_at']
+                            : ($row['dispatched_at'] ?? null);
+
+                        $deliveredTime = !empty($row['delivered_at'] ?? '')
+                            ? $row['delivered_at']
+                            : ($row['completed_at'] ?? null);
                     ?>
-                        <div class="mobile-card">
+                        <div class="mobile-card js-dispatch-card">
                             <div class="d-flex justify-content-between gap-2">
                                 <div>
                                     <div class="mobile-card-title"><?= e($row['job_card_no'] ?? '-') ?></div>
@@ -1360,6 +1647,14 @@ if (dspTableExists($conn, 'job_cards')) {
                                         <?= e($row['product_name'] ?? '-') ?></span>
                                     <span class="mobile-card-subtitle">Delivery:
                                         <?= e(dspDate($row['delivery_date'] ?? null)) ?></span>
+                                    <?php if ($dispatchTime): ?>
+                                    <span class="mobile-card-subtitle">Dispatched:
+                                        <?= e(dspDateTime($dispatchTime)) ?></span>
+                                    <?php endif; ?>
+                                    <?php if ($deliveredTime): ?>
+                                    <span class="mobile-card-subtitle">Delivered:
+                                        <?= e(dspDateTime($deliveredTime)) ?></span>
+                                    <?php endif; ?>
                                     <span class="mobile-card-subtitle">Balance:
                                         <?= e(dspMoney($row['balance_amount'] ?? 0)) ?></span>
                                 </div>
@@ -1385,6 +1680,20 @@ if (dspTableExists($conn, 'job_cards')) {
                         </div>
                         <?php endforeach; ?>
                     </div>
+
+                    <?php if (count($rows) > 20): ?>
+                    <div class="dispatch-pagination-wrap d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mt-3"
+                        id="dispatchPaginationWrap">
+                        <div class="text-muted-custom fw-bold" id="dispatchPaginationInfo">
+                            Showing 1-20 of <?= number_format(count($rows)) ?>
+                        </div>
+
+                        <nav aria-label="Dispatch Pagination">
+                            <ul class="pagination pagination-sm mb-0 flex-wrap justify-content-center"
+                                id="dispatchPagination"></ul>
+                        </nav>
+                    </div>
+                    <?php endif; ?>
                 </div>
             </section>
         </main>
@@ -1583,15 +1892,192 @@ if (dspTableExists($conn, 'job_cards')) {
             });
         });
 
-        document.getElementById('tableSearch')?.addEventListener('input', function() {
-            const value = this.value.toLowerCase().trim();
-            document.querySelectorAll('#dataTable tbody tr').forEach(function(row) {
-                row.style.display = row.textContent.toLowerCase().includes(value) ? '' : 'none';
+        /*
+         * Dispatch pagination
+         * - 20 records per page.
+         * - Pagination is visible only when the current filtered list has > 20.
+         * - Search runs across all loaded rows first, then pagination is applied.
+         * - Desktop and mobile stay on the same page.
+         */
+        (function initDispatchPagination() {
+            const searchInput = document.getElementById('tableSearch');
+            const pagination = document.getElementById('dispatchPagination');
+            const paginationInfo = document.getElementById('dispatchPaginationInfo');
+            const paginationWrap = document.getElementById('dispatchPaginationWrap');
+
+            const desktopRows = Array.from(
+                document.querySelectorAll('#dataTable tbody .js-dispatch-row')
+            );
+
+            const mobileCards = Array.from(
+                document.querySelectorAll('#mobileCards .js-dispatch-card')
+            );
+
+            const desktopSearchEmpty = document.getElementById('dispatchSearchEmptyRow');
+            const mobileSearchEmpty = document.getElementById('dispatchMobileSearchEmpty');
+
+            if (!desktopRows.length) {
+                return;
+            }
+
+            const pageSize = 20;
+            let currentPage = 1;
+
+            function searchableText(index) {
+                const desktopText = desktopRows[index]?.textContent || '';
+                const mobileText = mobileCards[index]?.textContent || '';
+                return (desktopText + ' ' + mobileText).toLowerCase();
+            }
+
+            function matchedIndexes() {
+                const term = String(searchInput?.value || '').toLowerCase().trim();
+                const matches = [];
+
+                desktopRows.forEach(function(row, index) {
+                    if (term === '' || searchableText(index).includes(term)) {
+                        matches.push(index);
+                    }
+                });
+
+                return matches;
+            }
+
+            function addPageButton(label, page, disabled, active, ariaLabel) {
+                if (!pagination) return;
+
+                const li = document.createElement('li');
+                li.className = 'page-item' +
+                    (disabled ? ' disabled' : '') +
+                    (active ? ' active' : '');
+
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'page-link';
+                button.textContent = label;
+                button.setAttribute('aria-label', ariaLabel || String(label));
+
+                if (active) {
+                    button.setAttribute('aria-current', 'page');
+                }
+
+                if (!disabled) {
+                    button.addEventListener('click', function() {
+                        currentPage = page;
+                        render();
+                    });
+                }
+
+                li.appendChild(button);
+                pagination.appendChild(li);
+            }
+
+            function renderPagination(totalPages) {
+                if (!pagination) return;
+
+                pagination.innerHTML = '';
+
+                addPageButton(
+                    '‹',
+                    Math.max(1, currentPage - 1),
+                    currentPage <= 1,
+                    false,
+                    'Previous page'
+                );
+
+                let startPage = Math.max(1, currentPage - 2);
+                let endPage = Math.min(totalPages, startPage + 4);
+                startPage = Math.max(1, endPage - 4);
+
+                if (startPage > 1) {
+                    addPageButton('1', 1, false, currentPage === 1, 'Page 1');
+
+                    if (startPage > 2) {
+                        addPageButton('…', currentPage, true, false, 'More pages');
+                    }
+                }
+
+                for (let page = startPage; page <= endPage; page++) {
+                    addPageButton(
+                        String(page),
+                        page,
+                        false,
+                        page === currentPage,
+                        'Page ' + page
+                    );
+                }
+
+                if (endPage < totalPages) {
+                    if (endPage < totalPages - 1) {
+                        addPageButton('…', currentPage, true, false, 'More pages');
+                    }
+
+                    addPageButton(
+                        String(totalPages),
+                        totalPages,
+                        false,
+                        currentPage === totalPages,
+                        'Page ' + totalPages
+                    );
+                }
+
+                addPageButton(
+                    '›',
+                    Math.min(totalPages, currentPage + 1),
+                    currentPage >= totalPages,
+                    false,
+                    'Next page'
+                );
+            }
+
+            function render() {
+                const matches = matchedIndexes();
+                const total = matches.length;
+                const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+                if (currentPage > totalPages) {
+                    currentPage = totalPages;
+                }
+
+                const start = total === 0 ? 0 : (currentPage - 1) * pageSize;
+                const end = Math.min(start + pageSize, total);
+                const visible = new Set(matches.slice(start, end));
+
+                desktopRows.forEach(function(row, index) {
+                    row.style.display = visible.has(index) ? '' : 'none';
+                });
+
+                mobileCards.forEach(function(card, index) {
+                    card.style.display = visible.has(index) ? '' : 'none';
+                });
+
+                if (desktopSearchEmpty) {
+                    desktopSearchEmpty.style.display = total === 0 ? '' : 'none';
+                }
+
+                if (mobileSearchEmpty) {
+                    mobileSearchEmpty.style.display = total === 0 ? '' : 'none';
+                }
+
+                if (paginationInfo) {
+                    paginationInfo.textContent = total === 0 ?
+                        'Showing 0 of 0' :
+                        'Showing ' + (start + 1) + '-' + end + ' of ' + total;
+                }
+
+                if (paginationWrap) {
+                    paginationWrap.style.display = total > 20 ? '' : 'none';
+                }
+
+                renderPagination(totalPages);
+            }
+
+            searchInput?.addEventListener('input', function() {
+                currentPage = 1;
+                render();
             });
-            document.querySelectorAll('#mobileCards .mobile-card').forEach(function(card) {
-                card.style.display = card.textContent.toLowerCase().includes(value) ? '' : 'none';
-            });
-        });
+
+            render();
+        })();
 
         if (window.lucide && typeof window.lucide.createIcons === 'function') {
             window.lucide.createIcons();
