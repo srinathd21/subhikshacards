@@ -466,8 +466,8 @@ function qtWhatsappMessage(array $row): string
     $functionType = trim((string)($row['function_name'] ?? '-'));
     $qty = number_format((float)($row['total_qty'] ?? 0), 0);
     $itemDetails = trim((string)($row['item_details'] ?? ''));
-    $price = '₹' . number_format((float)($row['sub_total'] ?? 0), 2);
-    $finalAmount = '₹' . number_format((float)($row['final_amount'] ?? 0), 2);
+    $price = qtMoney($row['sub_total'] ?? 0);
+    $finalAmount = qtMoney($row['final_amount'] ?? 0);
 
     $lines = [
         "Hi {$customerName},",
@@ -664,8 +664,8 @@ function qtSendWhatsappByApi(mysqli $conn, int $id): array
             'function_type' => (string)($quotation['function_name'] ?? '-'),
             'number_of_items' => number_format((float)($quotation['total_qty'] ?? 0), 0),
             'item_details' => (string)($quotation['item_details'] ?? ''),
-            'price' => '₹' . number_format((float)($quotation['sub_total'] ?? 0), 2),
-            'final_price' => '₹' . number_format((float)($quotation['final_amount'] ?? 0), 2)
+            'price' => qtMoney($quotation['sub_total'] ?? 0),
+            'final_price' => qtMoney($quotation['final_amount'] ?? 0)
         ],
         'related_module' => 'Quotations',
         'related_id' => $id,
@@ -862,9 +862,46 @@ function qtDate($value): string
     return !empty($value) ? date('d-m-Y', strtotime($value)) : '-';
 }
 
+function qtIndianNumber($value, int $decimals = 2): string
+{
+    $number = (float)$value;
+    $negative = $number < 0;
+    $number = abs($number);
+
+    $fixed = number_format($number, $decimals, '.', '');
+    $parts = explode('.', $fixed, 2);
+    $integer = $parts[0];
+    $decimal = $parts[1] ?? '';
+
+    if (strlen($integer) > 3) {
+        $lastThree = substr($integer, -3);
+        $remaining = substr($integer, 0, -3);
+        $groups = [];
+
+        while (strlen($remaining) > 2) {
+            array_unshift($groups, substr($remaining, -2));
+            $remaining = substr($remaining, 0, -2);
+        }
+
+        if ($remaining !== '') {
+            array_unshift($groups, $remaining);
+        }
+
+        $integer = implode(',', $groups) . ',' . $lastThree;
+    }
+
+    $formatted = $integer;
+
+    if ($decimals > 0) {
+        $formatted .= '.' . str_pad($decimal, $decimals, '0');
+    }
+
+    return ($negative ? '-' : '') . $formatted;
+}
+
 function qtMoney($value): string
 {
-    return '₹' . number_format((float)$value, 2);
+    return '₹' . qtIndianNumber($value, 2);
 }
 
 $defaultStatusId = $statuses[0]['id'] ?? '';

@@ -15,9 +15,47 @@ function qsl_e($value): string
     return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
 }
 
+function qsl_indian_number($value, int $decimals = 2): string
+{
+    $number = (float)$value;
+    $negative = $number < 0;
+    $number = abs($number);
+
+    $fixed = number_format($number, $decimals, '.', '');
+    $parts = explode('.', $fixed, 2);
+
+    $integer = $parts[0];
+    $decimal = $parts[1] ?? '';
+
+    if (strlen($integer) > 3) {
+        $lastThree = substr($integer, -3);
+        $remaining = substr($integer, 0, -3);
+        $groups = [];
+
+        while (strlen($remaining) > 2) {
+            array_unshift($groups, substr($remaining, -2));
+            $remaining = substr($remaining, 0, -2);
+        }
+
+        if ($remaining !== '') {
+            array_unshift($groups, $remaining);
+        }
+
+        $integer = implode(',', $groups) . ',' . $lastThree;
+    }
+
+    $formatted = $integer;
+
+    if ($decimals > 0) {
+        $formatted .= '.' . str_pad($decimal, $decimals, '0');
+    }
+
+    return ($negative ? '-' : '') . $formatted;
+}
+
 function qsl_money($value): string
 {
-    return '₹' . number_format((float)$value, 2);
+    return '₹' . qsl_indian_number($value, 2);
 }
 
 function qsl_action_svg(string $icon): string
@@ -260,6 +298,7 @@ function qsl_page_url(int $page): string
 ?>
 <!doctype html>
 <html lang="en">
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -375,718 +414,727 @@ function qsl_page_url(int $page): string
             padding: 16px;
         }
     }
-    
-    .quick-sale-action-group {
-        display:flex;
-        justify-content:flex-end;
-        gap:5px;
-        white-space:nowrap;
-    }
-    .quick-sale-action-group .btn {
-        width:31px !important;
-        height:31px !important;
-        min-width:31px !important;
-        padding:0 !important;
-        border-radius:9px !important;
-        display:inline-flex !important;
-        align-items:center;
-        justify-content:center;
-    }
-    .quick-sale-action-group .btn svg { width:14px; height:14px; }
-    .quick-sale-action-group .wa-sent { box-shadow:0 0 0 2px rgba(25,135,84,.12); }
-    .quick-sale-edit-modal .modal-content { border:0; border-radius:18px; overflow:hidden; }
-</style>
 
-<style>
-/* ========================================================================
+    .quick-sale-action-group {
+        display: flex;
+        justify-content: flex-end;
+        gap: 5px;
+        white-space: nowrap;
+    }
+
+    .quick-sale-action-group .btn {
+        width: 31px !important;
+        height: 31px !important;
+        min-width: 31px !important;
+        padding: 0 !important;
+        border-radius: 9px !important;
+        display: inline-flex !important;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .quick-sale-action-group .btn svg {
+        width: 14px;
+        height: 14px;
+    }
+
+    .quick-sale-action-group .wa-sent {
+        box-shadow: 0 0 0 2px rgba(25, 135, 84, .12);
+    }
+
+    .quick-sale-edit-modal .modal-content {
+        border: 0;
+        border-radius: 18px;
+        overflow: hidden;
+    }
+    </style>
+
+    <style>
+    /* ========================================================================
    Compact module UI - tuned for comfortable use at 100% browser zoom.
    UI sizing only: no PHP, SQL, workflow, filters, pagination or API logic.
    ======================================================================== */
-#main .page-section {
-    font-size: 12.5px;
-}
+    #main .page-section {
+        font-size: 12.5px;
+    }
 
-#main .page-section .page-head {
-    padding: 16px 18px !important;
-    margin-bottom: 12px !important;
-    border-radius: 16px !important;
-}
-
-#main .page-section .page-head h1 {
-    font-size: 22px !important;
-    font-weight: 800 !important;
-    line-height: 1.15 !important;
-    letter-spacing: -.15px !important;
-    margin-bottom: 3px !important;
-}
-
-#main .page-section .page-head p,
-#main .page-section .page-head .text-muted-custom {
-    font-size: 11.5px !important;
-    font-weight: 500 !important;
-    line-height: 1.35 !important;
-}
-
-#main .page-section .module-card {
-    padding: 14px 15px !important;
-    border-radius: 16px !important;
-    margin-bottom: 12px !important;
-}
-
-#main .page-section .module-title {
-    font-size: 15px !important;
-    font-weight: 800 !important;
-    line-height: 1.2 !important;
-}
-
-#main .page-section .stat-card,
-#main .page-section .kpi-card {
-    min-height: 86px !important;
-    padding: 12px 13px !important;
-    border-radius: 14px !important;
-    gap: 10px !important;
-}
-
-#main .page-section .stat-icon {
-    width: 40px !important;
-    height: 40px !important;
-    min-width: 40px !important;
-    border-radius: 12px !important;
-}
-
-#main .page-section .stat-icon svg,
-#main .page-section .stat-icon i {
-    width: 19px !important;
-    height: 19px !important;
-}
-
-#main .page-section .stat-card span,
-#main .page-section .stat-card small,
-#main .page-section .kpi-card small {
-    font-size: 10px !important;
-    font-weight: 700 !important;
-    letter-spacing: .2px !important;
-}
-
-#main .page-section .stat-card strong,
-#main .page-section .kpi-card strong {
-    font-size: 18px !important;
-    font-weight: 800 !important;
-    line-height: 1.15 !important;
-}
-
-#main .page-section .filter-card {
-    padding: 12px !important;
-    border-radius: 14px !important;
-}
-
-#main .page-section .form-label,
-#main .page-section label.fw-bold {
-    font-size: 11px !important;
-    font-weight: 700 !important;
-    margin-bottom: 4px !important;
-}
-
-#main .page-section .form-control,
-#main .page-section .form-select,
-#main .page-section .select2-container--bootstrap-5 .select2-selection {
-    min-height: 38px !important;
-    font-size: 12px !important;
-    border-radius: 10px !important;
-}
-
-#main .page-section .form-control,
-#main .page-section .form-select {
-    padding-top: .38rem !important;
-    padding-bottom: .38rem !important;
-}
-
-#main .page-section textarea.form-control {
-    min-height: 68px !important;
-}
-
-#main .page-section .btn:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
-    font-size: 11.5px !important;
-    font-weight: 700 !important;
-    line-height: 1.2 !important;
-}
-
-#main .page-section .btn.rounded-pill:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
-    padding-top: 6px !important;
-    padding-bottom: 6px !important;
-}
-
-#main .page-section .table-ui,
-#main .page-section table {
-    font-size: 11.5px !important;
-}
-
-#main .page-section .table-ui th,
-#main .page-section table th {
-    font-size: 10px !important;
-    font-weight: 700 !important;
-    padding: 8px 9px !important;
-    line-height: 1.25 !important;
-}
-
-#main .page-section .table-ui td,
-#main .page-section table td {
-    font-size: 11.5px !important;
-    font-weight: 500 !important;
-    padding: 8px 9px !important;
-    line-height: 1.3 !important;
-}
-
-#main .page-section table td strong,
-#main .page-section .customer-name,
-#main .page-section .job-no,
-#main .page-section .mobile-card-title,
-#main .page-section .product-names,
-#main .page-section .amount-text,
-#main .page-section .balance-text,
-#main .page-section .paid-amount,
-#main .page-section .balance-amount {
-    font-weight: 700 !important;
-}
-
-#main .page-section .status-pill,
-#main .page-section .stock-pill,
-#main .page-section .badge-pill,
-#main .page-section .order-badge,
-#main .page-section .filter-tab {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-    padding: 4px 7px !important;
-}
-
-#main .page-section .mobile-card,
-#main .page-section .mobile-products .card-ui {
-    padding: 12px !important;
-    border-radius: 14px !important;
-    margin-bottom: 9px !important;
-}
-
-#main .page-section .mobile-card-title {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .mobile-card-subtitle,
-#main .page-section .muted-small,
-#main .page-section .small-muted,
-#main .page-section .meta {
-    font-size: 10.5px !important;
-    font-weight: 500 !important;
-    line-height: 1.35 !important;
-}
-
-#main .page-section .view-info-card,
-#main .page-section .amount-box,
-#main .page-section .profile-box,
-#main .page-section .summary-item,
-#main .page-section .hist-row {
-    border-radius: 13px !important;
-    padding: 11px !important;
-}
-
-#main .page-section .view-info-card small,
-#main .page-section .amount-box small,
-#main .page-section .summary-item small,
-#main .page-section .section-label {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .view-info-card span,
-#main .page-section .view-info-card strong,
-#main .page-section .amount-box strong,
-#main .page-section .summary-item strong {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .page-section .pagination-wrap,
-#main .page-section nav[aria-label*="Pagination" i] {
-    font-size: 11px !important;
-}
-
-#main .page-section .pagination .page-link,
-#main .page-section .product-pagination .page-link-ui {
-    min-width: 32px !important;
-    min-height: 32px !important;
-    padding: 5px 8px !important;
-    font-size: 10.5px !important;
-    font-weight: 700 !important;
-}
-
-/* Customer Management compact sizing */
-#main .customer-page .stats-grid {
-    gap: 10px !important;
-    margin-bottom: 12px !important;
-}
-
-#main .customer-page .stat-box {
-    padding: 11px 12px !important;
-    border-radius: 14px !important;
-}
-
-#main .customer-page .stat-box small {
-    font-size: 9.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .customer-page .stat-box strong {
-    font-size: 18px !important;
-    font-weight: 800 !important;
-    margin-top: 2px !important;
-}
-
-#main .customer-page .workspace {
-    gap: 12px !important;
-}
-
-#main .customer-page .pane {
-    border-radius: 16px !important;
-}
-
-#main .customer-page .pane-head,
-#main .customer-page .pane-body {
-    padding: 13px 14px !important;
-}
-
-#main .customer-page .customer-name,
-#main .customer-page .profile-name {
-    font-size: 13px !important;
-    font-weight: 700 !important;
-}
-
-#main .customer-page .profile-grid,
-#main .customer-page .summary-grid {
-    gap: 9px !important;
-}
-
-#main .customer-page .tabs {
-    margin: 12px 0 9px !important;
-    gap: 5px !important;
-}
-
-#main .customer-page .tabs button {
-    padding: 5px 9px !important;
-    font-size: 10px !important;
-    font-weight: 700 !important;
-}
-
-/* Product master images and rows */
-#main .module-page .product-thumb,
-#main .module-page .placeholder-thumb {
-    width: 42px !important;
-    height: 42px !important;
-}
-
-/* Job Card shortcut controls */
-#main .module-page .shortcut-action-box {
-    padding: 10px !important;
-    border-radius: 13px !important;
-}
-
-#main .module-page .shortcut-btn {
-    min-height: 34px !important;
-    font-size: 10.5px !important;
-    font-weight: 700 !important;
-}
-
-#main .module-page .shortcut-note,
-#main .module-page .shortcut-help-bar {
-    font-size: 10.5px !important;
-    font-weight: 500 !important;
-}
-
-/* Keep icon-only actions compact */
-#main .page-section .btn-action-icon,
-#main .page-section .btn-delete-icon,
-#main .page-section .btn-whatsapp-icon,
-#main .customer-page .actions .btn {
-    width: 32px !important;
-    height: 32px !important;
-    min-width: 32px !important;
-    max-width: 32px !important;
-    padding: 0 !important;
-}
-
-#main .page-section .btn-action-icon svg,
-#main .page-section .btn-delete-icon svg,
-#main .page-section .btn-whatsapp-icon svg,
-#main .customer-page .actions .btn svg {
-    width: 14px !important;
-    height: 14px !important;
-}
-
-/* Reduce heavy utility weight only inside module content */
-#main .page-section .fw-bold,
-#main .page-section strong {
-    font-weight: 700 !important;
-}
-
-/* Compact modal typography without changing modal workflow */
-#main ~ .modal .modal-title,
-.modal .modal-title {
-    font-size: 15px !important;
-    font-weight: 800 !important;
-}
-
-.modal .modal-header,
-.modal .modal-footer {
-    padding-top: 11px !important;
-    padding-bottom: 11px !important;
-}
-
-.modal .modal-body {
-    font-size: 12px !important;
-}
-
-@media (max-width: 767.98px) {
     #main .page-section .page-head {
-        padding: 14px !important;
+        padding: 16px 18px !important;
+        margin-bottom: 12px !important;
+        border-radius: 16px !important;
     }
 
     #main .page-section .page-head h1 {
-        font-size: 20px !important;
+        font-size: 22px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+        letter-spacing: -.15px !important;
+        margin-bottom: 3px !important;
+    }
+
+    #main .page-section .page-head p,
+    #main .page-section .page-head .text-muted-custom {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
     }
 
     #main .page-section .module-card {
-        padding: 12px !important;
+        padding: 14px 15px !important;
+        border-radius: 16px !important;
+        margin-bottom: 12px !important;
+    }
+
+    #main .page-section .module-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+        line-height: 1.2 !important;
     }
 
     #main .page-section .stat-card,
     #main .page-section .kpi-card {
-        min-height: 76px !important;
-        padding: 10px 11px !important;
+        min-height: 86px !important;
+        padding: 12px 13px !important;
+        border-radius: 14px !important;
+        gap: 10px !important;
     }
 
     #main .page-section .stat-icon {
+        width: 40px !important;
+        height: 40px !important;
+        min-width: 40px !important;
+        border-radius: 12px !important;
+    }
+
+    #main .page-section .stat-icon svg,
+    #main .page-section .stat-icon i {
+        width: 19px !important;
+        height: 19px !important;
+    }
+
+    #main .page-section .stat-card span,
+    #main .page-section .stat-card small,
+    #main .page-section .kpi-card small {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        letter-spacing: .2px !important;
+    }
+
+    #main .page-section .stat-card strong,
+    #main .page-section .kpi-card strong {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        line-height: 1.15 !important;
+    }
+
+    #main .page-section .filter-card {
+        padding: 12px !important;
+        border-radius: 14px !important;
+    }
+
+    #main .page-section .form-label,
+    #main .page-section label.fw-bold {
+        font-size: 11px !important;
+        font-weight: 700 !important;
+        margin-bottom: 4px !important;
+    }
+
+    #main .page-section .form-control,
+    #main .page-section .form-select,
+    #main .page-section .select2-container--bootstrap-5 .select2-selection {
+        min-height: 38px !important;
+        font-size: 12px !important;
+        border-radius: 10px !important;
+    }
+
+    #main .page-section .form-control,
+    #main .page-section .form-select {
+        padding-top: .38rem !important;
+        padding-bottom: .38rem !important;
+    }
+
+    #main .page-section textarea.form-control {
+        min-height: 68px !important;
+    }
+
+    #main .page-section .btn:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
+        font-size: 11.5px !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+    }
+
+    #main .page-section .btn.rounded-pill:not(.btn-action-icon):not(.btn-delete-icon):not(.btn-whatsapp-icon) {
+        padding-top: 6px !important;
+        padding-bottom: 6px !important;
+    }
+
+    #main .page-section .table-ui,
+    #main .page-section table {
+        font-size: 11.5px !important;
+    }
+
+    #main .page-section .table-ui th,
+    #main .page-section table th {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        padding: 8px 9px !important;
+        line-height: 1.25 !important;
+    }
+
+    #main .page-section .table-ui td,
+    #main .page-section table td {
+        font-size: 11.5px !important;
+        font-weight: 500 !important;
+        padding: 8px 9px !important;
+        line-height: 1.3 !important;
+    }
+
+    #main .page-section table td strong,
+    #main .page-section .customer-name,
+    #main .page-section .job-no,
+    #main .page-section .mobile-card-title,
+    #main .page-section .product-names,
+    #main .page-section .amount-text,
+    #main .page-section .balance-text,
+    #main .page-section .paid-amount,
+    #main .page-section .balance-amount {
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .status-pill,
+    #main .page-section .stock-pill,
+    #main .page-section .badge-pill,
+    #main .page-section .order-badge,
+    #main .page-section .filter-tab {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+        padding: 4px 7px !important;
+    }
+
+    #main .page-section .mobile-card,
+    #main .page-section .mobile-products .card-ui {
+        padding: 12px !important;
+        border-radius: 14px !important;
+        margin-bottom: 9px !important;
+    }
+
+    #main .page-section .mobile-card-title {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .mobile-card-subtitle,
+    #main .page-section .muted-small,
+    #main .page-section .small-muted,
+    #main .page-section .meta {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.35 !important;
+    }
+
+    #main .page-section .view-info-card,
+    #main .page-section .amount-box,
+    #main .page-section .profile-box,
+    #main .page-section .summary-item,
+    #main .page-section .hist-row {
+        border-radius: 13px !important;
+        padding: 11px !important;
+    }
+
+    #main .page-section .view-info-card small,
+    #main .page-section .amount-box small,
+    #main .page-section .summary-item small,
+    #main .page-section .section-label {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .view-info-card span,
+    #main .page-section .view-info-card strong,
+    #main .page-section .amount-box strong,
+    #main .page-section .summary-item strong {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .page-section .pagination-wrap,
+    #main .page-section nav[aria-label*="Pagination"i] {
+        font-size: 11px !important;
+    }
+
+    #main .page-section .pagination .page-link,
+    #main .page-section .product-pagination .page-link-ui {
+        min-width: 32px !important;
+        min-height: 32px !important;
+        padding: 5px 8px !important;
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Customer Management compact sizing */
+    #main .customer-page .stats-grid {
+        gap: 10px !important;
+        margin-bottom: 12px !important;
+    }
+
+    #main .customer-page .stat-box {
+        padding: 11px 12px !important;
+        border-radius: 14px !important;
+    }
+
+    #main .customer-page .stat-box small {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .customer-page .stat-box strong {
+        font-size: 18px !important;
+        font-weight: 800 !important;
+        margin-top: 2px !important;
+    }
+
+    #main .customer-page .workspace {
+        gap: 12px !important;
+    }
+
+    #main .customer-page .pane {
+        border-radius: 16px !important;
+    }
+
+    #main .customer-page .pane-head,
+    #main .customer-page .pane-body {
+        padding: 13px 14px !important;
+    }
+
+    #main .customer-page .customer-name,
+    #main .customer-page .profile-name {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .customer-page .profile-grid,
+    #main .customer-page .summary-grid {
+        gap: 9px !important;
+    }
+
+    #main .customer-page .tabs {
+        margin: 12px 0 9px !important;
+        gap: 5px !important;
+    }
+
+    #main .customer-page .tabs button {
+        padding: 5px 9px !important;
+        font-size: 10px !important;
+        font-weight: 700 !important;
+    }
+
+    /* Product master images and rows */
+    #main .module-page .product-thumb,
+    #main .module-page .placeholder-thumb {
+        width: 42px !important;
+        height: 42px !important;
+    }
+
+    /* Job Card shortcut controls */
+    #main .module-page .shortcut-action-box {
+        padding: 10px !important;
+        border-radius: 13px !important;
+    }
+
+    #main .module-page .shortcut-btn {
+        min-height: 34px !important;
+        font-size: 10.5px !important;
+        font-weight: 700 !important;
+    }
+
+    #main .module-page .shortcut-note,
+    #main .module-page .shortcut-help-bar {
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+    }
+
+    /* Keep icon-only actions compact */
+    #main .page-section .btn-action-icon,
+    #main .page-section .btn-delete-icon,
+    #main .page-section .btn-whatsapp-icon,
+    #main .customer-page .actions .btn {
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        max-width: 32px !important;
+        padding: 0 !important;
+    }
+
+    #main .page-section .btn-action-icon svg,
+    #main .page-section .btn-delete-icon svg,
+    #main .page-section .btn-whatsapp-icon svg,
+    #main .customer-page .actions .btn svg {
+        width: 14px !important;
+        height: 14px !important;
+    }
+
+    /* Reduce heavy utility weight only inside module content */
+    #main .page-section .fw-bold,
+    #main .page-section strong {
+        font-weight: 700 !important;
+    }
+
+    /* Compact modal typography without changing modal workflow */
+    #main~.modal .modal-title,
+    .modal .modal-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+    }
+
+    .modal .modal-header,
+    .modal .modal-footer {
+        padding-top: 11px !important;
+        padding-bottom: 11px !important;
+    }
+
+    .modal .modal-body {
+        font-size: 12px !important;
+    }
+
+    @media (max-width: 767.98px) {
+        #main .page-section .page-head {
+            padding: 14px !important;
+        }
+
+        #main .page-section .page-head h1 {
+            font-size: 20px !important;
+        }
+
+        #main .page-section .module-card {
+            padding: 12px !important;
+        }
+
+        #main .page-section .stat-card,
+        #main .page-section .kpi-card {
+            min-height: 76px !important;
+            padding: 10px 11px !important;
+        }
+
+        #main .page-section .stat-icon {
+            width: 36px !important;
+            height: 36px !important;
+            min-width: 36px !important;
+        }
+    }
+    </style>
+
+    <style>
+    /* Quick Sales list - compact content and reliable action icons */
+    .quick-sales-page .module-card {
+        padding: 12px 13px !important;
+    }
+
+    .quick-sales-page .table-ui {
+        font-size: 10.5px !important;
+    }
+
+    .quick-sales-page .table-ui th {
+        padding: 6px 7px !important;
+        font-size: 9px !important;
+        font-weight: 700 !important;
+        white-space: nowrap;
+    }
+
+    .quick-sales-page .table-ui td {
+        padding: 6px 7px !important;
+        font-size: 10.5px !important;
+        font-weight: 500 !important;
+        line-height: 1.25 !important;
+        vertical-align: middle !important;
+    }
+
+    .quick-sales-page .table-ui td strong,
+    .quick-sales-page .customer-info .customer-name,
+    .quick-sales-page .product-names {
+        font-size: 10.7px !important;
+        font-weight: 700 !important;
+    }
+
+    .quick-sales-page .customer-info .customer-mobile,
+    .quick-sales-page .customer-info .customer-address,
+    .quick-sales-page .table-ui td small,
+    .quick-sales-page .payment-parts .upi-ref {
+        font-size: 9.3px !important;
+        line-height: 1.2 !important;
+        font-weight: 500 !important;
+    }
+
+    .quick-sales-page .product-names {
+        line-height: 1.25 !important;
+    }
+
+    .quick-sales-page .payment-parts {
+        font-size: 10.2px !important;
+        line-height: 1.3 !important;
+        font-weight: 600 !important;
+    }
+
+    .quick-sales-page .quick-sale-action-group {
+        gap: 4px !important;
+    }
+
+    .quick-sales-page .quick-sale-action-group .btn {
+        width: 28px !important;
+        height: 28px !important;
+        min-width: 28px !important;
+        max-width: 28px !important;
+        border-radius: 8px !important;
+        padding: 0 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+
+    .quick-sales-page .quick-sale-action-group .btn i {
+        font-size: 12px !important;
+        line-height: 1 !important;
+    }
+
+    .quick-sales-page .quick-sale-action-group .btn-whatsapp-icon i {
+        font-size: 14px !important;
+    }
+
+    .quick-sales-page .quick-sale-action-group .btn-whatsapp-icon {
+        background: #198754 !important;
+        border-color: #198754 !important;
+        color: #fff !important;
+    }
+
+    .quick-sales-page .quick-sale-action-group .btn-whatsapp-icon:hover,
+    .quick-sales-page .quick-sale-action-group .btn-whatsapp-icon:focus {
+        background: #157347 !important;
+        border-color: #146c43 !important;
+        color: #fff !important;
+    }
+
+    .quick-sales-page .stat-card {
+        min-height: 68px !important;
+        padding: 9px 11px !important;
+    }
+
+    .quick-sales-page .stat-card small {
+        font-size: 9px !important;
+        font-weight: 700 !important;
+    }
+
+    .quick-sales-page .stat-card strong {
+        font-size: 16px !important;
+        font-weight: 750 !important;
+        margin-top: 2px !important;
+    }
+
+    /* Toast UI - same styling used by Enquiries */
+    .toast-ui {
+        border: 0;
+        border-radius: 18px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
+        overflow: hidden;
+        min-width: 320px;
+        max-width: 420px;
+    }
+
+    .toast-ui.success {
+        background: #dcfce7;
+        color: #14532d;
+    }
+
+    .toast-ui.danger {
+        background: #fee2e2;
+        color: #7f1d1d;
+    }
+
+    .toast-ui.warning {
+        background: #fef3c7;
+        color: #78350f;
+    }
+
+    .toast-ui .toast-title {
+        font-size: 14px;
+        font-weight: 900;
+        margin-bottom: 2px;
+    }
+
+    .toast-ui .toast-message {
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.45;
+    }
+
+    .quick-action-svg {
+        display: block !important;
+        width: 14px !important;
+        height: 14px !important;
+        flex: 0 0 14px !important;
+        pointer-events: none !important;
+    }
+
+    .btn-whatsapp-icon .quick-action-svg {
+        width: 16px !important;
+        height: 16px !important;
+    }
+
+    @media (max-width: 991.98px) {
+        .quick-sales-page .table-ui {
+            min-width: 1040px;
+        }
+    }
+
+
+    /* Quick Sales action icons - match the supplied reference page */
+    .quick-sales-page .quick-sale-action-group {
+        gap: 7px !important;
+    }
+
+    .quick-sales-page .quick-sale-action-group .btn {
         width: 36px !important;
         height: 36px !important;
         min-width: 36px !important;
+        max-width: 36px !important;
+        padding: 0 !important;
+        border-radius: 50% !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-shadow: none !important;
+        background: #fff !important;
     }
-}
-</style>
 
-<style>
-
-/* Quick Sales list - compact content and reliable action icons */
-.quick-sales-page .module-card {
-    padding: 12px 13px !important;
-}
-
-.quick-sales-page .table-ui {
-    font-size: 10.5px !important;
-}
-
-.quick-sales-page .table-ui th {
-    padding: 6px 7px !important;
-    font-size: 9px !important;
-    font-weight: 700 !important;
-    white-space: nowrap;
-}
-
-.quick-sales-page .table-ui td {
-    padding: 6px 7px !important;
-    font-size: 10.5px !important;
-    font-weight: 500 !important;
-    line-height: 1.25 !important;
-    vertical-align: middle !important;
-}
-
-.quick-sales-page .table-ui td strong,
-.quick-sales-page .customer-info .customer-name,
-.quick-sales-page .product-names {
-    font-size: 10.7px !important;
-    font-weight: 700 !important;
-}
-
-.quick-sales-page .customer-info .customer-mobile,
-.quick-sales-page .customer-info .customer-address,
-.quick-sales-page .table-ui td small,
-.quick-sales-page .payment-parts .upi-ref {
-    font-size: 9.3px !important;
-    line-height: 1.2 !important;
-    font-weight: 500 !important;
-}
-
-.quick-sales-page .product-names {
-    line-height: 1.25 !important;
-}
-
-.quick-sales-page .payment-parts {
-    font-size: 10.2px !important;
-    line-height: 1.3 !important;
-    font-weight: 600 !important;
-}
-
-.quick-sales-page .quick-sale-action-group {
-    gap: 4px !important;
-}
-
-.quick-sales-page .quick-sale-action-group .btn {
-    width: 28px !important;
-    height: 28px !important;
-    min-width: 28px !important;
-    max-width: 28px !important;
-    border-radius: 8px !important;
-    padding: 0 !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-}
-
-.quick-sales-page .quick-sale-action-group .btn i {
-    font-size: 12px !important;
-    line-height: 1 !important;
-}
-
-.quick-sales-page .quick-sale-action-group .btn-whatsapp-icon i {
-    font-size: 14px !important;
-}
-
-.quick-sales-page .quick-sale-action-group .btn-whatsapp-icon {
-    background: #198754 !important;
-    border-color: #198754 !important;
-    color: #fff !important;
-}
-
-.quick-sales-page .quick-sale-action-group .btn-whatsapp-icon:hover,
-.quick-sales-page .quick-sale-action-group .btn-whatsapp-icon:focus {
-    background: #157347 !important;
-    border-color: #146c43 !important;
-    color: #fff !important;
-}
-
-.quick-sales-page .stat-card {
-    min-height: 68px !important;
-    padding: 9px 11px !important;
-}
-
-.quick-sales-page .stat-card small {
-    font-size: 9px !important;
-    font-weight: 700 !important;
-}
-
-.quick-sales-page .stat-card strong {
-    font-size: 16px !important;
-    font-weight: 750 !important;
-    margin-top: 2px !important;
-}
-
-/* Toast UI - same styling used by Enquiries */
-.toast-ui {
-    border: 0;
-    border-radius: 18px;
-    box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
-    overflow: hidden;
-    min-width: 320px;
-    max-width: 420px;
-}
-
-.toast-ui.success {
-    background: #dcfce7;
-    color: #14532d;
-}
-
-.toast-ui.danger {
-    background: #fee2e2;
-    color: #7f1d1d;
-}
-
-.toast-ui.warning {
-    background: #fef3c7;
-    color: #78350f;
-}
-
-.toast-ui .toast-title {
-    font-size: 14px;
-    font-weight: 900;
-    margin-bottom: 2px;
-}
-
-.toast-ui .toast-message {
-    font-size: 13px;
-    font-weight: 800;
-    line-height: 1.45;
-}
-
-.quick-action-svg {
-    display: block !important;
-    width: 14px !important;
-    height: 14px !important;
-    flex: 0 0 14px !important;
-    pointer-events: none !important;
-}
-
-.btn-whatsapp-icon .quick-action-svg {
-    width: 16px !important;
-    height: 16px !important;
-}
-
-@media (max-width: 991.98px) {
-    .quick-sales-page .table-ui {
-        min-width: 1040px;
+    .quick-sales-page .quick-sale-action-group .quick-action-svg {
+        width: 16px !important;
+        height: 16px !important;
     }
-}
 
+    .quick-sales-page .quick-sale-action-group .qs-ref-invoice {
+        border: 1px solid #667085 !important;
+        color: #667085 !important;
+    }
 
-/* Quick Sales action icons - match the supplied reference page */
-.quick-sales-page .quick-sale-action-group {
-    gap: 7px !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-invoice:hover {
+        background: #f8fafc !important;
+        border-color: #344054 !important;
+        color: #344054 !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .btn {
-    width: 36px !important;
-    height: 36px !important;
-    min-width: 36px !important;
-    max-width: 36px !important;
-    padding: 0 !important;
-    border-radius: 50% !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-shadow: none !important;
-    background: #fff !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-edit {
+        border: 1.5px solid #0d6efd !important;
+        color: #0d6efd !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .quick-action-svg {
-    width: 16px !important;
-    height: 16px !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-edit:hover {
+        background: #eff6ff !important;
+        border-color: #0b5ed7 !important;
+        color: #0b5ed7 !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .qs-ref-invoice {
-    border: 1px solid #667085 !important;
-    color: #667085 !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-whatsapp {
+        background: #198754 !important;
+        border: 1px solid #198754 !important;
+        color: #fff !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .qs-ref-invoice:hover {
-    background: #f8fafc !important;
-    border-color: #344054 !important;
-    color: #344054 !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-whatsapp:hover {
+        background: #157347 !important;
+        border-color: #157347 !important;
+        color: #fff !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .qs-ref-edit {
-    border: 1.5px solid #0d6efd !important;
-    color: #0d6efd !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-delete {
+        border: 1px solid #dc3545 !important;
+        color: #dc3545 !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .qs-ref-edit:hover {
-    background: #eff6ff !important;
-    border-color: #0b5ed7 !important;
-    color: #0b5ed7 !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-delete:hover {
+        background: #fff5f5 !important;
+        border-color: #bb2d3b !important;
+        color: #bb2d3b !important;
+    }
+    </style>
+    <style>
+    /* FINAL Quick Sales action icon override - exact reference style */
+    .quick-sales-page .quick-sale-action-group {
+        gap: 7px !important;
+        white-space: nowrap !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp {
-    background: #198754 !important;
-    border: 1px solid #198754 !important;
-    color: #fff !important;
-}
+    .quick-sales-page .quick-sale-action-group .btn {
+        width: 36px !important;
+        height: 36px !important;
+        min-width: 36px !important;
+        max-width: 36px !important;
+        border-radius: 50% !important;
+        padding: 0 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-shadow: none !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp:hover {
-    background: #157347 !important;
-    border-color: #157347 !important;
-    color: #fff !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-invoice {
+        background: #fff !important;
+        border: 1px solid #344054 !important;
+        color: #1f2937 !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .qs-ref-delete {
-    border: 1px solid #dc3545 !important;
-    color: #dc3545 !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-invoice:hover {
+        background: #f8fafc !important;
+        border-color: #111827 !important;
+        color: #111827 !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .qs-ref-delete:hover {
-    background: #fff5f5 !important;
-    border-color: #bb2d3b !important;
-    color: #bb2d3b !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-whatsapp {
+        background: #198754 !important;
+        border: 1px solid #198754 !important;
+        color: #fff !important;
+    }
 
-</style>
-<style>
+    .quick-sales-page .quick-sale-action-group .qs-ref-whatsapp:hover {
+        background: #157347 !important;
+        border-color: #157347 !important;
+        color: #fff !important;
+    }
 
-/* FINAL Quick Sales action icon override - exact reference style */
-.quick-sales-page .quick-sale-action-group {
-    gap: 7px !important;
-    white-space: nowrap !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-edit {
+        background: #fff !important;
+        border: 1.5px solid #0d6efd !important;
+        color: #0d6efd !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .btn {
-    width: 36px !important;
-    height: 36px !important;
-    min-width: 36px !important;
-    max-width: 36px !important;
-    border-radius: 50% !important;
-    padding: 0 !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-shadow: none !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-delete {
+        background: #fff !important;
+        border: 1px solid #dc3545 !important;
+        color: #dc3545 !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .qs-ref-invoice {
-    background: #fff !important;
-    border: 1px solid #344054 !important;
-    color: #1f2937 !important;
-}
+    .quick-sales-page .quick-sale-action-group .quick-action-svg {
+        width: 16px !important;
+        height: 16px !important;
+        display: block !important;
+        flex: 0 0 16px !important;
+    }
 
-.quick-sales-page .quick-sale-action-group .qs-ref-invoice:hover {
-    background: #f8fafc !important;
-    border-color: #111827 !important;
-    color: #111827 !important;
-}
+    .quick-sales-page .quick-sale-action-group .qs-ref-whatsapp .quick-action-svg {
+        width: 18px !important;
+        height: 18px !important;
+    }
+    </style>
 
-.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp {
-    background: #198754 !important;
-    border: 1px solid #198754 !important;
-    color: #fff !important;
-}
-
-.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp:hover {
-    background: #157347 !important;
-    border-color: #157347 !important;
-    color: #fff !important;
-}
-
-.quick-sales-page .quick-sale-action-group .qs-ref-edit {
-    background: #fff !important;
-    border: 1.5px solid #0d6efd !important;
-    color: #0d6efd !important;
-}
-
-.quick-sales-page .quick-sale-action-group .qs-ref-delete {
-    background: #fff !important;
-    border: 1px solid #dc3545 !important;
-    color: #dc3545 !important;
-}
-
-.quick-sales-page .quick-sale-action-group .quick-action-svg {
-    width: 16px !important;
-    height: 16px !important;
-    display: block !important;
-    flex: 0 0 16px !important;
-}
-
-.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp .quick-action-svg {
-    width: 18px !important;
-    height: 18px !important;
-}
-
-</style>
-
-<style>
-/* WHATSAPP ICON UI OVERRIDE */
-.quick-sales-page .quick-sale-action-group .qs-ref-whatsapp .quick-action-whatsapp {
-    font-size: 18px !important;
-    line-height: 1 !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    color: #fff !important;
-    pointer-events: none !important;
-}
-</style>
+    <style>
+    /* WHATSAPP ICON UI OVERRIDE */
+    .quick-sales-page .quick-sale-action-group .qs-ref-whatsapp .quick-action-whatsapp {
+        font-size: 18px !important;
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        color: #fff !important;
+        pointer-events: none !important;
+    }
+    </style>
 </head>
 
 <body class="<?= qsl_e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
@@ -1108,8 +1156,7 @@ function qsl_page_url(int $page): string
                             </p>
                         </div>
 
-                        <a href="quick-sale.php"
-                            class="btn btn-primary rounded-pill px-4 fw-bold">
+                        <a href="quick-sale.php" class="btn btn-primary rounded-pill px-4 fw-bold">
                             New Quick Sale
                         </a>
                     </div>
@@ -1143,8 +1190,7 @@ function qsl_page_url(int $page): string
                         <div class="row g-3 align-items-end">
                             <div class="col-lg-4">
                                 <label class="form-label fw-bold">Search</label>
-                                <input type="text" name="q" class="form-control"
-                                    value="<?= qsl_e($q) ?>"
+                                <input type="text" name="q" class="form-control" value="<?= qsl_e($q) ?>"
                                     placeholder="Sale No / Customer / Mobile / Venue / Product">
                             </div>
 
@@ -1156,8 +1202,7 @@ function qsl_page_url(int $page): string
 
                             <div class="col-lg-2 col-md-4">
                                 <label class="form-label fw-bold">To Date</label>
-                                <input type="date" name="to_date" class="form-control"
-                                    value="<?= qsl_e($toDate) ?>">
+                                <input type="date" name="to_date" class="form-control" value="<?= qsl_e($toDate) ?>">
                             </div>
 
                             <div class="col-lg-2 col-md-4">
@@ -1172,8 +1217,7 @@ function qsl_page_url(int $page): string
                             <div class="col-lg-2">
                                 <div class="d-flex gap-2">
                                     <button class="btn btn-primary fw-bold flex-grow-1">Filter</button>
-                                    <a href="quick-sales.php"
-                                        class="btn btn-outline-secondary fw-bold">Reset</a>
+                                    <a href="quick-sales.php" class="btn btn-outline-secondary fw-bold">Reset</a>
                                 </div>
                             </div>
                         </div>
@@ -1232,8 +1276,7 @@ function qsl_page_url(int $page): string
                                             <?php endif; ?>
 
                                             <?php if ($customerVenue !== ''): ?>
-                                            <span class="customer-address"
-                                                title="<?= qsl_e($customerVenue) ?>">
+                                            <span class="customer-address" title="<?= qsl_e($customerVenue) ?>">
                                                 Venue: <?= qsl_e($customerVenue) ?>
                                             </span>
                                             <?php endif; ?>
@@ -1298,14 +1341,15 @@ function qsl_page_url(int $page): string
                                                 <?= qsl_action_svg('whatsapp') ?>
                                             </button>
                                             <a href="quick-sale.php?edit=<?= (int)$row['id'] ?>"
-                                                class="btn btn-action-icon qs-ref-edit"
-                                                title="Edit in Quick Sale" aria-label="Edit">
+                                                class="btn btn-action-icon qs-ref-edit" title="Edit in Quick Sale"
+                                                aria-label="Edit">
                                                 <?= qsl_action_svg('edit') ?>
                                             </a>
-                                            <button type="button" class="btn btn-delete-icon qs-ref-delete js-qsl-delete"
+                                            <button type="button"
+                                                class="btn btn-delete-icon qs-ref-delete js-qsl-delete"
                                                 data-id="<?= (int)$row['id'] ?>"
-                                                data-sale-no="<?= qsl_e($row['sale_no'] ?? '') ?>"
-                                                title="Delete" aria-label="Delete">
+                                                data-sale-no="<?= qsl_e($row['sale_no'] ?? '') ?>" title="Delete"
+                                                aria-label="Delete">
                                                 <?= qsl_action_svg('delete') ?>
                                             </button>
                                         </div>
@@ -1323,14 +1367,12 @@ function qsl_page_url(int $page): string
                         </small>
 
                         <div class="d-flex gap-2">
-                            <a href="<?= qsl_e(qsl_page_url(max(1, $page - 1))) ?>"
-                                class="btn btn-outline-secondary btn-sm rounded-pill px-3 fw-bold
+                            <a href="<?= qsl_e(qsl_page_url(max(1, $page - 1))) ?>" class="btn btn-outline-secondary btn-sm rounded-pill px-3 fw-bold
                                     <?= $page <= 1 ? 'disabled' : '' ?>">
                                 Previous
                             </a>
 
-                            <a href="<?= qsl_e(qsl_page_url(min($totalPages, $page + 1))) ?>"
-                                class="btn btn-outline-secondary btn-sm rounded-pill px-3 fw-bold
+                            <a href="<?= qsl_e(qsl_page_url(min($totalPages, $page + 1))) ?>" class="btn btn-outline-secondary btn-sm rounded-pill px-3 fw-bold
                                     <?= $page >= $totalPages ? 'disabled' : '' ?>">
                                 Next
                             </a>
@@ -1348,8 +1390,9 @@ function qsl_page_url(int $page): string
     <?php include __DIR__ . '/includes/script.php'; ?>
 
     <script>
-    (function () {
+    (function() {
         const csrfToken = <?= json_encode($csrfToken, JSON_UNESCAPED_SLASHES) ?>;
+
         function escapeToastHtml(value) {
             return String(value ?? '')
                 .replaceAll('&', '&amp;')
@@ -1403,25 +1446,33 @@ function qsl_page_url(int $page): string
             const response = await fetch('api/quick-sale.php', {
                 method: 'POST',
                 body: fd,
-                headers: {'X-Requested-With': 'XMLHttpRequest'}
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
             });
-            const data = await response.json().catch(() => ({status:false, message:'Invalid server response.'}));
+            const data = await response.json().catch(() => ({
+                status: false,
+                message: 'Invalid server response.'
+            }));
             if (!response.ok || !data.status) throw new Error(data.message || 'Quick Sale action failed.');
             return data;
         }
 
 
         document.querySelectorAll('.js-qsl-wa').forEach(button => {
-            button.addEventListener('click', async function () {
+            button.addEventListener('click', async function() {
                 const original = this.innerHTML;
                 this.disabled = true;
                 this.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
                 try {
-                    const data = await runAction('send_whatsapp', {quick_sale_id: this.dataset.id});
+                    const data = await runAction('send_whatsapp', {
+                        quick_sale_id: this.dataset.id
+                    });
                     actionToast(data.message || 'WhatsApp sent.', 'success', 'WhatsApp Sent');
                     this.classList.add('wa-sent');
                 } catch (error) {
-                    actionToast(error?.message || 'WhatsApp sending failed.', 'danger', 'WhatsApp Failed');
+                    actionToast(error?.message || 'WhatsApp sending failed.', 'danger',
+                        'WhatsApp Failed');
                 } finally {
                     this.disabled = false;
                     this.innerHTML = original;
@@ -1430,16 +1481,22 @@ function qsl_page_url(int $page): string
         });
 
         document.querySelectorAll('.js-qsl-delete').forEach(button => {
-            button.addEventListener('click', async function () {
+            button.addEventListener('click', async function() {
                 const saleNo = this.dataset.saleNo || 'this Quick Sale';
-                if (!window.confirm('Delete ' + saleNo + '? Stock sold by this Quick Sale will be restored automatically.')) return;
+                if (!window.confirm('Delete ' + saleNo +
+                        '? Stock sold by this Quick Sale will be restored automatically.'))
+                    return;
                 this.disabled = true;
                 try {
-                    const data = await runAction('delete', {quick_sale_id: this.dataset.id});
-                    actionToast(data.message || 'Quick Sale deleted.', 'success', 'Quick Sale Deleted');
+                    const data = await runAction('delete', {
+                        quick_sale_id: this.dataset.id
+                    });
+                    actionToast(data.message || 'Quick Sale deleted.', 'success',
+                        'Quick Sale Deleted');
                     setTimeout(() => window.location.reload(), 500);
                 } catch (error) {
-                    actionToast(error?.message || 'Unable to delete Quick Sale.', 'danger', 'Delete Failed');
+                    actionToast(error?.message || 'Unable to delete Quick Sale.', 'danger',
+                        'Delete Failed');
                     this.disabled = false;
                 }
             });
@@ -1449,4 +1506,5 @@ function qsl_page_url(int $page): string
     </script>
 
 </body>
+
 </html>

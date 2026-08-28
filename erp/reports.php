@@ -54,9 +54,46 @@ function rpt_col_exists(mysqli $conn, string $table, string $column): bool
     }
 }
 
+function rpt_indian_number($value, int $decimals = 2): string
+{
+    $number = (float)$value;
+    $negative = $number < 0;
+    $number = abs($number);
+
+    $fixed = number_format($number, $decimals, '.', '');
+    $parts = explode('.', $fixed, 2);
+    $integer = $parts[0];
+    $decimal = $parts[1] ?? '';
+
+    if (strlen($integer) > 3) {
+        $lastThree = substr($integer, -3);
+        $remaining = substr($integer, 0, -3);
+        $groups = [];
+
+        while (strlen($remaining) > 2) {
+            array_unshift($groups, substr($remaining, -2));
+            $remaining = substr($remaining, 0, -2);
+        }
+
+        if ($remaining !== '') {
+            array_unshift($groups, $remaining);
+        }
+
+        $integer = implode(',', $groups) . ',' . $lastThree;
+    }
+
+    $formatted = $integer;
+
+    if ($decimals > 0) {
+        $formatted .= '.' . str_pad($decimal, $decimals, '0');
+    }
+
+    return ($negative ? '-' : '') . $formatted;
+}
+
 function rpt_money($value): string
 {
-    return '₹' . number_format((float)$value, 2);
+    return '₹' . rpt_indian_number($value, 2);
 }
 
 function rpt_date($value): string
@@ -137,7 +174,7 @@ function rpt_pdf_text($value): string
 
 function rpt_pdf_money($value): string
 {
-    return 'Rs. ' . number_format((float)$value, 2);
+    return 'Rs. ' . rpt_indian_number($value, 2);
 }
 
 function rpt_load_fpdf(): void
@@ -740,6 +777,7 @@ if ($reportType === 'quick_sales') {
 ?>
 <!doctype html>
 <html lang="en">
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -747,270 +785,1212 @@ if ($reportType === 'quick_sales') {
     <?php include __DIR__ . '/includes/links.php'; ?>
     <?php include __DIR__ . '/includes/theme-loader.php'; ?>
     <style>
-    .reports-page{--rpt-blue:#2563eb;--rpt-green:#16a34a;--rpt-orange:#ea580c;--rpt-red:#dc2626;--rpt-purple:#7c3aed}
-    .reports-page .report-hero{padding:18px 20px;margin-bottom:12px;border:1px solid var(--border-soft);border-radius:16px;background:var(--card-bg);display:flex;justify-content:space-between;align-items:center;gap:14px}
-    .report-hero-left{display:flex;align-items:center;gap:12px;min-width:0}.report-hero-icon{width:40px;height:40px;border-radius:12px;background:color-mix(in srgb,var(--brand-1) 12%,var(--card-bg));color:var(--brand-1);display:grid;place-items:center;flex:0 0 auto}.report-hero-icon svg{width:20px;height:20px}.report-hero h1{font-size:22px;line-height:1.15;font-weight:800;color:var(--text-main);margin:0}.report-hero p{font-size:11.5px;font-weight:500;color:var(--text-muted);margin:3px 0 0}.report-period{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--text-muted);white-space:nowrap}.report-period svg{width:14px;height:14px}
-    .report-actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.report-actions .btn{font-size:11px;font-weight:700;padding:7px 12px;border-radius:10px}
-    .report-filter{padding:13px 14px;margin-bottom:10px;border-radius:14px}.report-filter .form-label{font-size:10.5px;font-weight:700;margin-bottom:4px;color:var(--text-muted)}.report-filter .form-control,.report-filter .form-select{min-height:36px;font-size:12px;border-radius:9px;padding:6px 9px}.report-filter .btn{min-height:36px;font-size:11px;font-weight:700;border-radius:9px;padding:6px 12px}
-    .report-nav{display:flex;gap:6px;overflow-x:auto;padding:2px 1px 8px;margin-bottom:6px;scrollbar-width:thin}.report-nav-link{display:inline-flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid var(--border-soft);border-radius:10px;background:var(--card-bg);color:var(--text-muted);font-size:10.5px;font-weight:700;text-decoration:none;white-space:nowrap;transition:.15s}.report-nav-link svg{width:14px;height:14px}.report-nav-link:hover{color:var(--text-main);border-color:color-mix(in srgb,var(--brand-1) 30%,var(--border-soft));transform:translateY(-1px)}.report-nav-link.active{background:var(--text-main);border-color:var(--text-main);color:var(--card-bg)}
-    .metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px}.metric-card{border:1px solid var(--border-soft);border-radius:14px;padding:12px 13px;background:var(--card-bg);display:flex;align-items:center;gap:10px;min-height:78px}.metric-icon{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;flex:0 0 auto}.metric-icon svg{width:17px;height:17px}.metric-icon.blue{background:#dbeafe;color:#1d4ed8}.metric-icon.green{background:#dcfce7;color:#15803d}.metric-icon.red{background:#fee2e2;color:#b91c1c}.metric-icon.orange{background:#ffedd5;color:#c2410c}.metric-icon.purple{background:#ede9fe;color:#6d28d9}.metric-label{display:block;font-size:9.5px;line-height:1.2;font-weight:700;text-transform:uppercase;letter-spacing:.035em;color:var(--text-muted)}.metric-value{display:block;font-size:17px;line-height:1.15;font-weight:800;color:var(--text-main);margin-top:2px}.metric-sub{display:block;font-size:9.5px;font-weight:500;color:var(--text-muted);margin-top:2px}
-    .overview-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr);gap:10px}.report-panel{padding:15px;border-radius:14px}.report-panel-title{font-size:13px;font-weight:800;color:var(--text-main);margin:0}.report-panel-sub{font-size:10.5px;color:var(--text-muted);margin-top:2px}.panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}.panel-head-icon{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:color-mix(in srgb,var(--brand-1) 10%,var(--card-bg));color:var(--brand-1)}.panel-head-icon svg{width:15px;height:15px}
-    .trend-list{display:grid;gap:7px}.trend-row{display:grid;grid-template-columns:78px 1fr 92px;gap:9px;align-items:center;font-size:10.5px}.trend-date{font-weight:700;color:var(--text-main)}.trend-track{height:7px;border-radius:99px;background:color-mix(in srgb,var(--border-soft) 70%,transparent);overflow:hidden}.trend-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#2563eb,#14b8a6)}.trend-value{text-align:right;font-weight:800;color:var(--text-main)}
-    .mix-list{display:grid;gap:8px}.mix-row{padding:9px 10px;border:1px solid var(--border-soft);border-radius:10px;background:color-mix(in srgb,var(--card-bg) 97%,var(--body-bg))}.mix-row-top{display:flex;justify-content:space-between;gap:10px;align-items:center}.mix-name{font-size:10.5px;font-weight:700;color:var(--text-main)}.mix-value{font-size:10.5px;font-weight:800;color:var(--text-main)}.mix-meta{font-size:9.5px;color:var(--text-muted);margin-top:2px}.mix-track{height:4px;border-radius:99px;background:var(--border-soft);overflow:hidden;margin-top:6px}.mix-fill{height:100%;background:var(--brand-1);border-radius:99px}
-    .ops-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.ops-card{border:1px solid var(--border-soft);border-radius:11px;padding:11px;background:color-mix(in srgb,var(--card-bg) 97%,var(--body-bg))}.ops-card span{display:block;font-size:9px;text-transform:uppercase;font-weight:700;color:var(--text-muted)}.ops-card strong{display:block;font-size:18px;font-weight:800;color:var(--text-main);margin-top:3px}.ops-card small{font-size:9.5px;color:var(--text-muted)}
-    .table-panel{padding:0;border-radius:14px;overflow:hidden}.table-panel-head{padding:13px 14px;border-bottom:1px solid var(--border-soft);display:flex;justify-content:space-between;align-items:center;gap:12px}.table-panel-head h2{font-size:13px;font-weight:800;color:var(--text-main);margin:0}.table-panel-head p{font-size:10px;color:var(--text-muted);margin:2px 0 0}.report-record-badge{display:inline-flex;align-items:center;padding:4px 7px;border-radius:999px;background:color-mix(in srgb,var(--brand-1) 9%,var(--card-bg));color:var(--brand-1);font-size:9.5px;font-weight:700}.report-search{max-width:270px;min-height:34px!important;font-size:11px!important;border-radius:9px!important}
-    .report-table-wrap{overflow:auto;max-height:62vh}.report-table{width:100%;border-collapse:separate;border-spacing:0}.report-table th{position:sticky;top:0;z-index:2;background:var(--table-header-bg);color:var(--table-header-text);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.035em;white-space:nowrap;padding:8px 9px;border-bottom:1px solid var(--border-soft)}.report-table td{font-size:10.5px;font-weight:500;color:var(--text-main);padding:8px 9px;border-bottom:1px solid color-mix(in srgb,var(--border-soft) 75%,transparent);vertical-align:middle}.report-table tr:hover td{background:var(--table-row-hover)}.report-table strong{font-weight:750}.cell-sub{display:block;font-size:9px;color:var(--text-muted);font-weight:500;margin-top:2px}.money-positive{font-weight:800;color:#15803d}.money-negative{font-weight:800;color:#b91c1c}.status-pill{display:inline-flex;align-items:center;padding:4px 7px;border-radius:99px;font-size:9px;font-weight:700;white-space:nowrap}.status-pill.success{background:#dcfce7;color:#166534}.status-pill.primary{background:#dbeafe;color:#1d4ed8}.status-pill.warning{background:#fef3c7;color:#92400e}.status-pill.danger{background:#fee2e2;color:#991b1b}.empty-report{padding:32px;text-align:center;color:var(--text-muted);font-size:11px;font-weight:600}
-    .mobile-report-list{display:none}.mobile-report-item{border-bottom:1px solid var(--border-soft);padding:12px 14px}.mobile-report-item:last-child{border-bottom:0}.mobile-row-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.mobile-title{font-size:11.5px;font-weight:800;color:var(--text-main)}.mobile-meta{font-size:9.5px;color:var(--text-muted);margin-top:3px}.mobile-details{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin-top:9px;font-size:10px}.mobile-details span{color:var(--text-muted)}.mobile-details strong{display:block;color:var(--text-main);font-weight:700;margin-top:1px}
-    @media(max-width:1199.98px){.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-grid{grid-template-columns:1fr}}
-    @media(max-width:767.98px){.reports-page .report-hero{padding:14px;align-items:flex-start;flex-direction:column}.report-hero h1{font-size:19px}.report-actions{width:100%;justify-content:flex-start}.report-filter{padding:11px}.metric-grid{grid-template-columns:1fr 1fr;gap:8px}.metric-card{padding:10px;min-height:70px}.metric-value{font-size:15px}.metric-icon{width:32px;height:32px}.report-panel{padding:12px}.trend-row{grid-template-columns:68px 1fr 78px}.ops-grid{grid-template-columns:1fr}.table-panel-head{align-items:flex-start;flex-direction:column}.report-search{max-width:none;width:100%}.report-table-wrap{display:none}.mobile-report-list{display:block}.mobile-details{grid-template-columns:1fr}.report-period{white-space:normal}.report-actions .btn{flex:1 1 auto}}
-    @media(max-width:420px){.metric-grid{grid-template-columns:1fr}.report-nav-link{padding:6px 9px}}
+    .reports-page {
+        --rpt-blue: #2563eb;
+        --rpt-green: #16a34a;
+        --rpt-orange: #ea580c;
+        --rpt-red: #dc2626;
+        --rpt-purple: #7c3aed
+    }
+
+    .reports-page .report-hero {
+        padding: 18px 20px;
+        margin-bottom: 12px;
+        border: 1px solid var(--border-soft);
+        border-radius: 16px;
+        background: var(--card-bg);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 14px
+    }
+
+    .report-hero-left {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0
+    }
+
+    .report-hero-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--brand-1) 12%, var(--card-bg));
+        color: var(--brand-1);
+        display: grid;
+        place-items: center;
+        flex: 0 0 auto
+    }
+
+    .report-hero-icon svg {
+        width: 20px;
+        height: 20px
+    }
+
+    .report-hero h1 {
+        font-size: 22px;
+        line-height: 1.15;
+        font-weight: 800;
+        color: var(--text-main);
+        margin: 0
+    }
+
+    .report-hero p {
+        font-size: 11.5px;
+        font-weight: 500;
+        color: var(--text-muted);
+        margin: 3px 0 0
+    }
+
+    .report-period {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--text-muted);
+        white-space: nowrap
+    }
+
+    .report-period svg {
+        width: 14px;
+        height: 14px
+    }
+
+    .report-actions {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        flex-wrap: wrap;
+        justify-content: flex-end
+    }
+
+    .report-actions .btn {
+        font-size: 11px;
+        font-weight: 700;
+        padding: 7px 12px;
+        border-radius: 10px
+    }
+
+    .report-filter {
+        padding: 13px 14px;
+        margin-bottom: 10px;
+        border-radius: 14px
+    }
+
+    .report-filter .form-label {
+        font-size: 10.5px;
+        font-weight: 700;
+        margin-bottom: 4px;
+        color: var(--text-muted)
+    }
+
+    .report-filter .form-control,
+    .report-filter .form-select {
+        min-height: 36px;
+        font-size: 12px;
+        border-radius: 9px;
+        padding: 6px 9px
+    }
+
+    .report-filter .btn {
+        min-height: 36px;
+        font-size: 11px;
+        font-weight: 700;
+        border-radius: 9px;
+        padding: 6px 12px
+    }
+
+    .report-nav {
+        display: flex;
+        gap: 6px;
+        overflow-x: auto;
+        padding: 2px 1px 8px;
+        margin-bottom: 6px;
+        scrollbar-width: thin
+    }
+
+    .report-nav-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 7px 10px;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        background: var(--card-bg);
+        color: var(--text-muted);
+        font-size: 10.5px;
+        font-weight: 700;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: .15s
+    }
+
+    .report-nav-link svg {
+        width: 14px;
+        height: 14px
+    }
+
+    .report-nav-link:hover {
+        color: var(--text-main);
+        border-color: color-mix(in srgb, var(--brand-1) 30%, var(--border-soft));
+        transform: translateY(-1px)
+    }
+
+    .report-nav-link.active {
+        background: var(--text-main);
+        border-color: var(--text-main);
+        color: var(--card-bg)
+    }
+
+    .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 12px
+    }
+
+    .metric-card {
+        border: 1px solid var(--border-soft);
+        border-radius: 14px;
+        padding: 12px 13px;
+        background: var(--card-bg);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 78px
+    }
+
+    .metric-icon {
+        width: 36px;
+        height: 36px;
+        border-radius: 11px;
+        display: grid;
+        place-items: center;
+        flex: 0 0 auto
+    }
+
+    .metric-icon svg {
+        width: 17px;
+        height: 17px
+    }
+
+    .metric-icon.blue {
+        background: #dbeafe;
+        color: #1d4ed8
+    }
+
+    .metric-icon.green {
+        background: #dcfce7;
+        color: #15803d
+    }
+
+    .metric-icon.red {
+        background: #fee2e2;
+        color: #b91c1c
+    }
+
+    .metric-icon.orange {
+        background: #ffedd5;
+        color: #c2410c
+    }
+
+    .metric-icon.purple {
+        background: #ede9fe;
+        color: #6d28d9
+    }
+
+    .metric-label {
+        display: block;
+        font-size: 9.5px;
+        line-height: 1.2;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: .035em;
+        color: var(--text-muted)
+    }
+
+    .metric-value {
+        display: block;
+        font-size: 17px;
+        line-height: 1.15;
+        font-weight: 800;
+        color: var(--text-main);
+        margin-top: 2px
+    }
+
+    .metric-sub {
+        display: block;
+        font-size: 9.5px;
+        font-weight: 500;
+        color: var(--text-muted);
+        margin-top: 2px
+    }
+
+    .overview-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr);
+        gap: 10px
+    }
+
+    .report-panel {
+        padding: 15px;
+        border-radius: 14px
+    }
+
+    .report-panel-title {
+        font-size: 13px;
+        font-weight: 800;
+        color: var(--text-main);
+        margin: 0
+    }
+
+    .report-panel-sub {
+        font-size: 10.5px;
+        color: var(--text-muted);
+        margin-top: 2px
+    }
+
+    .panel-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px
+    }
+
+    .panel-head-icon {
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
+        display: grid;
+        place-items: center;
+        background: color-mix(in srgb, var(--brand-1) 10%, var(--card-bg));
+        color: var(--brand-1)
+    }
+
+    .panel-head-icon svg {
+        width: 15px;
+        height: 15px
+    }
+
+    .trend-list {
+        display: grid;
+        gap: 7px
+    }
+
+    .trend-row {
+        display: grid;
+        grid-template-columns: 78px 1fr 92px;
+        gap: 9px;
+        align-items: center;
+        font-size: 10.5px
+    }
+
+    .trend-date {
+        font-weight: 700;
+        color: var(--text-main)
+    }
+
+    .trend-track {
+        height: 7px;
+        border-radius: 99px;
+        background: color-mix(in srgb, var(--border-soft) 70%, transparent);
+        overflow: hidden
+    }
+
+    .trend-fill {
+        height: 100%;
+        border-radius: 99px;
+        background: linear-gradient(90deg, #2563eb, #14b8a6)
+    }
+
+    .trend-value {
+        text-align: right;
+        font-weight: 800;
+        color: var(--text-main)
+    }
+
+    .mix-list {
+        display: grid;
+        gap: 8px
+    }
+
+    .mix-row {
+        padding: 9px 10px;
+        border: 1px solid var(--border-soft);
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--card-bg) 97%, var(--body-bg))
+    }
+
+    .mix-row-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center
+    }
+
+    .mix-name {
+        font-size: 10.5px;
+        font-weight: 700;
+        color: var(--text-main)
+    }
+
+    .mix-value {
+        font-size: 10.5px;
+        font-weight: 800;
+        color: var(--text-main)
+    }
+
+    .mix-meta {
+        font-size: 9.5px;
+        color: var(--text-muted);
+        margin-top: 2px
+    }
+
+    .mix-track {
+        height: 4px;
+        border-radius: 99px;
+        background: var(--border-soft);
+        overflow: hidden;
+        margin-top: 6px
+    }
+
+    .mix-fill {
+        height: 100%;
+        background: var(--brand-1);
+        border-radius: 99px
+    }
+
+    .ops-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px
+    }
+
+    .ops-card {
+        border: 1px solid var(--border-soft);
+        border-radius: 11px;
+        padding: 11px;
+        background: color-mix(in srgb, var(--card-bg) 97%, var(--body-bg))
+    }
+
+    .ops-card span {
+        display: block;
+        font-size: 9px;
+        text-transform: uppercase;
+        font-weight: 700;
+        color: var(--text-muted)
+    }
+
+    .ops-card strong {
+        display: block;
+        font-size: 18px;
+        font-weight: 800;
+        color: var(--text-main);
+        margin-top: 3px
+    }
+
+    .ops-card small {
+        font-size: 9.5px;
+        color: var(--text-muted)
+    }
+
+    .table-panel {
+        padding: 0;
+        border-radius: 14px;
+        overflow: hidden
+    }
+
+    .table-panel-head {
+        padding: 13px 14px;
+        border-bottom: 1px solid var(--border-soft);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px
+    }
+
+    .table-panel-head h2 {
+        font-size: 13px;
+        font-weight: 800;
+        color: var(--text-main);
+        margin: 0
+    }
+
+    .table-panel-head p {
+        font-size: 10px;
+        color: var(--text-muted);
+        margin: 2px 0 0
+    }
+
+    .report-record-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 7px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--brand-1) 9%, var(--card-bg));
+        color: var(--brand-1);
+        font-size: 9.5px;
+        font-weight: 700
+    }
+
+    .report-search {
+        max-width: 270px;
+        min-height: 34px !important;
+        font-size: 11px !important;
+        border-radius: 9px !important
+    }
+
+    .report-table-wrap {
+        overflow: auto;
+        max-height: 62vh
+    }
+
+    .report-table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0
+    }
+
+    .report-table th {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        background: var(--table-header-bg);
+        color: var(--table-header-text);
+        font-size: 9px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: .035em;
+        white-space: nowrap;
+        padding: 8px 9px;
+        border-bottom: 1px solid var(--border-soft)
+    }
+
+    .report-table td {
+        font-size: 10.5px;
+        font-weight: 500;
+        color: var(--text-main);
+        padding: 8px 9px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border-soft) 75%, transparent);
+        vertical-align: middle
+    }
+
+    .report-table tr:hover td {
+        background: var(--table-row-hover)
+    }
+
+    .report-table strong {
+        font-weight: 750
+    }
+
+    .cell-sub {
+        display: block;
+        font-size: 9px;
+        color: var(--text-muted);
+        font-weight: 500;
+        margin-top: 2px
+    }
+
+    .money-positive {
+        font-weight: 800;
+        color: #15803d
+    }
+
+    .money-negative {
+        font-weight: 800;
+        color: #b91c1c
+    }
+
+    .status-pill {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 7px;
+        border-radius: 99px;
+        font-size: 9px;
+        font-weight: 700;
+        white-space: nowrap
+    }
+
+    .status-pill.success {
+        background: #dcfce7;
+        color: #166534
+    }
+
+    .status-pill.primary {
+        background: #dbeafe;
+        color: #1d4ed8
+    }
+
+    .status-pill.warning {
+        background: #fef3c7;
+        color: #92400e
+    }
+
+    .status-pill.danger {
+        background: #fee2e2;
+        color: #991b1b
+    }
+
+    .empty-report {
+        padding: 32px;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 11px;
+        font-weight: 600
+    }
+
+    .mobile-report-list {
+        display: none
+    }
+
+    .mobile-report-item {
+        border-bottom: 1px solid var(--border-soft);
+        padding: 12px 14px
+    }
+
+    .mobile-report-item:last-child {
+        border-bottom: 0
+    }
+
+    .mobile-row-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: flex-start
+    }
+
+    .mobile-title {
+        font-size: 11.5px;
+        font-weight: 800;
+        color: var(--text-main)
+    }
+
+    .mobile-meta {
+        font-size: 9.5px;
+        color: var(--text-muted);
+        margin-top: 3px
+    }
+
+    .mobile-details {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px 10px;
+        margin-top: 9px;
+        font-size: 10px
+    }
+
+    .mobile-details span {
+        color: var(--text-muted)
+    }
+
+    .mobile-details strong {
+        display: block;
+        color: var(--text-main);
+        font-weight: 700;
+        margin-top: 1px
+    }
+
+    @media(max-width:1199.98px) {
+        .metric-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr))
+        }
+
+        .overview-grid {
+            grid-template-columns: 1fr
+        }
+    }
+
+    @media(max-width:767.98px) {
+        .reports-page .report-hero {
+            padding: 14px;
+            align-items: flex-start;
+            flex-direction: column
+        }
+
+        .report-hero h1 {
+            font-size: 19px
+        }
+
+        .report-actions {
+            width: 100%;
+            justify-content: flex-start
+        }
+
+        .report-filter {
+            padding: 11px
+        }
+
+        .metric-grid {
+            grid-template-columns: 1fr 1fr;
+            gap: 8px
+        }
+
+        .metric-card {
+            padding: 10px;
+            min-height: 70px
+        }
+
+        .metric-value {
+            font-size: 15px
+        }
+
+        .metric-icon {
+            width: 32px;
+            height: 32px
+        }
+
+        .report-panel {
+            padding: 12px
+        }
+
+        .trend-row {
+            grid-template-columns: 68px 1fr 78px
+        }
+
+        .ops-grid {
+            grid-template-columns: 1fr
+        }
+
+        .table-panel-head {
+            align-items: flex-start;
+            flex-direction: column
+        }
+
+        .report-search {
+            max-width: none;
+            width: 100%
+        }
+
+        .report-table-wrap {
+            display: none
+        }
+
+        .mobile-report-list {
+            display: block
+        }
+
+        .mobile-details {
+            grid-template-columns: 1fr
+        }
+
+        .report-period {
+            white-space: normal
+        }
+
+        .report-actions .btn {
+            flex: 1 1 auto
+        }
+    }
+
+    @media(max-width:420px) {
+        .metric-grid {
+            grid-template-columns: 1fr
+        }
+
+        .report-nav-link {
+            padding: 6px 9px
+        }
+    }
     </style>
 </head>
+
 <body class="<?= e(($theme['layout_density'] ?? '') === 'compact' ? 'layout-compact' : '') ?>">
-<div id="mobileOverlay"></div>
-<div class="app-shell">
-    <?php include __DIR__ . '/includes/sidebar.php'; ?>
-    <main id="main">
-        <?php include __DIR__ . '/includes/nav.php'; ?>
-        <section class="page-section reports-page">
-            <div class="report-hero">
-                <div class="report-hero-left">
-                    <div class="report-hero-icon"><i data-lucide="chart-no-axes-combined"></i></div>
-                    <div>
-                        <h1>Reports & Analytics</h1>
-                        <p>Sales, Quick Sales, collections, production and delivery performance.</p>
+    <div id="mobileOverlay"></div>
+    <div class="app-shell">
+        <?php include __DIR__ . '/includes/sidebar.php'; ?>
+        <main id="main">
+            <?php include __DIR__ . '/includes/nav.php'; ?>
+            <section class="page-section reports-page">
+                <div class="report-hero">
+                    <div class="report-hero-left">
+                        <div class="report-hero-icon"><i data-lucide="chart-no-axes-combined"></i></div>
+                        <div>
+                            <h1>Reports & Analytics</h1>
+                            <p>Sales, Quick Sales, collections, production and delivery performance.</p>
+                        </div>
+                    </div>
+                    <div class="d-flex flex-column align-items-lg-end gap-2">
+                        <div class="report-period"><i data-lucide="calendar-range"></i><?= e(rpt_date($dateFrom)) ?> —
+                            <?= e(rpt_date($dateTo)) ?></div>
+                        <?php if ($reportType !== 'overview'): ?>
+                        <div class="report-actions">
+                            <a href="reports.php?<?= e($queryBase . '&report=' . urlencode($reportType) . '&export=csv') ?>"
+                                class="btn btn-outline-success"><i data-lucide="sheet" class="me-1"></i>CSV / Excel</a>
+                            <a href="reports.php?<?= e($queryBase . '&report=' . urlencode($reportType) . '&export=pdf') ?>"
+                                class="btn btn-danger"><i data-lucide="file-down" class="me-1"></i>Download PDF</a>
+                        </div>
+                        <?php endif; ?>
                     </div>
                 </div>
-                <div class="d-flex flex-column align-items-lg-end gap-2">
-                    <div class="report-period"><i data-lucide="calendar-range"></i><?= e(rpt_date($dateFrom)) ?> — <?= e(rpt_date($dateTo)) ?></div>
-                    <?php if ($reportType !== 'overview'): ?>
-                    <div class="report-actions">
-                        <a href="reports.php?<?= e($queryBase . '&report=' . urlencode($reportType) . '&export=csv') ?>" class="btn btn-outline-success"><i data-lucide="sheet" class="me-1"></i>CSV / Excel</a>
-                        <a href="reports.php?<?= e($queryBase . '&report=' . urlencode($reportType) . '&export=pdf') ?>" class="btn btn-danger"><i data-lucide="file-down" class="me-1"></i>Download PDF</a>
-                    </div>
-                    <?php endif; ?>
+
+                <div class="card-ui report-filter">
+                    <form method="get" class="row g-2 align-items-end">
+                        <div class="col-6 col-lg-2">
+                            <label class="form-label">From Date</label>
+                            <input type="date" name="date_from" class="form-control" value="<?= e($dateFrom) ?>">
+                        </div>
+                        <div class="col-6 col-lg-2">
+                            <label class="form-label">To Date</label>
+                            <input type="date" name="date_to" class="form-control" value="<?= e($dateTo) ?>">
+                        </div>
+                        <div class="col-12 col-lg-3">
+                            <label class="form-label">Report Type</label>
+                            <select name="report" class="form-select">
+                                <?php foreach ($reportMeta as $key => $meta): ?>
+                                <option value="<?= e($key) ?>" <?= $reportType === $key ? 'selected' : '' ?>>
+                                    <?= e($meta['label']) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-6 col-lg-2 d-grid"><button type="submit" class="btn btn-primary"><i
+                                    data-lucide="filter" class="me-1"></i>Apply Filters</button></div>
+                        <div class="col-6 col-lg-2 d-grid"><a href="reports.php" class="btn btn-outline-secondary"><i
+                                    data-lucide="rotate-ccw" class="me-1"></i>Reset</a></div>
+                    </form>
                 </div>
-            </div>
 
-            <div class="card-ui report-filter">
-                <form method="get" class="row g-2 align-items-end">
-                    <div class="col-6 col-lg-2">
-                        <label class="form-label">From Date</label>
-                        <input type="date" name="date_from" class="form-control" value="<?= e($dateFrom) ?>">
-                    </div>
-                    <div class="col-6 col-lg-2">
-                        <label class="form-label">To Date</label>
-                        <input type="date" name="date_to" class="form-control" value="<?= e($dateTo) ?>">
-                    </div>
-                    <div class="col-12 col-lg-3">
-                        <label class="form-label">Report Type</label>
-                        <select name="report" class="form-select">
-                            <?php foreach ($reportMeta as $key => $meta): ?>
-                            <option value="<?= e($key) ?>" <?= $reportType === $key ? 'selected' : '' ?>><?= e($meta['label']) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-6 col-lg-2 d-grid"><button type="submit" class="btn btn-primary"><i data-lucide="filter" class="me-1"></i>Apply Filters</button></div>
-                    <div class="col-6 col-lg-2 d-grid"><a href="reports.php" class="btn btn-outline-secondary"><i data-lucide="rotate-ccw" class="me-1"></i>Reset</a></div>
-                </form>
-            </div>
-
-            <div class="report-nav">
-                <?php foreach ($reportMeta as $key => $meta): ?>
-                <a href="reports.php?<?= e($queryBase . '&report=' . $key) ?>" class="report-nav-link <?= $reportType === $key ? 'active' : '' ?>">
-                    <i data-lucide="<?= e($meta['icon']) ?>"></i><?= e($meta['label']) ?>
-                </a>
-                <?php endforeach; ?>
-            </div>
-
-            <div class="metric-grid">
-                <?php foreach ($metricCards as $metric): ?>
-                <div class="metric-card">
-                    <div class="metric-icon <?= e($metric['tone']) ?>"><i data-lucide="<?= e($metric['icon']) ?>"></i></div>
-                    <div class="min-w-0">
-                        <span class="metric-label"><?= e($metric['label']) ?></span>
-                        <span class="metric-value"><?= e($metric['value']) ?></span>
-                        <span class="metric-sub"><?= e($metric['sub']) ?></span>
-                    </div>
+                <div class="report-nav">
+                    <?php foreach ($reportMeta as $key => $meta): ?>
+                    <a href="reports.php?<?= e($queryBase . '&report=' . $key) ?>"
+                        class="report-nav-link <?= $reportType === $key ? 'active' : '' ?>">
+                        <i data-lucide="<?= e($meta['icon']) ?>"></i><?= e($meta['label']) ?>
+                    </a>
+                    <?php endforeach; ?>
                 </div>
-                <?php endforeach; ?>
-            </div>
 
-            <?php if ($reportType === 'overview'): ?>
-            <div class="overview-grid">
-                <div class="card-ui report-panel">
-                    <div class="panel-head">
-                        <div><h2 class="report-panel-title">Sales Trend</h2><div class="report-panel-sub">Daily Proforma sales for the selected period.</div></div>
-                        <div class="panel-head-icon"><i data-lucide="trending-up"></i></div>
+                <div class="metric-grid">
+                    <?php foreach ($metricCards as $metric): ?>
+                    <div class="metric-card">
+                        <div class="metric-icon <?= e($metric['tone']) ?>"><i
+                                data-lucide="<?= e($metric['icon']) ?>"></i></div>
+                        <div class="min-w-0">
+                            <span class="metric-label"><?= e($metric['label']) ?></span>
+                            <span class="metric-value"><?= e($metric['value']) ?></span>
+                            <span class="metric-sub"><?= e($metric['sub']) ?></span>
+                        </div>
                     </div>
-                    <?php if (!$dailySalesRows): ?>
+                    <?php endforeach; ?>
+                </div>
+
+                <?php if ($reportType === 'overview'): ?>
+                <div class="overview-grid">
+                    <div class="card-ui report-panel">
+                        <div class="panel-head">
+                            <div>
+                                <h2 class="report-panel-title">Sales Trend</h2>
+                                <div class="report-panel-sub">Daily Proforma sales for the selected period.</div>
+                            </div>
+                            <div class="panel-head-icon"><i data-lucide="trending-up"></i></div>
+                        </div>
+                        <?php if (!$dailySalesRows): ?>
                         <div class="empty-report">No Proforma sales found for the selected dates.</div>
-                    <?php else: ?>
+                        <?php else: ?>
                         <div class="trend-list">
                             <?php $maxSales = max(1, ...array_map(static function($r){ return (float)$r['total_amount']; }, $dailySalesRows)); ?>
                             <?php foreach ($dailySalesRows as $row): $pct = min(100, round(((float)$row['total_amount'] / $maxSales) * 100)); ?>
                             <div class="trend-row">
                                 <span class="trend-date"><?= e(rpt_date($row['report_date'])) ?></span>
-                                <div class="trend-track"><div class="trend-fill" style="width:<?= (int)$pct ?>%"></div></div>
+                                <div class="trend-track">
+                                    <div class="trend-fill" style="width:<?= (int)$pct ?>%"></div>
+                                </div>
                                 <span class="trend-value"><?= e(rpt_money($row['total_amount'])) ?></span>
                             </div>
                             <?php endforeach; ?>
                         </div>
-                    <?php endif; ?>
-                </div>
-
-                <div class="card-ui report-panel">
-                    <div class="panel-head">
-                        <div><h2 class="report-panel-title">Function-wise Sales</h2><div class="report-panel-sub">Top business categories by Proforma value.</div></div>
-                        <div class="panel-head-icon"><i data-lucide="chart-bar-big"></i></div>
+                        <?php endif; ?>
                     </div>
-                    <?php if (!$functionRows): ?>
+
+                    <div class="card-ui report-panel">
+                        <div class="panel-head">
+                            <div>
+                                <h2 class="report-panel-title">Function-wise Sales</h2>
+                                <div class="report-panel-sub">Top business categories by Proforma value.</div>
+                            </div>
+                            <div class="panel-head-icon"><i data-lucide="chart-bar-big"></i></div>
+                        </div>
+                        <?php if (!$functionRows): ?>
                         <div class="empty-report">No function-wise sales data found.</div>
-                    <?php else: ?>
+                        <?php else: ?>
                         <div class="mix-list">
                             <?php $maxFn = max(1, ...array_map(static function($r){ return (float)$r['total_amount']; }, $functionRows)); ?>
                             <?php foreach ($functionRows as $row): $pct = min(100, round(((float)$row['total_amount'] / $maxFn) * 100)); ?>
                             <div class="mix-row">
-                                <div class="mix-row-top"><span class="mix-name"><?= e($row['function_name']) ?></span><span class="mix-value"><?= e(rpt_money($row['total_amount'])) ?></span></div>
+                                <div class="mix-row-top"><span
+                                        class="mix-name"><?= e($row['function_name']) ?></span><span
+                                        class="mix-value"><?= e(rpt_money($row['total_amount'])) ?></span></div>
                                 <div class="mix-meta"><?= number_format((int)$row['total_orders']) ?> order(s)</div>
-                                <div class="mix-track"><div class="mix-fill" style="width:<?= (int)$pct ?>%"></div></div>
+                                <div class="mix-track">
+                                    <div class="mix-fill" style="width:<?= (int)$pct ?>%"></div>
+                                </div>
                             </div>
                             <?php endforeach; ?>
                         </div>
-                    <?php endif; ?>
-                </div>
-
-                <div class="card-ui report-panel" style="grid-column:1/-1">
-                    <div class="panel-head">
-                        <div><h2 class="report-panel-title">Operations Snapshot</h2><div class="report-panel-sub">Job Card status for the selected creation period.</div></div>
-                        <div class="panel-head-icon"><i data-lucide="activity"></i></div>
-                    </div>
-                    <div class="ops-grid">
-                        <div class="ops-card"><span>Completed Jobs</span><strong><?= number_format($stats['completed_jobs']) ?></strong><small>Closed production work</small></div>
-                        <div class="ops-card"><span>Open / Pending</span><strong><?= number_format($stats['pending_jobs']) ?></strong><small>Still in workflow</small></div>
-                        <div class="ops-card"><span>Delayed Jobs</span><strong><?= number_format($stats['delayed_jobs']) ?></strong><small>Requires attention</small></div>
-                    </div>
-                </div>
-            </div>
-            <?php else: ?>
-            <div class="card-ui table-panel">
-                <div class="table-panel-head">
-                    <div>
-                        <div class="d-flex align-items-center gap-2"><h2><?= e($exportTitle) ?></h2><span class="report-record-badge"><?= number_format(count($currentRows)) ?> records</span></div>
-                        <p><?= e(rpt_date($dateFrom)) ?> to <?= e(rpt_date($dateTo)) ?></p>
-                    </div>
-                    <input type="search" id="reportSearch" class="form-control report-search" placeholder="Search this report...">
-                </div>
-
-                <div class="report-table-wrap">
-                    <table class="report-table" id="reportTable">
-                        <thead>
-                        <?php if ($reportType === 'sales'): ?>
-                        <tr><th>Proforma</th><th>Customer</th><th>Function</th><th>Order</th><th>Qty</th><th>Final</th><th>Advance</th><th>Balance</th><th>Delivery</th><th>Status</th></tr>
-                        <?php elseif ($reportType === 'quick_sales'): ?>
-                        <tr><th>Quick Sale</th><th>Customer</th><th>Products</th><th>Qty</th><th>Total</th><th>Payment</th><th>Cash</th><th>UPI</th><th>Sale By</th><th>Date</th></tr>
-                        <?php elseif ($reportType === 'payments'): ?>
-                        <tr><th>Payment No</th><th>Customer</th><th>Proforma</th><th>Type</th><th>Mode</th><th>Amount</th><th>Date</th><th>Reference</th><th>Received By</th><th>Status</th></tr>
-                        <?php elseif ($reportType === 'job_cards'): ?>
-                        <tr><th>Job Card</th><th>Customer</th><th>Product</th><th>Function</th><th>Order</th><th>Stage</th><th>Delivery</th><th>Amount</th><th>Status</th></tr>
-                        <?php elseif ($reportType === 'pending'): ?>
-                        <tr><th>Job Card</th><th>Customer</th><th>Product</th><th>Current Stage</th><th>Delivery</th><th>Created</th><th>Status</th></tr>
-                        <?php elseif ($reportType === 'delays'): ?>
-                        <tr><th>Job Card</th><th>Customer</th><th>Product</th><th>Stage</th><th>Planned</th><th>Days</th><th>Reason</th><th>Remarks</th><th>Status</th></tr>
-                        <?php elseif ($reportType === 'delivery'): ?>
-                        <tr><th>Job Card</th><th>Customer</th><th>Product</th><th>Delivery</th><th>Current Stage</th><th>Completed</th><th>Delay</th><th>Status</th></tr>
                         <?php endif; ?>
-                        </thead>
-                        <tbody>
-                        <?php if (!$currentRows): ?>
-                        <tr><td colspan="10" class="empty-report">No records found for the selected filters.</td></tr>
-                        <?php endif; ?>
+                    </div>
+
+                    <div class="card-ui report-panel" style="grid-column:1/-1">
+                        <div class="panel-head">
+                            <div>
+                                <h2 class="report-panel-title">Operations Snapshot</h2>
+                                <div class="report-panel-sub">Job Card status for the selected creation period.</div>
+                            </div>
+                            <div class="panel-head-icon"><i data-lucide="activity"></i></div>
+                        </div>
+                        <div class="ops-grid">
+                            <div class="ops-card"><span>Completed
+                                    Jobs</span><strong><?= number_format($stats['completed_jobs']) ?></strong><small>Closed
+                                    production work</small></div>
+                            <div class="ops-card"><span>Open /
+                                    Pending</span><strong><?= number_format($stats['pending_jobs']) ?></strong><small>Still
+                                    in workflow</small></div>
+                            <div class="ops-card"><span>Delayed
+                                    Jobs</span><strong><?= number_format($stats['delayed_jobs']) ?></strong><small>Requires
+                                    attention</small></div>
+                        </div>
+                    </div>
+                </div>
+                <?php else: ?>
+                <div class="card-ui table-panel">
+                    <div class="table-panel-head">
+                        <div>
+                            <div class="d-flex align-items-center gap-2">
+                                <h2><?= e($exportTitle) ?></h2><span
+                                    class="report-record-badge"><?= number_format(count($currentRows)) ?> records</span>
+                            </div>
+                            <p><?= e(rpt_date($dateFrom)) ?> to <?= e(rpt_date($dateTo)) ?></p>
+                        </div>
+                        <input type="search" id="reportSearch" class="form-control report-search"
+                            placeholder="Search this report...">
+                    </div>
+
+                    <div class="report-table-wrap">
+                        <table class="report-table" id="reportTable">
+                            <thead>
+                                <?php if ($reportType === 'sales'): ?>
+                                <tr>
+                                    <th>Proforma</th>
+                                    <th>Customer</th>
+                                    <th>Function</th>
+                                    <th>Order</th>
+                                    <th>Qty</th>
+                                    <th>Final</th>
+                                    <th>Advance</th>
+                                    <th>Balance</th>
+                                    <th>Delivery</th>
+                                    <th>Status</th>
+                                </tr>
+                                <?php elseif ($reportType === 'quick_sales'): ?>
+                                <tr>
+                                    <th>Quick Sale</th>
+                                    <th>Customer</th>
+                                    <th>Products</th>
+                                    <th>Qty</th>
+                                    <th>Total</th>
+                                    <th>Payment</th>
+                                    <th>Cash</th>
+                                    <th>UPI</th>
+                                    <th>Sale By</th>
+                                    <th>Date</th>
+                                </tr>
+                                <?php elseif ($reportType === 'payments'): ?>
+                                <tr>
+                                    <th>Payment No</th>
+                                    <th>Customer</th>
+                                    <th>Proforma</th>
+                                    <th>Type</th>
+                                    <th>Mode</th>
+                                    <th>Amount</th>
+                                    <th>Date</th>
+                                    <th>Reference</th>
+                                    <th>Received By</th>
+                                    <th>Status</th>
+                                </tr>
+                                <?php elseif ($reportType === 'job_cards'): ?>
+                                <tr>
+                                    <th>Job Card</th>
+                                    <th>Customer</th>
+                                    <th>Product</th>
+                                    <th>Function</th>
+                                    <th>Order</th>
+                                    <th>Stage</th>
+                                    <th>Delivery</th>
+                                    <th>Amount</th>
+                                    <th>Status</th>
+                                </tr>
+                                <?php elseif ($reportType === 'pending'): ?>
+                                <tr>
+                                    <th>Job Card</th>
+                                    <th>Customer</th>
+                                    <th>Product</th>
+                                    <th>Current Stage</th>
+                                    <th>Delivery</th>
+                                    <th>Created</th>
+                                    <th>Status</th>
+                                </tr>
+                                <?php elseif ($reportType === 'delays'): ?>
+                                <tr>
+                                    <th>Job Card</th>
+                                    <th>Customer</th>
+                                    <th>Product</th>
+                                    <th>Stage</th>
+                                    <th>Planned</th>
+                                    <th>Days</th>
+                                    <th>Reason</th>
+                                    <th>Remarks</th>
+                                    <th>Status</th>
+                                </tr>
+                                <?php elseif ($reportType === 'delivery'): ?>
+                                <tr>
+                                    <th>Job Card</th>
+                                    <th>Customer</th>
+                                    <th>Product</th>
+                                    <th>Delivery</th>
+                                    <th>Current Stage</th>
+                                    <th>Completed</th>
+                                    <th>Delay</th>
+                                    <th>Status</th>
+                                </tr>
+                                <?php endif; ?>
+                            </thead>
+                            <tbody>
+                                <?php if (!$currentRows): ?>
+                                <tr>
+                                    <td colspan="10" class="empty-report">No records found for the selected filters.
+                                    </td>
+                                </tr>
+                                <?php endif; ?>
+                                <?php foreach ($currentRows as $row): ?>
+                                <?php if ($reportType === 'sales'): ?>
+                                <tr>
+                                    <td><strong><?= e($row['proforma_no'] ?? '-') ?></strong><span
+                                            class="cell-sub"><?= e(rpt_datetime($row['created_at'] ?? null)) ?></span>
+                                    </td>
+                                    <td><?= e($row['customer_name'] ?? '-') ?><span
+                                            class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td>
+                                    <td><?= e($row['function_name'] ?? '-') ?></td>
+                                    <td><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></td>
+                                    <td><?= number_format((float)($row['total_qty'] ?? 0),0) ?></td>
+                                    <td class="money-positive"><?= e(rpt_money($row['final_amount'] ?? 0)) ?></td>
+                                    <td><?= e(rpt_money($row['advance_amount'] ?? 0)) ?></td>
+                                    <td class="money-negative"><?= e(rpt_money($row['balance_amount'] ?? 0)) ?></td>
+                                    <td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td>
+                                    <td><span
+                                            class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span>
+                                    </td>
+                                </tr>
+                                <?php elseif ($reportType === 'quick_sales'): ?>
+                                <tr>
+                                    <td><strong><?= e($row['sale_no'] ?? '-') ?></strong><span class="cell-sub">ID:
+                                            <?= (int)($row['id'] ?? 0) ?></span></td>
+                                    <td><?= e($row['customer_name'] ?? 'Walk-in Customer') ?><span
+                                            class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td>
+                                    <td><?= e($row['product_names'] ?: '-') ?><span
+                                            class="cell-sub"><?= number_format((int)($row['item_count'] ?? 0)) ?> line
+                                            item(s)</span></td>
+                                    <td><?= number_format((float)($row['total_qty'] ?? 0),0) ?></td>
+                                    <td class="money-positive"><?= e(rpt_money($row['total_amount'] ?? 0)) ?></td>
+                                    <td><span
+                                            class="status-pill <?= strtolower((string)($row['payment_mode_label'] ?? '')) === 'unpaid' ? 'warning' : 'primary' ?>"><?= e($row['payment_mode_label'] ?? '-') ?></span>
+                                    </td>
+                                    <td><?= e(rpt_money($row['cash_amount'] ?? 0)) ?></td>
+                                    <td><?= e(rpt_money($row['upi_amount'] ?? 0)) ?><span
+                                            class="cell-sub"><?= e($row['upi_reference'] ?? '') ?></span></td>
+                                    <td><?= e($row['sale_by'] ?? 'System') ?></td>
+                                    <td><?= e(rpt_datetime($row['created_at'] ?? null)) ?></td>
+                                </tr>
+                                <?php elseif ($reportType === 'payments'): ?>
+                                <tr>
+                                    <td><strong><?= e($row['payment_no'] ?? '-') ?></strong></td>
+                                    <td><?= e($row['customer_name'] ?? '-') ?><span
+                                            class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td>
+                                    <td><?= e($row['proforma_no'] ?? '-') ?></td>
+                                    <td><?= e(ucfirst((string)($row['payment_type'] ?? '-'))) ?></td>
+                                    <td><?= e(ucfirst((string)($row['payment_mode'] ?? '-'))) ?></td>
+                                    <td class="money-positive"><?= e(rpt_money($row['amount'] ?? 0)) ?></td>
+                                    <td><?= e(rpt_date($row['payment_date'] ?? null)) ?></td>
+                                    <td><?= e($row['reference_no'] ?? '-') ?></td>
+                                    <td><?= e($row['received_by_name'] ?? '-') ?></td>
+                                    <td><span
+                                            class="status-pill <?= e(rpt_status_class((string)($row['payment_status'] ?? 'paid'))) ?>"><?= e(ucfirst((string)($row['payment_status'] ?? 'paid'))) ?></span>
+                                    </td>
+                                </tr>
+                                <?php elseif ($reportType === 'job_cards'): ?>
+                                <tr>
+                                    <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong><span
+                                            class="cell-sub"><?= e(rpt_datetime($row['created_at'] ?? null)) ?></span>
+                                    </td>
+                                    <td><?= e($row['customer_name'] ?? '-') ?><span
+                                            class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td>
+                                    <td><?= e($row['product_name'] ?? '-') ?></td>
+                                    <td><?= e($row['function_name'] ?? '-') ?></td>
+                                    <td><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></td>
+                                    <td><?= e($row['current_step_name'] ?? '-') ?></td>
+                                    <td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td>
+                                    <td class="money-positive"><?= e(rpt_money($row['final_amount'] ?? 0)) ?></td>
+                                    <td><span
+                                            class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span>
+                                    </td>
+                                </tr>
+                                <?php elseif ($reportType === 'pending'): ?>
+                                <tr>
+                                    <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong></td>
+                                    <td><?= e($row['customer_name'] ?? '-') ?><span
+                                            class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td>
+                                    <td><?= e($row['product_name'] ?? '-') ?></td>
+                                    <td><?= e($row['current_step_name'] ?? '-') ?></td>
+                                    <td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td>
+                                    <td><?= e(rpt_datetime($row['created_at'] ?? null)) ?></td>
+                                    <td><span
+                                            class="status-pill warning"><?= e($row['status_name'] ?? 'Pending') ?></span>
+                                    </td>
+                                </tr>
+                                <?php elseif ($reportType === 'delays'): ?>
+                                <tr>
+                                    <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong></td>
+                                    <td><?= e($row['customer_name'] ?? '-') ?><span
+                                            class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td>
+                                    <td><?= e($row['product_name'] ?? '-') ?></td>
+                                    <td><?= e($row['step_name'] ?? '-') ?></td>
+                                    <td><?= e(rpt_date($row['planned_completion_date'] ?? null)) ?></td>
+                                    <td class="money-negative"><?= number_format((int)($row['delay_days'] ?? 0)) ?></td>
+                                    <td><?= e($row['reason_name'] ?? '-') ?></td>
+                                    <td><?= e($row['delay_remarks'] ?? '-') ?></td>
+                                    <td><span
+                                            class="status-pill danger"><?= e(ucfirst((string)($row['status'] ?? 'delayed'))) ?></span>
+                                    </td>
+                                </tr>
+                                <?php elseif ($reportType === 'delivery'): ?>
+                                <tr>
+                                    <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong></td>
+                                    <td><?= e($row['customer_name'] ?? '-') ?><span
+                                            class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td>
+                                    <td><?= e($row['product_name'] ?? '-') ?></td>
+                                    <td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td>
+                                    <td><?= e($row['current_step_name'] ?? '-') ?></td>
+                                    <td><?= e(rpt_datetime($row['completed_at'] ?? null)) ?></td>
+                                    <td><?= ((int)($row['is_delayed'] ?? 0) === 1) ? '<span class="status-pill danger">Delayed</span>' : '<span class="status-pill success">On Track</span>' ?>
+                                    </td>
+                                    <td><span
+                                            class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span>
+                                    </td>
+                                </tr>
+                                <?php endif; ?>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="mobile-report-list" id="mobileReportCards">
                         <?php foreach ($currentRows as $row): ?>
+                        <div class="mobile-report-item">
                             <?php if ($reportType === 'sales'): ?>
-                            <tr>
-                                <td><strong><?= e($row['proforma_no'] ?? '-') ?></strong><span class="cell-sub"><?= e(rpt_datetime($row['created_at'] ?? null)) ?></span></td>
-                                <td><?= e($row['customer_name'] ?? '-') ?><span class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td>
-                                <td><?= e($row['function_name'] ?? '-') ?></td><td><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></td><td><?= number_format((float)($row['total_qty'] ?? 0),0) ?></td>
-                                <td class="money-positive"><?= e(rpt_money($row['final_amount'] ?? 0)) ?></td><td><?= e(rpt_money($row['advance_amount'] ?? 0)) ?></td><td class="money-negative"><?= e(rpt_money($row['balance_amount'] ?? 0)) ?></td><td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td><td><span class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span></td>
-                            </tr>
+                            <div class="mobile-row-head">
+                                <div>
+                                    <div class="mobile-title"><?= e($row['proforma_no'] ?? '-') ?></div>
+                                    <div class="mobile-meta"><?= e($row['customer_name'] ?? '-') ?> ·
+                                        <?= e($row['mobile'] ?? '-') ?></div>
+                                </div><span
+                                    class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span>
+                            </div>
+                            <div class="mobile-details">
+                                <div><span>Final</span><strong><?= e(rpt_money($row['final_amount'] ?? 0)) ?></strong>
+                                </div>
+                                <div>
+                                    <span>Balance</span><strong><?= e(rpt_money($row['balance_amount'] ?? 0)) ?></strong>
+                                </div>
+                                <div><span>Function</span><strong><?= e($row['function_name'] ?? '-') ?></strong></div>
+                                <div>
+                                    <span>Delivery</span><strong><?= e(rpt_date($row['delivery_date'] ?? null)) ?></strong>
+                                </div>
+                            </div>
                             <?php elseif ($reportType === 'quick_sales'): ?>
-                            <tr>
-                                <td><strong><?= e($row['sale_no'] ?? '-') ?></strong><span class="cell-sub">ID: <?= (int)($row['id'] ?? 0) ?></span></td>
-                                <td><?= e($row['customer_name'] ?? 'Walk-in Customer') ?><span class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td>
-                                <td><?= e($row['product_names'] ?: '-') ?><span class="cell-sub"><?= number_format((int)($row['item_count'] ?? 0)) ?> line item(s)</span></td>
-                                <td><?= number_format((float)($row['total_qty'] ?? 0),0) ?></td><td class="money-positive"><?= e(rpt_money($row['total_amount'] ?? 0)) ?></td><td><span class="status-pill <?= strtolower((string)($row['payment_mode_label'] ?? '')) === 'unpaid' ? 'warning' : 'primary' ?>"><?= e($row['payment_mode_label'] ?? '-') ?></span></td>
-                                <td><?= e(rpt_money($row['cash_amount'] ?? 0)) ?></td><td><?= e(rpt_money($row['upi_amount'] ?? 0)) ?><span class="cell-sub"><?= e($row['upi_reference'] ?? '') ?></span></td><td><?= e($row['sale_by'] ?? 'System') ?></td><td><?= e(rpt_datetime($row['created_at'] ?? null)) ?></td>
-                            </tr>
+                            <div class="mobile-row-head">
+                                <div>
+                                    <div class="mobile-title"><?= e($row['sale_no'] ?? '-') ?></div>
+                                    <div class="mobile-meta"><?= e($row['customer_name'] ?? '-') ?> ·
+                                        <?= e($row['mobile'] ?? '-') ?></div>
+                                </div><span
+                                    class="status-pill primary"><?= e($row['payment_mode_label'] ?? '-') ?></span>
+                            </div>
+                            <div class="mobile-details">
+                                <div><span>Products</span><strong><?= e($row['product_names'] ?: '-') ?></strong></div>
+                                <div><span>Total</span><strong><?= e(rpt_money($row['total_amount'] ?? 0)) ?></strong>
+                                </div>
+                                <div><span>Cash / UPI</span><strong><?= e(rpt_money($row['cash_amount'] ?? 0)) ?> /
+                                        <?= e(rpt_money($row['upi_amount'] ?? 0)) ?></strong></div>
+                                <div><span>Sale By</span><strong><?= e($row['sale_by'] ?? 'System') ?></strong></div>
+                            </div>
                             <?php elseif ($reportType === 'payments'): ?>
-                            <tr>
-                                <td><strong><?= e($row['payment_no'] ?? '-') ?></strong></td><td><?= e($row['customer_name'] ?? '-') ?><span class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td><td><?= e($row['proforma_no'] ?? '-') ?></td><td><?= e(ucfirst((string)($row['payment_type'] ?? '-'))) ?></td><td><?= e(ucfirst((string)($row['payment_mode'] ?? '-'))) ?></td><td class="money-positive"><?= e(rpt_money($row['amount'] ?? 0)) ?></td><td><?= e(rpt_date($row['payment_date'] ?? null)) ?></td><td><?= e($row['reference_no'] ?? '-') ?></td><td><?= e($row['received_by_name'] ?? '-') ?></td><td><span class="status-pill <?= e(rpt_status_class((string)($row['payment_status'] ?? 'paid'))) ?>"><?= e(ucfirst((string)($row['payment_status'] ?? 'paid'))) ?></span></td>
-                            </tr>
-                            <?php elseif ($reportType === 'job_cards'): ?>
-                            <tr>
-                                <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong><span class="cell-sub"><?= e(rpt_datetime($row['created_at'] ?? null)) ?></span></td><td><?= e($row['customer_name'] ?? '-') ?><span class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td><td><?= e($row['product_name'] ?? '-') ?></td><td><?= e($row['function_name'] ?? '-') ?></td><td><?= e(ucfirst((string)($row['order_type'] ?? '-'))) ?></td><td><?= e($row['current_step_name'] ?? '-') ?></td><td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td><td class="money-positive"><?= e(rpt_money($row['final_amount'] ?? 0)) ?></td><td><span class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span></td>
-                            </tr>
-                            <?php elseif ($reportType === 'pending'): ?>
-                            <tr>
-                                <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong></td><td><?= e($row['customer_name'] ?? '-') ?><span class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td><td><?= e($row['product_name'] ?? '-') ?></td><td><?= e($row['current_step_name'] ?? '-') ?></td><td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td><td><?= e(rpt_datetime($row['created_at'] ?? null)) ?></td><td><span class="status-pill warning"><?= e($row['status_name'] ?? 'Pending') ?></span></td>
-                            </tr>
-                            <?php elseif ($reportType === 'delays'): ?>
-                            <tr>
-                                <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong></td><td><?= e($row['customer_name'] ?? '-') ?><span class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td><td><?= e($row['product_name'] ?? '-') ?></td><td><?= e($row['step_name'] ?? '-') ?></td><td><?= e(rpt_date($row['planned_completion_date'] ?? null)) ?></td><td class="money-negative"><?= number_format((int)($row['delay_days'] ?? 0)) ?></td><td><?= e($row['reason_name'] ?? '-') ?></td><td><?= e($row['delay_remarks'] ?? '-') ?></td><td><span class="status-pill danger"><?= e(ucfirst((string)($row['status'] ?? 'delayed'))) ?></span></td>
-                            </tr>
-                            <?php elseif ($reportType === 'delivery'): ?>
-                            <tr>
-                                <td><strong><?= e($row['job_card_no'] ?? '-') ?></strong></td><td><?= e($row['customer_name'] ?? '-') ?><span class="cell-sub"><?= e($row['mobile'] ?? '-') ?></span></td><td><?= e($row['product_name'] ?? '-') ?></td><td><?= e(rpt_date($row['delivery_date'] ?? null)) ?></td><td><?= e($row['current_step_name'] ?? '-') ?></td><td><?= e(rpt_datetime($row['completed_at'] ?? null)) ?></td><td><?= ((int)($row['is_delayed'] ?? 0) === 1) ? '<span class="status-pill danger">Delayed</span>' : '<span class="status-pill success">On Track</span>' ?></td><td><span class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span></td>
-                            </tr>
+                            <div class="mobile-row-head">
+                                <div>
+                                    <div class="mobile-title"><?= e($row['payment_no'] ?? '-') ?></div>
+                                    <div class="mobile-meta"><?= e($row['customer_name'] ?? '-') ?> ·
+                                        <?= e($row['proforma_no'] ?? '-') ?></div>
+                                </div><span
+                                    class="status-pill <?= e(rpt_status_class((string)($row['payment_status'] ?? 'paid'))) ?>"><?= e(ucfirst((string)($row['payment_status'] ?? 'paid'))) ?></span>
+                            </div>
+                            <div class="mobile-details">
+                                <div><span>Amount</span><strong><?= e(rpt_money($row['amount'] ?? 0)) ?></strong></div>
+                                <div>
+                                    <span>Mode</span><strong><?= e(ucfirst((string)($row['payment_mode'] ?? '-'))) ?></strong>
+                                </div>
+                                <div><span>Date</span><strong><?= e(rpt_date($row['payment_date'] ?? null)) ?></strong>
+                                </div>
+                                <div><span>Received By</span><strong><?= e($row['received_by_name'] ?? '-') ?></strong>
+                                </div>
+                            </div>
+                            <?php else: ?>
+                            <div class="mobile-row-head">
+                                <div>
+                                    <div class="mobile-title"><?= e($row['job_card_no'] ?? '-') ?></div>
+                                    <div class="mobile-meta"><?= e($row['customer_name'] ?? '-') ?> ·
+                                        <?= e($row['mobile'] ?? '-') ?></div>
+                                </div><span
+                                    class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ($row['status'] ?? 'pending')))) ?>"><?= e($row['status_name'] ?? ucfirst((string)($row['status'] ?? 'pending'))) ?></span>
+                            </div>
+                            <div class="mobile-details">
+                                <div><span>Product</span><strong><?= e($row['product_name'] ?? '-') ?></strong></div>
+                                <div>
+                                    <span>Stage</span><strong><?= e($row['current_step_name'] ?? ($row['step_name'] ?? '-')) ?></strong>
+                                </div>
+                                <div><span>Delivery /
+                                        Planned</span><strong><?= e(rpt_date($row['delivery_date'] ?? ($row['planned_completion_date'] ?? null))) ?></strong>
+                                </div>
+                            </div>
                             <?php endif; ?>
+                        </div>
                         <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-
-                <div class="mobile-report-list" id="mobileReportCards">
-                    <?php foreach ($currentRows as $row): ?>
-                    <div class="mobile-report-item">
-                        <?php if ($reportType === 'sales'): ?>
-                            <div class="mobile-row-head"><div><div class="mobile-title"><?= e($row['proforma_no'] ?? '-') ?></div><div class="mobile-meta"><?= e($row['customer_name'] ?? '-') ?> · <?= e($row['mobile'] ?? '-') ?></div></div><span class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ''))) ?>"><?= e($row['status_name'] ?? '-') ?></span></div>
-                            <div class="mobile-details"><div><span>Final</span><strong><?= e(rpt_money($row['final_amount'] ?? 0)) ?></strong></div><div><span>Balance</span><strong><?= e(rpt_money($row['balance_amount'] ?? 0)) ?></strong></div><div><span>Function</span><strong><?= e($row['function_name'] ?? '-') ?></strong></div><div><span>Delivery</span><strong><?= e(rpt_date($row['delivery_date'] ?? null)) ?></strong></div></div>
-                        <?php elseif ($reportType === 'quick_sales'): ?>
-                            <div class="mobile-row-head"><div><div class="mobile-title"><?= e($row['sale_no'] ?? '-') ?></div><div class="mobile-meta"><?= e($row['customer_name'] ?? '-') ?> · <?= e($row['mobile'] ?? '-') ?></div></div><span class="status-pill primary"><?= e($row['payment_mode_label'] ?? '-') ?></span></div>
-                            <div class="mobile-details"><div><span>Products</span><strong><?= e($row['product_names'] ?: '-') ?></strong></div><div><span>Total</span><strong><?= e(rpt_money($row['total_amount'] ?? 0)) ?></strong></div><div><span>Cash / UPI</span><strong><?= e(rpt_money($row['cash_amount'] ?? 0)) ?> / <?= e(rpt_money($row['upi_amount'] ?? 0)) ?></strong></div><div><span>Sale By</span><strong><?= e($row['sale_by'] ?? 'System') ?></strong></div></div>
-                        <?php elseif ($reportType === 'payments'): ?>
-                            <div class="mobile-row-head"><div><div class="mobile-title"><?= e($row['payment_no'] ?? '-') ?></div><div class="mobile-meta"><?= e($row['customer_name'] ?? '-') ?> · <?= e($row['proforma_no'] ?? '-') ?></div></div><span class="status-pill <?= e(rpt_status_class((string)($row['payment_status'] ?? 'paid'))) ?>"><?= e(ucfirst((string)($row['payment_status'] ?? 'paid'))) ?></span></div>
-                            <div class="mobile-details"><div><span>Amount</span><strong><?= e(rpt_money($row['amount'] ?? 0)) ?></strong></div><div><span>Mode</span><strong><?= e(ucfirst((string)($row['payment_mode'] ?? '-'))) ?></strong></div><div><span>Date</span><strong><?= e(rpt_date($row['payment_date'] ?? null)) ?></strong></div><div><span>Received By</span><strong><?= e($row['received_by_name'] ?? '-') ?></strong></div></div>
-                        <?php else: ?>
-                            <div class="mobile-row-head"><div><div class="mobile-title"><?= e($row['job_card_no'] ?? '-') ?></div><div class="mobile-meta"><?= e($row['customer_name'] ?? '-') ?> · <?= e($row['mobile'] ?? '-') ?></div></div><span class="status-pill <?= e(rpt_status_class((string)($row['status_name'] ?? ($row['status'] ?? 'pending')))) ?>"><?= e($row['status_name'] ?? ucfirst((string)($row['status'] ?? 'pending'))) ?></span></div>
-                            <div class="mobile-details"><div><span>Product</span><strong><?= e($row['product_name'] ?? '-') ?></strong></div><div><span>Stage</span><strong><?= e($row['current_step_name'] ?? ($row['step_name'] ?? '-')) ?></strong></div><div><span>Delivery / Planned</span><strong><?= e(rpt_date($row['delivery_date'] ?? ($row['planned_completion_date'] ?? null))) ?></strong></div></div>
-                        <?php endif; ?>
+                        <?php if (!$currentRows): ?><div class="empty-report">No records found for the selected filters.
+                        </div><?php endif; ?>
                     </div>
-                    <?php endforeach; ?>
-                    <?php if (!$currentRows): ?><div class="empty-report">No records found for the selected filters.</div><?php endif; ?>
                 </div>
-            </div>
-            <?php endif; ?>
-        </section>
-    </main>
-    <div id="settingsOverlay"></div>
-    <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
-</div>
-<?php include __DIR__ . '/includes/script.php'; ?>
-<script>
-(function(){
-    if(window.lucide && typeof window.lucide.createIcons === 'function') window.lucide.createIcons();
-    const search = document.getElementById('reportSearch');
-    if(search){
-        search.addEventListener('input', function(){
-            const q = this.value.toLowerCase().trim();
-            document.querySelectorAll('#reportTable tbody tr').forEach(function(row){
-                row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
+                <?php endif; ?>
+            </section>
+        </main>
+        <div id="settingsOverlay"></div>
+        <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
+    </div>
+    <?php include __DIR__ . '/includes/script.php'; ?>
+    <script>
+    (function() {
+        if (window.lucide && typeof window.lucide.createIcons === 'function') window.lucide.createIcons();
+        const search = document.getElementById('reportSearch');
+        if (search) {
+            search.addEventListener('input', function() {
+                const q = this.value.toLowerCase().trim();
+                document.querySelectorAll('#reportTable tbody tr').forEach(function(row) {
+                    row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
+                });
+                document.querySelectorAll('#mobileReportCards .mobile-report-item').forEach(function(card) {
+                    card.style.display = card.textContent.toLowerCase().includes(q) ? '' : 'none';
+                });
             });
-            document.querySelectorAll('#mobileReportCards .mobile-report-item').forEach(function(card){
-                card.style.display = card.textContent.toLowerCase().includes(q) ? '' : 'none';
-            });
-        });
-    }
-})();
-</script>
+        }
+    })();
+    </script>
 </body>
+
 </html>

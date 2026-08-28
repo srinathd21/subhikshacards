@@ -27,7 +27,28 @@ function cpa_table_exists(mysqli $conn, string $table): bool
 
 function cpa_datetime($value): string
 {
-    return !empty($value) ? date('d-m-Y h:i A', strtotime((string)$value)) : '-';
+    if (empty($value)) {
+        return '-';
+    }
+
+    try {
+        /*
+         * MySQL approval timestamps are stored in UTC.
+         * Customer-facing display must use India Standard Time.
+         */
+        $utc = new DateTimeZone('UTC');
+        $ist = new DateTimeZone('Asia/Kolkata');
+
+        $dt = DateTime::createFromFormat('Y-m-d H:i:s', (string)$value, $utc);
+        if (!$dt) {
+            $dt = new DateTime((string)$value, $utc);
+        }
+
+        $dt->setTimezone($ist);
+        return $dt->format('d-m-Y h:i A');
+    } catch (Throwable $e) {
+        return (string)$value;
+    }
 }
 
 function cpa_date($value): string
