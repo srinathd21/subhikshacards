@@ -276,6 +276,7 @@ function dash_completed_job_where(): string
 
 [$roleKey, $roleName] = dash_user_role($conn);
 $roleGroup = dash_role_group($roleKey);
+$currentUserId = (int)($_SESSION['user_id'] ?? 0);
 $displayName = trim((string)($_SESSION['name'] ?? $_SESSION['username'] ?? 'User')) ?: 'User';
 $today = date('Y-m-d');
 
@@ -1004,6 +1005,7 @@ if ($roleGroup === 'sales' || $roleGroup === 'admin') {
         FROM job_cards jc
         " . dash_join_status_filter() . "
         WHERE " . dash_active_job_where() . "
+          AND jc.assigned_printing_user_id = " . (int)$currentUserId . "
           AND (
                 LOWER(COALESCE(cws.default_owner_role_key, '')) = '{$roleKeyEsc}'
              OR LOWER(COALESCE(cws.default_owner_role_key, '')) LIKE '%printing%'
@@ -1033,9 +1035,50 @@ if ($roleGroup === 'sales' || $roleGroup === 'admin') {
 }
 
 // -----------------------------------------------------------------------------
+// Admin printing assignment monitor
+// Full record monitoring remains in job_cards.php; dashboard shows a live summary.
+// -----------------------------------------------------------------------------
+$adminPrintingAssignments = [];
+$adminAssignedPrintingJobs = 0;
+$adminUnassignedPrintingJobs = 0;
+
+if ($roleGroup === 'admin' && dash_table_exists($conn, 'job_cards')) {
+    $adminAssignedPrintingJobs = dash_count($conn, 'job_cards', 'assigned_printing_user_id IS NOT NULL');
+    $adminUnassignedPrintingJobs = dash_count($conn, 'job_cards', 'printing_type_id IS NOT NULL AND assigned_printing_user_id IS NULL');
+
+    $adminPrintingAssignments = dash_fetch_all($conn, "
+        SELECT
+            jc.id,
+            jc.job_card_no,
+            jc.customer_name,
+            jc.product_name,
+            jc.delivery_date,
+            jc.is_delayed,
+            pt.printing_name,
+            COALESCE(NULLIF(u.name, ''), u.username, 'Unassigned') AS assigned_person,
+            u.username AS assigned_username,
+            r.role_name AS assigned_role,
+            cws.step_name AS current_step,
+            jcs.status_name AS status_name
+        FROM job_cards jc
+        LEFT JOIN printing_types pt ON pt.id = jc.printing_type_id
+        LEFT JOIN users u ON u.id = jc.assigned_printing_user_id
+        LEFT JOIN roles r ON r.id = u.role_id
+        " . dash_join_status_filter() . "
+        WHERE jc.printing_type_id IS NOT NULL
+        ORDER BY
+            CASE WHEN jc.assigned_printing_user_id IS NULL THEN 0 ELSE 1 END ASC,
+            jc.is_delayed DESC,
+            jc.id DESC
+        LIMIT 15
+    ");
+}
+
+// -----------------------------------------------------------------------------
 // Production stage summary - current step count only
 // -----------------------------------------------------------------------------
 $stageSummary = [];
+$stageAssignmentWhere = $roleGroup === 'printing' ? (' AND jc.assigned_printing_user_id = ' . (int)$currentUserId) : '';
 if (dash_table_exists($conn, 'job_cards') && dash_table_exists($conn, 'workflow_steps')) {
     $stageSummary = dash_fetch_all($conn, "
         SELECT
@@ -1046,6 +1089,7 @@ if (dash_table_exists($conn, 'job_cards') && dash_table_exists($conn, 'workflow_
         FROM job_cards jc
         " . dash_join_status_filter() . "
         WHERE " . dash_active_job_where() . "
+        {$stageAssignmentWhere}
         GROUP BY cws.id, cws.step_key, cws.step_name, cws.default_owner_role_key, cws.sort_order
         ORDER BY cws.sort_order ASC, cws.step_name ASC
         LIMIT 12
@@ -2236,6 +2280,84 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                         </div>
                     </div>
                 </div>
+                <?php if ($roleGroup === 'admin'): ?>
+                <div class="row g-3 mb-3">
+                    <div class="col-12">
+                        <div class="card-ui dashboard-card">
+                            <div
+                                class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
+                                <div>
+                                    <h2 class="dashboard-card-title">Printing Assignment Monitor</h2>
+                                    <p class="text-muted-custom mb-0">Admin overview of printing type, assigned person,
+                                        current stage and delivery.</p>
+                                </div>
+                                <div class="d-flex flex-wrap gap-2 align-items-center">
+                                    <span class="status-pill">Assigned:
+                                        <?= number_format($adminAssignedPrintingJobs) ?></span>
+                                    <span
+                                        class="status-pill <?= $adminUnassignedPrintingJobs > 0 ? 'text-danger' : '' ?>">Unassigned:
+                                        <?= number_format($adminUnassignedPrintingJobs) ?></span>
+                                    <a href="job_cards.php"
+                                        class="btn btn-sm btn-primary rounded-pill fw-bold px-3">View All Job Cards</a>
+                                </div>
+                            </div>
+
+                            <?php if (!$adminPrintingAssignments): ?>
+                            <div class="empty-box">No printing assignments found.</div>
+                            <?php else: ?>
+                            <div class="table-responsive">
+                                <table class="queue-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Job Card</th>
+                                            <th>Printing / Person</th>
+                                            <th>Current Stage</th>
+                                            <th>Delivery</th>
+                                            <th class="text-end">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($adminPrintingAssignments as $assignment): ?>
+                                        <tr>
+                                            <td>
+                                                <div class="queue-ref"><?= e($assignment['job_card_no'] ?? '-') ?></div>
+                                                <div class="queue-meta"><?= e($assignment['customer_name'] ?? '-') ?> |
+                                                    <?= e($assignment['product_name'] ?? '-') ?></div>
+                                            </td>
+                                            <td>
+                                                <div class="queue-ref"><?= e($assignment['printing_name'] ?? '-') ?>
+                                                </div>
+                                                <?php if (!empty($assignment['assigned_username'])): ?>
+                                                <div class="queue-meta">
+                                                    <?= e($assignment['assigned_person'] ?? '-') ?><?= !empty($assignment['assigned_role']) ? ' — ' . e($assignment['assigned_role']) : '' ?>
+                                                </div>
+                                                <?php else: ?>
+                                                <span class="badge text-bg-warning">Unassigned</span>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td>
+                                                <span
+                                                    class="status-pill"><?= e($assignment['current_step'] ?? '-') ?></span>
+                                                <div class="queue-meta mt-1">
+                                                    <?= e($assignment['status_name'] ?? '-') ?><?= !empty($assignment['is_delayed']) ? ' | Delayed' : '' ?>
+                                                </div>
+                                            </td>
+                                            <td><?= e(dash_date($assignment['delivery_date'] ?? null)) ?></td>
+                                            <td class="text-end">
+                                                <a href="job_card_view.php?id=<?= (int)$assignment['id'] ?>"
+                                                    class="btn btn-sm btn-outline-primary rounded-pill fw-bold px-3">Open</a>
+                                            </td>
+                                        </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
+
                 <div class="row g-3 mb-3">
                     <div class="col-12 col-xl-8">
                         <div class="card-ui dashboard-card h-100">

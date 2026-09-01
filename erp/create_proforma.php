@@ -358,10 +358,15 @@ function cpFetchProformaItemsForEdit(mysqli $conn, int $proformaId): array
         $hasProductStock = cpTableExists($conn, 'product_stock');
         $hasReservations = cpTableExists($conn, 'product_stock_reservations');
         $hasItemPlannedDates = cpColumnExists($conn, 'proforma_bill_items', 'planned_dates_json');
+        $hasPrintingUserAssignment = cpColumnExists($conn, 'proforma_bill_items', 'assigned_printing_user_id');
 
         $plannedDatesSelect = $hasItemPlannedDates
             ? "pbi.planned_dates_json"
             : "NULL AS planned_dates_json";
+
+        $printingUserSelect = $hasPrintingUserAssignment
+            ? "pbi.assigned_printing_user_id"
+            : "NULL AS assigned_printing_user_id";
 
         $stockSelect = $hasProductStock
             ? "
@@ -403,6 +408,7 @@ function cpFetchProformaItemsForEdit(mysqli $conn, int $proformaId): array
                 pbi.amount,
                 pbi.printing_type_id,
                 pbi.printing_sub_type_id,
+                {$printingUserSelect},
                 pbi.finishing_required,
                 pbi.size_text,
                 pbi.gsm_thickness,
@@ -463,6 +469,7 @@ function cpFetchProformaItemsForEdit(mysqli $conn, int $proformaId): array
                 'amount' => (float)($row['amount'] ?? 0),
                 'printing_type_id' => !empty($row['printing_type_id']) ? (string)(int)$row['printing_type_id'] : '',
                 'printing_sub_type_id' => !empty($row['printing_sub_type_id']) ? (string)(int)$row['printing_sub_type_id'] : '',
+                'assigned_printing_user_id' => !empty($row['assigned_printing_user_id']) ? (string)(int)$row['assigned_printing_user_id'] : '',
                 'finishing_required' => (int)($row['finishing_required'] ?? 0),
                 'size_text' => (string)($row['size_text'] ?? ''),
                 'gsm_thickness' => (string)($row['gsm_thickness'] ?? ''),
@@ -862,12 +869,34 @@ if (cpTableExists($conn, 'printing_types') && cpTableExists($conn, 'printing_sub
 
 $printingTypes = cpFetchAll($conn, "SELECT id, printing_name, printing_key, role_key, is_for_readymade, is_for_customized FROM printing_types WHERE is_active = 1 ORDER BY sort_order ASC, id ASC");
 $printingSubTypes = cpFetchAll($conn, "SELECT id, printing_type_id, sub_type_name, sub_type_key FROM printing_sub_types WHERE is_active = 1 ORDER BY printing_type_id ASC, sort_order ASC, id ASC");
+$printingUsers = cpFetchAll($conn, "
+    SELECT
+        u.id,
+        u.name,
+        u.username,
+        u.role_id,
+        r.role_key,
+        r.role_name
+    FROM users u
+    INNER JOIN roles r ON r.id = u.role_id
+    WHERE u.is_active = 1
+      AND r.is_active = 1
+      AND r.role_key IN (
+          SELECT DISTINCT role_key
+          FROM printing_types
+          WHERE is_active = 1
+            AND role_key IS NOT NULL
+            AND role_key <> ''
+      )
+    ORDER BY r.role_name ASC, u.name ASC, u.username ASC
+");
 $readymadeSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order, is_final_step FROM workflow_steps WHERE order_type = 'readymade' AND is_active = 1 ORDER BY sort_order ASC");
 $customizedSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order, is_final_step FROM workflow_steps WHERE order_type = 'customized' AND is_active = 1 ORDER BY sort_order ASC");
 
 $quotationJson = json_encode($quotations, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $subTypeJson = json_encode($printingSubTypes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $printingTypeJson = json_encode($printingTypes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+$printingUsersJson = json_encode($printingUsers, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $stepsJson = json_encode(['readymade' => $readymadeSteps, 'printing_only' => $readymadeSteps, 'customized' => $customizedSteps], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $plannedDatesJson = json_encode($plannedDates ?: new stdClass(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
@@ -1804,233 +1833,312 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             grid-template-columns: 1fr;
         }
     }
-    
+
     /* Professional compact Create Proforma UI */
-    .module-page{
-        width:100%;
-        max-width:1320px;
-        margin:0 auto;
+    .module-page {
+        width: 100%;
+        max-width: 1320px;
+        margin: 0 auto;
     }
-    .module-page .page-head{
-        padding:15px 18px;
-        margin-bottom:12px;
-        border-radius:16px;
+
+    .module-page .page-head {
+        padding: 15px 18px;
+        margin-bottom: 12px;
+        border-radius: 16px;
     }
-    .module-page .page-head h1{
-        font-size:23px;
-        line-height:1.15;
-        font-weight:800;
-        letter-spacing:-.25px;
+
+    .module-page .page-head h1 {
+        font-size: 23px;
+        line-height: 1.15;
+        font-weight: 800;
+        letter-spacing: -.25px;
     }
-    .module-page .page-head p{
-        font-size:12px;
-        font-weight:500;
+
+    .module-page .page-head p {
+        font-size: 12px;
+        font-weight: 500;
     }
-    .module-card{
-        padding:18px !important;
-        border-radius:16px !important;
+
+    .module-card {
+        padding: 18px !important;
+        border-radius: 16px !important;
     }
-    .module-card > .row.g-3{
-        --bs-gutter-y:.75rem;
-        --bs-gutter-x:.85rem;
+
+    .module-card>.row.g-3 {
+        --bs-gutter-y: .75rem;
+        --bs-gutter-x: .85rem;
     }
-    .section-title{
-        font-size:15px !important;
-        font-weight:800 !important;
-        margin-bottom:2px !important;
-        color:var(--text-main);
+
+    .section-title {
+        font-size: 15px !important;
+        font-weight: 800 !important;
+        margin-bottom: 2px !important;
+        color: var(--text-main);
     }
-    .form-label{
-        font-size:10.5px !important;
-        font-weight:750 !important;
-        margin-bottom:5px !important;
-        letter-spacing:.01em;
+
+    .form-label {
+        font-size: 10.5px !important;
+        font-weight: 750 !important;
+        margin-bottom: 5px !important;
+        letter-spacing: .01em;
     }
+
     .form-control,
     .form-select,
-    .select2-container .select2-selection--single{
-        min-height:39px !important;
-        font-size:12.5px !important;
-        border-radius:11px !important;
+    .select2-container .select2-selection--single {
+        min-height: 39px !important;
+        font-size: 12.5px !important;
+        border-radius: 11px !important;
     }
-    textarea.form-control{
-        min-height:58px !important;
+
+    textarea.form-control {
+        min-height: 58px !important;
     }
-    .input-group-text{
-        min-height:39px;
-        font-size:12px;
-        padding:6px 10px;
+
+    .input-group-text {
+        min-height: 39px;
+        font-size: 12px;
+        padding: 6px 10px;
     }
-    .soft-panel{
-        padding:14px !important;
-        border-radius:15px !important;
+
+    .soft-panel {
+        padding: 14px !important;
+        border-radius: 15px !important;
     }
+
     .quotation-clear-btn,
-    .product-clear-btn{
-        min-height:39px !important;
-        font-size:11px !important;
-        font-weight:700 !important;
-        border-radius:11px !important;
+    .product-clear-btn {
+        min-height: 39px !important;
+        font-size: 11px !important;
+        font-weight: 700 !important;
+        border-radius: 11px !important;
     }
-    .pricing-requirement-title{
-        padding:10px 12px !important;
-        border-radius:12px !important;
-        font-size:12px !important;
+
+    .pricing-requirement-title {
+        padding: 10px 12px !important;
+        border-radius: 12px !important;
+        font-size: 12px !important;
     }
-    .pricing-requirement-title span{
-        font-size:13px !important;
-        font-weight:800 !important;
+
+    .pricing-requirement-title span {
+        font-size: 13px !important;
+        font-weight: 800 !important;
     }
-    .pricing-requirement-title small{
-        font-size:10.5px !important;
-        font-weight:600 !important;
+
+    .pricing-requirement-title small {
+        font-size: 10.5px !important;
+        font-weight: 600 !important;
     }
+
     .proforma-items-panel,
     .pricing-summary-card,
     .amount-summary-panel,
-    .advance-payment-panel{
-        border-radius:14px !important;
+    .advance-payment-panel {
+        border-radius: 14px !important;
     }
-    .proforma-items-head{
-        padding:10px 12px !important;
+
+    .proforma-items-head {
+        padding: 10px 12px !important;
     }
-    .proforma-items-head strong{
-        font-size:13px !important;
-        font-weight:800 !important;
+
+    .proforma-items-head strong {
+        font-size: 13px !important;
+        font-weight: 800 !important;
     }
+
     .proforma-items-table th,
-    .proforma-items-table td{
-        padding:7px 9px !important;
-        font-size:10.5px !important;
+    .proforma-items-table td {
+        padding: 7px 9px !important;
+        font-size: 10.5px !important;
     }
-    .charge-input-row{
-        gap:9px !important;
+
+    .charge-input-row {
+        gap: 9px !important;
     }
-    .charge-input-card{
-        padding:10px !important;
-        border-radius:12px !important;
+
+    .charge-input-card {
+        padding: 10px !important;
+        border-radius: 12px !important;
     }
-    .amount-summary-item{
-        padding:9px 10px !important;
-        border-radius:11px !important;
+
+    .amount-summary-item {
+        padding: 9px 10px !important;
+        border-radius: 11px !important;
     }
-    .amount-summary-item small{
-        font-size:9.5px !important;
-        font-weight:700 !important;
+
+    .amount-summary-item small {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
     }
-    .amount-summary-item strong{
-        font-size:14px !important;
-        font-weight:800 !important;
+
+    .amount-summary-item strong {
+        font-size: 14px !important;
+        font-weight: 800 !important;
     }
-    .workflow-step{
-        padding:9px 10px !important;
-        border-radius:11px !important;
+
+    .workflow-step {
+        padding: 9px 10px !important;
+        border-radius: 11px !important;
     }
-    .workflow-step strong{
-        font-size:11.5px !important;
-        font-weight:750 !important;
+
+    .workflow-step strong {
+        font-size: 11.5px !important;
+        font-weight: 750 !important;
     }
-    .workflow-date-field small{
-        font-size:9px !important;
+
+    .workflow-date-field small {
+        font-size: 9px !important;
     }
-    .printing-only-product-field{
-        transition:.15s ease;
+
+    .printing-only-product-field {
+        transition: .15s ease;
     }
-    .printing-only-product-field.printing-disabled{
-        opacity:.58;
+
+    .printing-only-product-field.printing-disabled {
+        opacity: .58;
     }
-    .printing-only-info{
-        display:flex;
-        align-items:flex-start;
-        gap:10px;
-        padding:10px 12px;
-        border:1px solid rgba(14,116,144,.22);
-        border-radius:12px;
-        background:rgba(14,116,144,.06);
-        color:var(--text-main);
+
+    .printing-only-info {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 10px 12px;
+        border: 1px solid rgba(14, 116, 144, .22);
+        border-radius: 12px;
+        background: rgba(14, 116, 144, .06);
+        color: var(--text-main);
     }
-    .printing-only-info svg{
-        width:18px;
-        height:18px;
-        flex:0 0 18px;
-        margin-top:1px;
-        color:#0e7490;
+
+    .printing-only-info svg {
+        width: 18px;
+        height: 18px;
+        flex: 0 0 18px;
+        margin-top: 1px;
+        color: #0e7490;
     }
-    .printing-only-info strong{
-        display:block;
-        font-size:12px;
-        font-weight:800;
-        margin-bottom:2px;
+
+    .printing-only-info strong {
+        display: block;
+        font-size: 12px;
+        font-weight: 800;
+        margin-bottom: 2px;
     }
-    .printing-only-info span{
-        display:block;
-        font-size:10.5px;
-        font-weight:600;
-        color:var(--text-muted);
-        line-height:1.4;
+
+    .printing-only-info span {
+        display: block;
+        font-size: 10.5px;
+        font-weight: 600;
+        color: var(--text-muted);
+        line-height: 1.4;
     }
-    @media(max-width:767.98px){
-        .module-card{padding:13px !important;}
-        .module-page .page-head{padding:13px 14px;}
-        .module-page .page-head h1{font-size:20px;}
+
+    @media(max-width:767.98px) {
+        .module-card {
+            padding: 13px !important;
+        }
+
+        .module-page .page-head {
+            padding: 13px 14px;
+        }
+
+        .module-page .page-head h1 {
+            font-size: 20px;
+        }
     }
 
 
-    .custom-option-input { animation: cpFieldReveal .16s ease; }
+    .custom-option-input {
+        animation: cpFieldReveal .16s ease;
+    }
+
     @keyframes cpFieldReveal {
-        from { opacity:0; transform:translateY(-3px); }
-        to { opacity:1; transform:translateY(0); }
-    }
-    .special-works-box {
-        border:1px solid #f59e0b;
-        border-radius:12px;
-        padding:10px 12px;
-        background:rgba(245,158,11,.07);
-    }
-    .held-drafts-modal {
-        border-radius:18px;
-        overflow:hidden;
-        box-shadow:0 24px 70px rgba(15,23,42,.24);
-    }
-    .held-draft-info {
-        display:flex;
-        align-items:center;
-        border:1px solid var(--border-soft);
-        border-radius:12px;
-        padding:9px 11px;
-        font-size:11px;
-        font-weight:650;
-        color:var(--text-muted);
-        background:color-mix(in srgb,var(--card-bg) 95%,#2563eb 5%);
-    }
-    .held-draft-row {
-        display:grid;
-        grid-template-columns:minmax(0,1fr) auto;
-        gap:12px;
-        align-items:center;
-        border:1px solid var(--border-soft);
-        border-radius:14px;
-        padding:11px 12px;
-        margin-bottom:9px;
-        background:var(--card-bg);
-    }
-    .held-draft-name { font-size:13px; font-weight:800; color:var(--text-main); }
-    .held-draft-meta { margin-top:2px; font-size:10.5px; font-weight:550; color:var(--text-muted); }
-    .held-draft-actions { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
-    .held-empty {
-        border:1px dashed var(--border-soft);
-        border-radius:14px;
-        padding:24px 14px;
-        text-align:center;
-        color:var(--text-muted);
-        font-size:12px;
-        font-weight:650;
-    }
-    @media(max-width:767.98px){
-        .held-draft-row{grid-template-columns:1fr}
-        .held-draft-actions{justify-content:flex-start}
+        from {
+            opacity: 0;
+            transform: translateY(-3px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
     }
 
+    .special-works-box {
+        border: 1px solid #f59e0b;
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: rgba(245, 158, 11, .07);
+    }
+
+    .held-drafts-modal {
+        border-radius: 18px;
+        overflow: hidden;
+        box-shadow: 0 24px 70px rgba(15, 23, 42, .24);
+    }
+
+    .held-draft-info {
+        display: flex;
+        align-items: center;
+        border: 1px solid var(--border-soft);
+        border-radius: 12px;
+        padding: 9px 11px;
+        font-size: 11px;
+        font-weight: 650;
+        color: var(--text-muted);
+        background: color-mix(in srgb, var(--card-bg) 95%, #2563eb 5%);
+    }
+
+    .held-draft-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+        border: 1px solid var(--border-soft);
+        border-radius: 14px;
+        padding: 11px 12px;
+        margin-bottom: 9px;
+        background: var(--card-bg);
+    }
+
+    .held-draft-name {
+        font-size: 13px;
+        font-weight: 800;
+        color: var(--text-main);
+    }
+
+    .held-draft-meta {
+        margin-top: 2px;
+        font-size: 10.5px;
+        font-weight: 550;
+        color: var(--text-muted);
+    }
+
+    .held-draft-actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+
+    .held-empty {
+        border: 1px dashed var(--border-soft);
+        border-radius: 14px;
+        padding: 24px 14px;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 12px;
+        font-weight: 650;
+    }
+
+    @media(max-width:767.98px) {
+        .held-draft-row {
+            grid-template-columns: 1fr
+        }
+
+        .held-draft-actions {
+            justify-content: flex-start
+        }
+    }
     </style>
 </head>
 
@@ -2056,8 +2164,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                 <i data-lucide="archive-restore" class="me-1"></i> Held Drafts
                                 <span class="badge text-bg-primary ms-1" id="heldDraftCount">0</span>
                             </button>
-                            <button type="button" class="btn btn-warning rounded-pill px-3 fw-bold"
-                                id="holdAndNewBtn">
+                            <button type="button" class="btn btn-warning rounded-pill px-3 fw-bold" id="holdAndNewBtn">
                                 <i data-lucide="pause-circle" class="me-1"></i> Hold & New
                             </button>
                             <?php endif; ?>
@@ -2133,9 +2240,11 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                     <?= e($type['function_name']) ?></option><?php endforeach; ?>
                             </select></div>
                         <div class="col-md-4 wedding-field"><label class="form-label fw-bold">Groom Name</label><input
-                                type="text" name="groom_name" id="groom_name" class="form-control" placeholder="Enter groom name"></div>
+                                type="text" name="groom_name" id="groom_name" class="form-control"
+                                placeholder="Enter groom name"></div>
                         <div class="col-md-4 wedding-field"><label class="form-label fw-bold">Bride Name</label><input
-                                type="text" name="bride_name" id="bride_name" class="form-control" placeholder="Enter bride name"></div>
+                                type="text" name="bride_name" id="bride_name" class="form-control"
+                                placeholder="Enter bride name"></div>
                         <div class="col-md-4 event-field"><label class="form-label fw-bold">Function Date</label><input
                                 type="date" name="function_date" id="function_date" class="form-control"></div>
                         <div class="col-md-4 event-field"><label class="form-label fw-bold">Function Time <span
@@ -2251,7 +2360,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                     </div>
 
                                     <div class="col-md-3 custom-only-field">
-                                        <label class="form-label fw-bold">Card Size <span class="text-danger">*</span></label>
+                                        <label class="form-label fw-bold">Card Size <span
+                                                class="text-danger">*</span></label>
                                         <select name="size_text" id="size_text" class="form-select">
                                             <option value="">Select Card Size</option>
                                             <option value="22 x 8.5">22 x 8.5</option>
@@ -2263,12 +2373,15 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                         </select>
                                         <div class="custom-option-input hide-field mt-2" id="customCardSizeWrap">
                                             <input type="text" name="custom_size_text" id="custom_size_text"
-                                                class="form-control" maxlength="100" placeholder="Enter custom card size">
-                                            <small class="text-muted-custom">Required only when Custom is selected.</small>
+                                                class="form-control" maxlength="100"
+                                                placeholder="Enter custom card size">
+                                            <small class="text-muted-custom">Required only when Custom is
+                                                selected.</small>
                                         </div>
                                     </div>
                                     <div class="col-md-3 custom-only-field">
-                                        <label class="form-label fw-bold">GSM / Thickness <span class="text-danger">*</span></label>
+                                        <label class="form-label fw-bold">GSM / Thickness <span
+                                                class="text-danger">*</span></label>
                                         <select name="gsm_thickness" id="gsm_thickness" class="form-select">
                                             <option value="">Select GSM</option>
                                             <option value="80 GSM">80 GSM</option>
@@ -2281,8 +2394,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                         </select>
                                         <div class="custom-option-input hide-field mt-2" id="customGsmWrap">
                                             <input type="text" name="custom_gsm_thickness" id="custom_gsm_thickness"
-                                                class="form-control" maxlength="100" placeholder="Enter custom GSM / thickness">
-                                            <small class="text-muted-custom">Required only when Custom is selected.</small>
+                                                class="form-control" maxlength="100"
+                                                placeholder="Enter custom GSM / thickness">
+                                            <small class="text-muted-custom">Required only when Custom is
+                                                selected.</small>
                                         </div>
                                     </div>
                                     <div
@@ -2321,27 +2436,41 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                         </select>
                                     </div>
 
+                                    <div class="col-md-3 customized-field hide-field">
+                                        <label class="form-label fw-bold">Printing Person <span
+                                                class="text-danger">*</span></label>
+                                        <select id="custom_printing_user_id" class="form-select">
+                                            <option value="">Select Printing Person</option>
+                                        </select>
+                                        <small class="text-muted-custom">Loaded from the Multicolor Offset Printing team
+                                            for this product.</small>
+                                    </div>
+
 
                                     <div class="col-12 customized-field hide-field">
                                         <label class="form-label fw-bold">Product Requirement / Description</label>
-                                        <textarea name="custom_item_description" id="custom_item_description" class="form-control" rows="2"
+                                        <textarea name="custom_item_description" id="custom_item_description"
+                                            class="form-control" rows="2"
                                             placeholder="Enter this product's customized production requirement"></textarea>
                                     </div>
 
                                     <div class="col-md-3 customized-field hide-field">
                                         <label class="form-label fw-bold">Plate / Additional Charge</label>
-                                        <input type="number" step="0.01" min="0" name="custom_item_plate_charge" id="custom_item_plate_charge"
-                                            class="form-control" value="0" placeholder="This product only">
+                                        <input type="number" step="0.01" min="0" name="custom_item_plate_charge"
+                                            id="custom_item_plate_charge" class="form-control" value="0"
+                                            placeholder="This product only">
                                     </div>
                                     <div class="col-md-3 customized-field hide-field">
                                         <label class="form-label fw-bold">Printing Charge</label>
-                                        <input type="number" step="0.01" min="0" name="custom_item_printing_charge" id="custom_item_printing_charge"
-                                            class="form-control" value="0" placeholder="This product only">
+                                        <input type="number" step="0.01" min="0" name="custom_item_printing_charge"
+                                            id="custom_item_printing_charge" class="form-control" value="0"
+                                            placeholder="This product only">
                                     </div>
                                     <div class="col-md-3 customized-field hide-field">
                                         <label class="form-label fw-bold">Package Charge</label>
-                                        <input type="number" step="0.01" min="0" name="custom_item_package_charge" id="custom_item_package_charge"
-                                            class="form-control" value="0" placeholder="This product only">
+                                        <input type="number" step="0.01" min="0" name="custom_item_package_charge"
+                                            id="custom_item_package_charge" class="form-control" value="0"
+                                            placeholder="This product only">
                                     </div>
                                     <div class="col-md-3 customized-field hide-field">
                                         <label class="form-label fw-bold">Customized Line Total</label>
@@ -2373,7 +2502,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                             <i data-lucide="printer"></i>
                                             <div>
                                                 <strong>Printing Only Order</strong>
-                                                <span>Customer supplies the material/design. Product Master, Quantity, Rate and Product Total are not used. Select Printing Type and enter the amount in Printing Charge.</span>
+                                                <span>Customer supplies the material/design. Product Master, Quantity,
+                                                    Rate and Product Total are not used. Select Printing Type and enter
+                                                    the amount in Printing Charge.</span>
                                             </div>
                                         </div>
                                     </div>
@@ -2446,6 +2577,16 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                             </option>
                                             <?php endforeach; ?>
                                         </select>
+                                    </div>
+                                    <div class="col-md-4 readymade-field">
+                                        <label class="form-label fw-bold">Printing Person <span
+                                                class="text-danger">*</span></label>
+                                        <select name="assigned_printing_user_id" id="assigned_printing_user_id"
+                                            class="form-select">
+                                            <option value="">Select Printing Person</option>
+                                        </select>
+                                        <small class="text-muted-custom">Only active users from the selected Printing
+                                            Type team are shown.</small>
                                     </div>
                                     <div class="col-md-4 screen-subtype-field hide-field" id="screenSubTypeWrap">
                                         <label class="form-label fw-bold" id="printingSubTypeLabel">Screen Print
@@ -2752,7 +2893,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                             <div class="modal-body">
                                 <div class="held-draft-info mb-3">
                                     <i data-lucide="info" class="me-2"></i>
-                                    Held drafts are saved in this browser on this computer. They are not submitted to the database.
+                                    Held drafts are saved in this browser on this computer. They are not submitted to
+                                    the database.
                                 </div>
                                 <div id="heldDraftList"></div>
                             </div>
@@ -2930,6 +3072,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     const quotations = <?= $quotationJson ?: '[]' ?>;
     const printingSubTypes = <?= $subTypeJson ?: '[]' ?>;
     const printingTypes = <?= $printingTypeJson ?: '[]' ?>;
+    const printingUsers = <?= $printingUsersJson ?: '[]' ?>;
     const workflowData = <?= $stepsJson ?: '{"readymade":[],"customized":[]}' ?>;
     const plannedStepData = <?= $plannedDatesJson ?: '{}' ?>;
     const editData = <?= $editJson ?: 'null' ?>;
@@ -3033,7 +3176,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         }
 
         ['quotation_id', 'function_type_id', 'proforma_status_id', 'product_id', 'order_type', 'printing_type_id',
-            'printing_sub_type_id', 'lamination_type', 'printing_side', 'screening_type', 'payment_mode'
+            'printing_sub_type_id', 'assigned_printing_user_id', 'custom_printing_user_id', 'lamination_type',
+            'printing_side', 'screening_type', 'payment_mode'
         ].forEach(refreshSelect);
 
         toggleFunctionFields();
@@ -3057,7 +3201,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
 
     function setHeldDrafts(rows) {
         try {
-            localStorage.setItem(heldDraftsKey, JSON.stringify(Array.isArray(rows) ? rows.slice(0, maxHeldDrafts) : []));
+            localStorage.setItem(heldDraftsKey, JSON.stringify(Array.isArray(rows) ? rows.slice(0, maxHeldDrafts) :
+        []));
         } catch (e) {}
         updateHeldDraftCount();
     }
@@ -3068,7 +3213,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     }
 
     function heldDraftFunctionName() {
-        return String(document.getElementById('function_type_id')?.selectedOptions?.[0]?.textContent || '').trim();
+        return String(document.getElementById('function_type_id')?.selectedOptions?. [0]?.textContent || '').trim();
     }
 
     function holdCurrentProformaAndStartNew() {
@@ -3335,7 +3480,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             proformaItems.reduce((sum, item) => sum + (parseFloat(item.amount || 0) || 0), 0) :
             0;
 
-        const sub = orderType === 'printing_only' ? 0 : Math.max(0, hasAddedProducts ? addedProductsAmount : currentProductAmount);
+        const sub = orderType === 'printing_only' ? 0 : Math.max(0, hasAddedProducts ? addedProductsAmount :
+            currentProductAmount);
 
         let chargeTotal = 0;
 
@@ -3647,6 +3793,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             refreshSelect('printing_type_id');
             updateSubTypes();
         }
+        updateCustomizedPrintingPersons();
     }
 
     function toggleOrderType(forceDefaults = false) {
@@ -3655,12 +3802,15 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         const isPrintingOnly = type === 'printing_only';
         const usesCommonPrinting = type === 'readymade' || isPrintingOnly;
 
-        document.querySelectorAll('.readymade-field').forEach(el => el.classList.toggle('hide-field', !usesCommonPrinting));
+        document.querySelectorAll('.readymade-field').forEach(el => el.classList.toggle('hide-field', !
+            usesCommonPrinting));
         document.querySelectorAll('.customized-field').forEach(el => el.classList.toggle('hide-field', !isCustomized));
         document.querySelectorAll('.custom-only-field').forEach(el => el.classList.toggle('hide-field', !isCustomized));
         document.querySelectorAll('.customized-column').forEach(el => el.classList.toggle('hide-field', !isCustomized));
-        document.querySelectorAll('.printing-only-hide').forEach(el => el.classList.toggle('hide-field', isPrintingOnly));
-        document.querySelectorAll('.printing-only-hide-pricing').forEach(el => el.classList.toggle('hide-field', isPrintingOnly));
+        document.querySelectorAll('.printing-only-hide').forEach(el => el.classList.toggle('hide-field',
+            isPrintingOnly));
+        document.querySelectorAll('.printing-only-hide-pricing').forEach(el => el.classList.toggle('hide-field',
+            isPrintingOnly));
         document.getElementById('printingOnlyNote')?.classList.toggle('hide-field', !isPrintingOnly);
 
         const product = document.getElementById('product_id');
@@ -3748,11 +3898,12 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     function updatePrintingTypeOptions() {
         const type = getValue('order_type') || 'readymade';
         const select = document.getElementById('printing_type_id');
+        const currentPrintingUserId = getValue('assigned_printing_user_id');
         Array.from(select.options).forEach(opt => {
             if (!opt.value) return;
-            const ok = type === 'printing_only'
-                ? true
-                : (type === 'readymade' ? opt.dataset.readymade === '1' : opt.dataset.customized === '1');
+            const ok = type === 'printing_only' ?
+                true :
+                (type === 'readymade' ? opt.dataset.readymade === '1' : opt.dataset.customized === '1');
             opt.hidden = !ok;
             opt.disabled = !ok;
         });
@@ -3760,6 +3911,65 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             select.value = '';
         }
         updateSubTypes();
+        updateCommonPrintingPersons(currentPrintingUserId);
+    }
+
+    function printingRoleKeyForType(printingTypeId) {
+        const id = String(printingTypeId || '');
+        const row = printingTypes.find(pt => String(pt.id || '') === id);
+        return String(row?.role_key || '').toLowerCase();
+    }
+
+    function printingUserDisplayName(user) {
+        const name = String(user?.name || '').trim();
+        const username = String(user?.username || '').trim();
+        return name && username && name.toLowerCase() !== username.toLowerCase() ?
+            name + ' (' + username + ')' : (name || username || ('User #' + String(user?.id || '')));
+    }
+
+    function populatePrintingPersonSelect(selectId, printingTypeId, selectedUserId = '') {
+        const select = document.getElementById(selectId);
+        if (!select) return;
+
+        const wanted = String(selectedUserId || '');
+        const roleKey = printingRoleKeyForType(printingTypeId);
+        const users = Array.isArray(printingUsers) ? printingUsers.filter(user =>
+            roleKey !== '' && String(user.role_key || '').toLowerCase() === roleKey
+        ) : [];
+
+        select.innerHTML = '<option value="">Select Printing Person</option>';
+        users.forEach(user => {
+            const opt = document.createElement('option');
+            opt.value = String(user.id || '');
+            opt.textContent = printingUserDisplayName(user);
+            opt.dataset.roleKey = String(user.role_key || '');
+            select.appendChild(opt);
+        });
+
+        if (!users.length && roleKey) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.disabled = true;
+            opt.textContent = 'No active users in this printing team';
+            select.appendChild(opt);
+        }
+
+        if (wanted && users.some(user => String(user.id || '') === wanted)) {
+            select.value = wanted;
+        } else {
+            select.value = '';
+        }
+
+        refreshSelect(selectId);
+    }
+
+    function updateCommonPrintingPersons(selectedUserId = '') {
+        populatePrintingPersonSelect('assigned_printing_user_id', getValue('printing_type_id'), selectedUserId);
+    }
+
+    function updateCustomizedPrintingPersons(selectedUserId = '') {
+        const typeId = findMulticolorOffsetPrintingTypeId() || getValue('printing_type_id');
+        populatePrintingPersonSelect('custom_printing_user_id', typeId, selectedUserId);
     }
 
     function isScreenPrintingSelected() {
@@ -4112,6 +4322,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         setValue('remarks', editData.remarks || '');
         setValue('printing_type_id', editData.item_printing_type_id || '');
         updatePrintingTypeOptions();
+        const editCommonPrintingUserId = Array.isArray(editItems) && editItems.length ?
+            String(editItems[0].assigned_printing_user_id || '') : '';
+        updateCommonPrintingPersons(editCommonPrintingUserId);
         setValue('printing_sub_type_id', editData.item_printing_sub_type_id || '');
         setResolvedCardSize(editData.item_size_text || '');
         setResolvedGsm(editData.item_gsm_thickness || '');
@@ -4123,7 +4336,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         const lamination = document.getElementById('lamination_required');
         if (lamination) lamination.checked = parseInt(editData.item_lamination_required || 0, 10) === 1;
         ['quotation_id', 'function_type_id', 'proforma_status_id', 'product_id', 'order_type', 'printing_type_id',
-            'printing_sub_type_id', 'lamination_type', 'printing_side', 'screening_type', 'payment_mode'
+            'printing_sub_type_id', 'assigned_printing_user_id', 'custom_printing_user_id', 'lamination_type',
+            'printing_side', 'screening_type', 'payment_mode'
         ].forEach(refreshSelect);
     }
 
@@ -4553,6 +4767,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             amount: parseFloat(item.amount || 0) || 0,
             printing_type_id: String(item.printing_type_id || ''),
             printing_sub_type_id: String(item.printing_sub_type_id || ''),
+            assigned_printing_user_id: String(item.assigned_printing_user_id || ''),
             finishing_required: parseInt(item.finishing_required || 0, 10) || 0,
             size_text: String(item.size_text || ''),
             gsm_thickness: String(item.gsm_thickness || ''),
@@ -4596,7 +4811,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
          * Printing Side / Scoring Type after a valid product is already in
          * "Added Products".
          */
-        const currentLineRequired = !isPrintingOnly && (!hasSavedItems || hasCurrentProduct || editingProductIndex >= 0);
+        const currentLineRequired = !isPrintingOnly && (!hasSavedItems || hasCurrentProduct || editingProductIndex >=
+            0);
 
         const product = document.getElementById('product_id');
         const qty = document.getElementById('qty');
@@ -4683,6 +4899,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             item.description = String(getValue('custom_item_description') || '').trim();
             item.printing_type_id = String(multiId || getValue('printing_type_id') || '');
             item.printing_sub_type_id = '';
+            item.assigned_printing_user_id = String(getValue('custom_printing_user_id') || '');
             item.finishing_required = 0;
             item.size_text = String(getResolvedCardSize() || '').trim();
             item.gsm_thickness = String(getResolvedGsm() || '').trim();
@@ -4721,6 +4938,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         if ((getValue('order_type') || 'readymade') === 'customized') {
             if (!item.printing_type_id) {
                 return 'Multicolour Offset Print is missing in Printing Type master.';
+            }
+            if (!item.assigned_printing_user_id) {
+                return 'Please select Printing Person for this Customized product.';
             }
             if (!item.size_text) {
                 return 'Please enter Card Size for this Customized product.';
@@ -4764,6 +4984,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             setValue('custom_item_plate_charge', '0');
             setValue('custom_item_printing_charge', '0');
             setValue('custom_item_package_charge', '0');
+            setValue('custom_printing_user_id', '');
 
             setValue('printing_price_master_id', '');
             setValue('price_slab_text_input', '');
@@ -4773,6 +4994,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             setValue('pricing_additional_charge', '0');
 
             applyCustomizedDefaults(false);
+            updateCustomizedPrintingPersons();
             toggleLamination();
             renderCustomizedProductWorkflow({}, false);
         }
@@ -4832,7 +5054,11 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                 (parseFloat(item.item_additional_charge || 0) || 0) :
                 0;
             const lineTotal = (parseFloat(item.amount || 0) || 0) + itemCharges;
+            const assignedPrinter = customized ? printingUsers.find(user => String(user.id || '') === String(
+                item.assigned_printing_user_id || '')) : null;
             const productionDetails = customized ? [
+                    item.assigned_printing_user_id ? 'Printer: ' + printingUserDisplayName(assignedPrinter) :
+                    'Printer: Unassigned',
                     item.size_text ? 'Size: ' + item.size_text : '',
                     item.gsm_thickness ? 'GSM: ' + item.gsm_thickness : '',
                     item.printing_side ? (item.printing_side === 'double' ? 'Double Side' : 'Single Side') : '',
@@ -4969,6 +5195,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             setValue('custom_item_plate_charge', item.plate_charge || 0);
             setValue('custom_item_printing_charge', item.item_printing_charge || 0);
             setValue('custom_item_package_charge', item.item_package_charge || 0);
+            updateCustomizedPrintingPersons(item.assigned_printing_user_id || '');
             setValue('printing_price_master_id', item.printing_price_master_id || '');
             setValue('price_slab_text_input', item.price_slab_text || '');
 
@@ -5044,7 +5271,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         'custom_item_package_charge'
     ].forEach(id => document.getElementById(id)?.addEventListener(
         'input', calculate));
-    ['qty', 'custom_size_text', 'custom_gsm_thickness'].forEach(id => document.getElementById(id)?.addEventListener('input',
+    ['qty', 'custom_size_text', 'custom_gsm_thickness'].forEach(id => document.getElementById(id)?.addEventListener(
+        'input',
         schedulePriceLookup));
 
     ['size_text', 'gsm_thickness'].forEach(id => document.getElementById(id)?.addEventListener('change', () => {
@@ -5077,6 +5305,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     });
     document.getElementById('printing_type_id')?.addEventListener('change', () => {
         updateSubTypes();
+        updateCommonPrintingPersons();
+        updateCustomizedPrintingPersons();
+        toggleSpecialWorksDescription();
         schedulePriceLookup();
     });
     document.getElementById('delivery_date')?.addEventListener('change', () => syncFinalTrackingDate(true));
@@ -5476,9 +5707,28 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                 return;
             }
 
-            if (getValue('gsm_thickness') === 'custom' && !String(getValue('custom_gsm_thickness') || '').trim()) {
+            if (getValue('gsm_thickness') === 'custom' && !String(getValue('custom_gsm_thickness') || '')
+                .trim()) {
                 showActionToast('Please enter the Custom GSM / Thickness.', 'danger', 'GSM / Thickness');
                 document.getElementById('custom_gsm_thickness')?.focus();
+                return;
+            }
+        }
+
+        if (submitOrderType === 'customized') {
+            const unassignedCustomized = proformaItems.findIndex(item => !String(item
+                .assigned_printing_user_id || '').trim());
+            if (unassignedCustomized >= 0) {
+                showActionToast(
+                    'Please assign a Printing Person for Customized product #' + (unassignedCustomized +
+                        1) + '.',
+                    'danger',
+                    'Printing Person'
+                );
+                document.getElementById('proformaItemsTableWrap')?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center'
+                });
                 return;
             }
         }
@@ -5520,6 +5770,21 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                 return;
             }
 
+            if (!String(getValue('assigned_printing_user_id') || '').trim()) {
+                showActionToast(
+                    'Please select the Printing Person from the selected Printing Type team.',
+                    'danger',
+                    'Printing Person'
+                );
+                const target = document.getElementById('assigned_printing_user_id');
+                target?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center'
+                });
+                setTimeout(() => target?.focus(), 250);
+                return;
+            }
+
             if (isScreenPrintingSelected() && !String(getValue('printing_sub_type_id') || '').trim()) {
                 showActionToast(
                     'Please select Screen Print Sub-Type. It applies to all added products.',
@@ -5537,9 +5802,13 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         }
 
         if (isPrintingOnlySubmit && (parseFloat(getValue('printing_charge')) || 0) <= 0) {
-            showActionToast('Please enter the Printing Charge for this Printing Only order.', 'danger', 'Printing Charge');
+            showActionToast('Please enter the Printing Charge for this Printing Only order.', 'danger',
+                'Printing Charge');
             const target = document.getElementById('printing_charge');
-            target?.scrollIntoView({behavior:'smooth', block:'center'});
+            target?.scrollIntoView({
+                behavior: 'smooth',
+                block: 'center'
+            });
             setTimeout(() => target?.focus(), 250);
             return;
         }
@@ -5680,7 +5949,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                     if (!isEditSubmit) {
                         if (data.proforma_whatsapp_sent === true || data.whatsapp_sent === true) {
                             toastMessage += '<br>Proforma WhatsApp: Sent.';
-                        } else if (data.proforma_whatsapp_sent === false || data.whatsapp_sent === false) {
+                        } else if (data.proforma_whatsapp_sent === false || data.whatsapp_sent ===
+                            false) {
                             toastMessage += '<br>Proforma WhatsApp failed: ' +
                                 (data.proforma_whatsapp?.message ||
                                     data.whatsapp_error ||
@@ -5709,9 +5979,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                         data.advance_payment_whatsapp_attempted === true &&
                         data.advance_payment_whatsapp_sent === false;
                     const toastType = (proformaWaFailed || advanceWaFailed) ? 'warning' : 'success';
-                    const toastTitle = toastType === 'warning'
-                        ? 'Proforma Saved — WhatsApp Attention'
-                        : 'Success';
+                    const toastTitle = toastType === 'warning' ?
+                        'Proforma Saved — WhatsApp Attention' :
+                        'Success';
 
                     showActionToast(toastMessage, toastType, toastTitle);
 
