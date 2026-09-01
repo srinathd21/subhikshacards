@@ -56,13 +56,6 @@ function pb_table_exists(mysqli $conn, string $table): bool
 }
 
 
-/**
- * Sync stock reservations for a Proforma.
- *
- * Available Stock = On Hand - Reserved.
- * No availability check is used here. Reserved may exceed On Hand,
- * therefore Available is intentionally allowed to become negative.
- */
 function pb_sync_proforma_stock(mysqli $conn, int $proformaId, int $userId = 0): void
 {
     if ($proformaId <= 0) {
@@ -534,6 +527,20 @@ function pb_ensure_optional_create_proforma_columns(mysqli $conn): void
         }
 
         /*
+         * Printing person assignment is stored per Proforma item.
+         * Readymade / Printing Only use the same person for all rows; Customized
+         * can keep a separate person per product because each product gets its
+         * own Job Card.
+         */
+        if (!apiColumnExists($conn, 'proforma_bill_items', 'assigned_printing_user_id')) {
+            try {
+                $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN assigned_printing_user_id BIGINT(20) UNSIGNED DEFAULT NULL AFTER printing_sub_type_id");
+            } catch (Throwable $e) {
+                // Save validation below will report a clear migration error.
+            }
+        }
+
+        /*
          * Customized product-wise tracking dates.
          * Older DB dumps do not contain this column, so add it automatically.
          */
@@ -592,6 +599,153 @@ function pb_ensure_optional_create_proforma_columns(mysqli $conn): void
             /* Foreign key may already exist or the live table may not allow it; inserts still work. */
         }
     }
+}
+
+/**
+ * Resolve and validate a printing-person assignment.
+ * The selected employee must be active and belong to the exact role mapped by
+ * printing_types.role_key. This server-side check prevents a manipulated form
+ * from assigning an Offset job to a Digital/Screen user (or vice versa).
+ */
+function pb_validate_printing_assignment(mysqli $conn, ?int $printingTypeId, ?int $printingUserId): array
+{
+    if (!$printingTypeId) {
+        throw new RuntimeException('Please select Printing Type before selecting Printing Person.');
+    }
+
+    if (!$printingUserId) {
+        throw new RuntimeException('Please select Printing Person for the selected Printing Type.');
+    }
+
+    $stmt = $conn->prepare("
+        SELECT
+            pt.id AS printing_type_id,
+            pt.printing_name,
+            pt.role_key,
+            r.id AS role_id,
+            r.role_name
+        FROM printing_types pt
+        LEFT JOIN roles r
+            ON r.role_key = pt.role_key
+           AND r.is_active = 1
+        WHERE pt.id = ?
+          AND pt.is_active = 1
+        LIMIT 1
+    ");
+    $stmt->bind_param('i', $printingTypeId);
+    $stmt->execute();
+    $printing = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$printing || empty($printing['role_id']) || trim((string)($printing['role_key'] ?? '')) === '') {
+        throw new RuntimeException('Selected Printing Type is not mapped to an active printing role.');
+    }
+
+    $stmt = $conn->prepare("
+        SELECT
+            u.id,
+            u.name,
+            u.username,
+            u.role_id,
+            r.role_key,
+            r.role_name
+        FROM users u
+        INNER JOIN roles r ON r.id = u.role_id
+        WHERE u.id = ?
+          AND u.is_active = 1
+          AND r.is_active = 1
+        LIMIT 1
+    ");
+    $stmt->bind_param('i', $printingUserId);
+    $stmt->execute();
+    $user = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$user) {
+        throw new RuntimeException('Selected Printing Person is not an active ERP user.');
+    }
+
+    if ((int)$user['role_id'] !== (int)$printing['role_id'] || strtolower((string)$user['role_key']) !== strtolower((string)$printing['role_key'])) {
+        throw new RuntimeException('Selected Printing Person does not belong to the selected Printing Type team.');
+    }
+
+    return [
+        'printing_type_id' => (int)$printing['printing_type_id'],
+        'printing_name' => (string)$printing['printing_name'],
+        'role_id' => (int)$printing['role_id'],
+        'role_key' => (string)$printing['role_key'],
+        'role_name' => (string)($printing['role_name'] ?? ''),
+        'user_id' => (int)$user['id'],
+        'user_name' => trim((string)($user['name'] ?? '')) ?: (string)($user['username'] ?? ''),
+        'username' => (string)($user['username'] ?? ''),
+    ];
+}
+
+/** Create an internal ERP notification only. Customer WhatsApp logic is untouched. */
+function pb_notify_printing_assignment(
+    mysqli $conn,
+    int $printingUserId,
+    int $jobCardId,
+    string $jobCardNo,
+    string $printingName,
+    string $customerName = '',
+    bool $isReassignment = false
+): void {
+    if ($printingUserId <= 0 || $jobCardId <= 0 || !pb_table_exists($conn, 'notifications')) {
+        return;
+    }
+
+    try {
+        $title = $isReassignment ? 'Printing Job Reassigned' : 'New Printing Job Assigned';
+        $parts = [];
+        if ($jobCardNo !== '') $parts[] = $jobCardNo;
+        if ($customerName !== '') $parts[] = 'Customer: ' . $customerName;
+        if ($printingName !== '') $parts[] = 'Printing: ' . $printingName;
+        $message = implode(' | ', $parts);
+
+        $stmt = $conn->prepare("
+            INSERT INTO notifications
+                (user_id, title, message, related_module, related_id, is_read, created_at)
+            VALUES
+                (?, ?, ?, 'job_cards', ?, 0, NOW())
+        ");
+        $stmt->bind_param('issi', $printingUserId, $title, $message, $jobCardId);
+        $stmt->execute();
+        $stmt->close();
+    } catch (Throwable $e) {
+        // Internal notification failure must never block Proforma/Job Card creation.
+        error_log('Printing assignment notification failed: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Assign the selected employee only to open printing-owned tracking rows.
+ * Status/order/current-step logic is intentionally not changed.
+ */
+function pb_assign_open_printing_tracking_rows(
+    mysqli $conn,
+    int $jobCardId,
+    ?int $printingRoleId,
+    ?int $printingUserId
+): void {
+    if (
+        $jobCardId <= 0 || !$printingRoleId || !$printingUserId ||
+        !pb_table_exists($conn, 'job_tracking') ||
+        !apiColumnExists($conn, 'job_tracking', 'responsible_user_id')
+    ) {
+        return;
+    }
+
+    $stmt = $conn->prepare("
+        UPDATE job_tracking
+        SET responsible_user_id = ?, updated_at = NOW()
+        WHERE job_card_id = ?
+          AND responsible_role_id = ?
+          AND status NOT IN ('completed','skipped','cancelled')
+    ");
+    $stmt->bind_param('iii', $printingUserId, $jobCardId, $printingRoleId);
+    $stmt->execute();
+    $stmt->close();
 }
 
 function pb_cash_denomination_payload(): array
@@ -1613,6 +1767,8 @@ function pb_create_customized_job_card_for_item(
     $productId = !empty($item['product_id']) ? (int)$item['product_id'] : null;
     $printingTypeId = !empty($item['printing_type_id']) ? (int)$item['printing_type_id'] : null;
     $printingSubTypeId = !empty($item['printing_sub_type_id']) ? (int)$item['printing_sub_type_id'] : null;
+    $assignedPrintingUserId = !empty($item['assigned_printing_user_id']) ? (int)$item['assigned_printing_user_id'] : null;
+    $printingAssignment = pb_validate_printing_assignment($conn, $printingTypeId, $assignedPrintingUserId);
 
     $enquiryId = !empty($bill['enquiry_id']) ? (int)$bill['enquiry_id'] : null;
     $quotationId = !empty($bill['quotation_id']) ? (int)$bill['quotation_id'] : null;
@@ -1695,6 +1851,14 @@ function pb_create_customized_job_card_for_item(
     $stmt->execute();
     $jobCardId = (int)$stmt->insert_id;
     $stmt->close();
+
+    // Person assignment is additional metadata; Customized role/workflow timing is unchanged.
+    if (apiColumnExists($conn, 'job_cards', 'assigned_printing_user_id')) {
+        $stmt = $conn->prepare("UPDATE job_cards SET assigned_printing_user_id = ? WHERE id = ?");
+        $stmt->bind_param('ii', $assignedPrintingUserId, $jobCardId);
+        $stmt->execute();
+        $stmt->close();
+    }
 
     pb_insert_job_card_item_compatible($conn, $jobCardId, $item);
 
@@ -1783,6 +1947,22 @@ function pb_create_customized_job_card_for_item(
         $stmt->execute();
         $stmt->close();
     }
+
+    pb_assign_open_printing_tracking_rows(
+        $conn,
+        $jobCardId,
+        (int)($printingAssignment['role_id'] ?? $multicolorRoleId ?? 0),
+        $assignedPrintingUserId
+    );
+
+    pb_notify_printing_assignment(
+        $conn,
+        $assignedPrintingUserId,
+        $jobCardId,
+        $jobNo,
+        (string)($printingAssignment['printing_name'] ?? ''),
+        (string)($bill['customer_name'] ?? '')
+    );
 
     pb_log(
         $conn,
@@ -2008,6 +2188,8 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
     $productId = !empty($firstItem['product_id']) ? (int)$firstItem['product_id'] : null;
     $printingTypeId = !empty($firstItem['printing_type_id']) ? (int)$firstItem['printing_type_id'] : null;
     $printingSubTypeId = !empty($firstItem['printing_sub_type_id']) ? (int)$firstItem['printing_sub_type_id'] : null;
+    $assignedPrintingUserId = !empty($firstItem['assigned_printing_user_id']) ? (int)$firstItem['assigned_printing_user_id'] : null;
+    $printingAssignment = pb_validate_printing_assignment($conn, $printingTypeId, $assignedPrintingUserId);
 
     $stmt = $conn->prepare("
         INSERT INTO job_cards
@@ -2083,6 +2265,13 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
     $stmt->execute();
     $jobCardId = (int)$stmt->insert_id;
     $stmt->close();
+
+    if (apiColumnExists($conn, 'job_cards', 'assigned_printing_user_id')) {
+        $stmt = $conn->prepare("UPDATE job_cards SET assigned_printing_user_id = ? WHERE id = ?");
+        $stmt->bind_param('ii', $assignedPrintingUserId, $jobCardId);
+        $stmt->execute();
+        $stmt->close();
+    }
 
     foreach ($items as $item) {
         pb_insert_job_card_item_compatible($conn, $jobCardId, $item);
@@ -2185,6 +2374,22 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
         $stmt->execute();
         $stmt->close();
     }
+
+    pb_assign_open_printing_tracking_rows(
+        $conn,
+        $jobCardId,
+        (int)($printingAssignment['role_id'] ?? $assignedPrintingRoleId ?? 0),
+        $assignedPrintingUserId
+    );
+
+    pb_notify_printing_assignment(
+        $conn,
+        $assignedPrintingUserId,
+        $jobCardId,
+        $jobNo,
+        (string)($printingAssignment['printing_name'] ?? ''),
+        (string)($bill['customer_name'] ?? '')
+    );
 
     $jobCardStatusPb = pb_status_id($conn, 'proforma_statuses', 'status_key', 'job_card_created');
 
@@ -2352,7 +2557,7 @@ function pb_sync_existing_job_card_from_proforma(
             }
 
             $stmt = $conn->prepare("
-                SELECT id
+                SELECT id, assigned_printing_user_id
                 FROM job_cards
                 WHERE proforma_bill_id = ?
                   AND proforma_bill_item_id = ?
@@ -2377,6 +2582,9 @@ function pb_sync_existing_job_card_from_proforma(
             $productName = (string)($item['item_name'] ?? 'Invitation Cards');
             $printingTypeId = !empty($item['printing_type_id']) ? (int)$item['printing_type_id'] : null;
             $printingSubTypeId = !empty($item['printing_sub_type_id']) ? (int)$item['printing_sub_type_id'] : null;
+            $assignedPrintingUserId = !empty($item['assigned_printing_user_id']) ? (int)$item['assigned_printing_user_id'] : null;
+            $printingAssignment = pb_validate_printing_assignment($conn, $printingTypeId, $assignedPrintingUserId);
+            $oldAssignedPrintingUserId = !empty($jobRow['assigned_printing_user_id']) ? (int)$jobRow['assigned_printing_user_id'] : 0;
             $updatedBy = $userId > 0 ? $userId : null;
 
             $customerName = (string)($bill['customer_name'] ?? '');
@@ -2425,6 +2633,35 @@ function pb_sync_existing_job_card_from_proforma(
             );
             $stmt->execute();
             $stmt->close();
+
+            if (apiColumnExists($conn, 'job_cards', 'assigned_printing_user_id')) {
+                $stmt = $conn->prepare("UPDATE job_cards SET assigned_printing_user_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?");
+                $stmt->bind_param('iii', $assignedPrintingUserId, $updatedBy, $jobCardId);
+                $stmt->execute();
+                $stmt->close();
+            }
+
+            pb_assign_open_printing_tracking_rows(
+                $conn,
+                $jobCardId,
+                (int)($printingAssignment['role_id'] ?? 0),
+                $assignedPrintingUserId
+            );
+
+            if ($assignedPrintingUserId > 0 && $assignedPrintingUserId !== $oldAssignedPrintingUserId) {
+                $jobNoRow = $conn->query("SELECT job_card_no FROM job_cards WHERE id = " . (int)$jobCardId . " LIMIT 1");
+                $jobNoData = $jobNoRow ? $jobNoRow->fetch_assoc() : null;
+                if ($jobNoRow) $jobNoRow->free();
+                pb_notify_printing_assignment(
+                    $conn,
+                    $assignedPrintingUserId,
+                    $jobCardId,
+                    (string)($jobNoData['job_card_no'] ?? ''),
+                    (string)($printingAssignment['printing_name'] ?? ''),
+                    $customerName,
+                    $oldAssignedPrintingUserId > 0
+                );
+            }
 
             /*
              * Customized Job Card contains only its own product.
@@ -2482,7 +2719,7 @@ function pb_sync_existing_job_card_from_proforma(
      * Readymade edit: existing one-Job-Card behavior.
      */
     $stmt = $conn->prepare("
-        SELECT id
+        SELECT id, assigned_printing_user_id
         FROM job_cards
         WHERE proforma_bill_id = ?
         ORDER BY id DESC
@@ -2506,6 +2743,9 @@ function pb_sync_existing_job_card_from_proforma(
     $productName = (string)($firstItem['item_name'] ?? 'Invitation Cards');
     $printingTypeId = !empty($firstItem['printing_type_id']) ? (int)$firstItem['printing_type_id'] : null;
     $printingSubTypeId = !empty($firstItem['printing_sub_type_id']) ? (int)$firstItem['printing_sub_type_id'] : null;
+    $assignedPrintingUserId = !empty($firstItem['assigned_printing_user_id']) ? (int)$firstItem['assigned_printing_user_id'] : null;
+    $printingAssignment = pb_validate_printing_assignment($conn, $printingTypeId, $assignedPrintingUserId);
+    $oldAssignedPrintingUserId = !empty($jobRow['assigned_printing_user_id']) ? (int)$jobRow['assigned_printing_user_id'] : 0;
 
     $customerName = (string)($bill['customer_name'] ?? '');
     $mobile = (string)($bill['mobile'] ?? '');
@@ -2555,6 +2795,35 @@ function pb_sync_existing_job_card_from_proforma(
     );
     $stmt->execute();
     $stmt->close();
+
+    if (apiColumnExists($conn, 'job_cards', 'assigned_printing_user_id')) {
+        $stmt = $conn->prepare("UPDATE job_cards SET assigned_printing_user_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?");
+        $stmt->bind_param('iii', $assignedPrintingUserId, $updatedBy, $jobCardId);
+        $stmt->execute();
+        $stmt->close();
+    }
+
+    pb_assign_open_printing_tracking_rows(
+        $conn,
+        $jobCardId,
+        (int)($printingAssignment['role_id'] ?? 0),
+        $assignedPrintingUserId
+    );
+
+    if ($assignedPrintingUserId > 0 && $assignedPrintingUserId !== $oldAssignedPrintingUserId) {
+        $jobNoRow = $conn->query("SELECT job_card_no FROM job_cards WHERE id = " . (int)$jobCardId . " LIMIT 1");
+        $jobNoData = $jobNoRow ? $jobNoRow->fetch_assoc() : null;
+        if ($jobNoRow) $jobNoRow->free();
+        pb_notify_printing_assignment(
+            $conn,
+            $assignedPrintingUserId,
+            $jobCardId,
+            (string)($jobNoData['job_card_no'] ?? ''),
+            (string)($printingAssignment['printing_name'] ?? ''),
+            $customerName,
+            $oldAssignedPrintingUserId > 0
+        );
+    }
 
     $stmt = $conn->prepare("DELETE FROM job_card_items WHERE job_card_id = ?");
     $stmt->bind_param('i', $jobCardId);
@@ -3553,6 +3822,7 @@ try {
              */
             $globalPrintingTypeId = pb_int($_POST['printing_type_id'] ?? 0) ?: null;
             $globalPrintingSubTypeId = pb_int($_POST['printing_sub_type_id'] ?? 0) ?: null;
+            $globalPrintingUserId = pb_int($_POST['assigned_printing_user_id'] ?? 0) ?: null;
             $globalFinishingRequired = pb_int($_POST['finishing_required'] ?? 0) === 1 ? 1 : 0;
             $globalPrintingPriceMasterId = pb_int($_POST['printing_price_master_id'] ?? 0) ?: null;
             $globalPriceSlabText = pb_post('price_slab_text');
@@ -3739,6 +4009,9 @@ try {
                 if (pb_is_screen_printing_type($conn, $globalPrintingTypeId) && !$globalPrintingSubTypeId) {
                     throw new RuntimeException('Please select Screen Print sub-type.');
                 }
+
+                // Every selected Printing Type must have a person from that exact team.
+                pb_validate_printing_assignment($conn, $globalPrintingTypeId, $globalPrintingUserId);
             }
 
             $userId = (int)($_SESSION['user_id'] ?? 0);
@@ -3784,6 +4057,7 @@ try {
                     $description = $globalDescription;
                     $printingTypeId = $globalPrintingTypeId;
                     $printingSubTypeId = $globalPrintingSubTypeId;
+                    $assignedPrintingUserId = $globalPrintingUserId;
                     $finishingRequired = $globalFinishingRequired;
 
                     $sizeText = '';
@@ -3812,6 +4086,7 @@ try {
                     $description = trim((string)($rawItem['description'] ?? $globalDescription));
                     $printingTypeId = pb_int($rawItem['printing_type_id'] ?? $globalPrintingTypeId) ?: null;
                     $printingSubTypeId = pb_int($rawItem['printing_sub_type_id'] ?? $globalPrintingSubTypeId) ?: null;
+                    $assignedPrintingUserId = pb_int($rawItem['assigned_printing_user_id'] ?? 0) ?: null;
                     $finishingRequired = pb_int($rawItem['finishing_required'] ?? 0) === 1 ? 1 : 0;
                     $sizeText = trim((string)($rawItem['size_text'] ?? ''));
                     $gsmThickness = trim((string)($rawItem['gsm_thickness'] ?? ''));
@@ -3849,6 +4124,10 @@ try {
                     $finishingRequired = 0;
                 }
 
+                // Validate every item against printing_types -> roles -> users.
+                $assignment = pb_validate_printing_assignment($conn, $printingTypeId, $assignedPrintingUserId);
+                $assignedPrintingUserId = (int)$assignment['user_id'];
+
                 if ($orderType === 'printing_only') {
                     $productId = null;
                     $productName = 'Customer Printing Work';
@@ -3883,6 +4162,7 @@ try {
                     'amount' => $amount,
                     'printing_type_id' => $printingTypeId,
                     'printing_sub_type_id' => $printingSubTypeId,
+                    'assigned_printing_user_id' => $assignedPrintingUserId,
                     'finishing_required' => $finishingRequired,
                     'size_text' => $sizeText,
                     'gsm_thickness' => $gsmThickness,
@@ -4324,6 +4604,14 @@ try {
                     );
                     $stmt->execute();
                     $proformaItemId = (int)$stmt->insert_id;
+                    $stmt->close();
+                }
+
+                if (apiColumnExists($conn, 'proforma_bill_items', 'assigned_printing_user_id')) {
+                    $assignedPrintingUserId = !empty($item['assigned_printing_user_id']) ? (int)$item['assigned_printing_user_id'] : null;
+                    $stmt = $conn->prepare("UPDATE proforma_bill_items SET assigned_printing_user_id = ? WHERE id = ? AND proforma_bill_id = ?");
+                    $stmt->bind_param('iii', $assignedPrintingUserId, $proformaItemId, $proformaId);
+                    $stmt->execute();
                     $stmt->close();
                 }
 
