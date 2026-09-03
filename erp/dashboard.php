@@ -980,8 +980,9 @@ if ($roleGroup === 'sales' || $roleGroup === 'admin') {
         FROM job_cards jc
         " . dash_join_status_filter() . "
         WHERE " . dash_active_job_where() . "
+          AND jc.assigned_design_user_id = " . (int)$currentUserId . "
           AND (
-                LOWER(COALESCE(cws.default_owner_role_key, '')) = 'designing_proofing'
+                LOWER(COALESCE(cws.default_owner_role_key, '')) IN ('designing_proofing','design_proofing','designing','proofing','designer','designing_team')
              OR LOWER(COALESCE(cws.step_key, '')) IN ('proofing','proofing_approval','designing','design_approval','master_copy')
           )
         ORDER BY COALESCE(jc.delivery_date, DATE(jc.created_at)) ASC, jc.id DESC
@@ -1035,18 +1036,23 @@ if ($roleGroup === 'sales' || $roleGroup === 'admin') {
 }
 
 // -----------------------------------------------------------------------------
-// Admin printing assignment monitor
-// Full record monitoring remains in job_cards.php; dashboard shows a live summary.
+// Admin Design + Printing assignment monitor
+// Personnel identity is exposed only inside this Admin-only dashboard block.
+// Full record monitoring and filters remain available in job_cards.php.
 // -----------------------------------------------------------------------------
-$adminPrintingAssignments = [];
+$adminAssignments = [];
+$adminAssignedDesignJobs = 0;
+$adminUnassignedDesignJobs = 0;
 $adminAssignedPrintingJobs = 0;
 $adminUnassignedPrintingJobs = 0;
 
 if ($roleGroup === 'admin' && dash_table_exists($conn, 'job_cards')) {
+    $adminAssignedDesignJobs = dash_count($conn, 'job_cards', 'assigned_design_user_id IS NOT NULL');
+    $adminUnassignedDesignJobs = dash_count($conn, 'job_cards', 'assigned_design_user_id IS NULL');
     $adminAssignedPrintingJobs = dash_count($conn, 'job_cards', 'assigned_printing_user_id IS NOT NULL');
     $adminUnassignedPrintingJobs = dash_count($conn, 'job_cards', 'printing_type_id IS NOT NULL AND assigned_printing_user_id IS NULL');
 
-    $adminPrintingAssignments = dash_fetch_all($conn, "
+    $adminAssignments = dash_fetch_all($conn, "
         SELECT
             jc.id,
             jc.job_card_no,
@@ -1055,19 +1061,21 @@ if ($roleGroup === 'admin' && dash_table_exists($conn, 'job_cards')) {
             jc.delivery_date,
             jc.is_delayed,
             pt.printing_name,
-            COALESCE(NULLIF(u.name, ''), u.username, 'Unassigned') AS assigned_person,
-            u.username AS assigned_username,
-            r.role_name AS assigned_role,
+            COALESCE(NULLIF(du.name, ''), du.username, 'Unassigned') AS designer_name,
+            du.username AS designer_username,
+            COALESCE(NULLIF(pu.name, ''), pu.username, 'Unassigned') AS printer_name,
+            pu.username AS printer_username,
+            pr.role_name AS printer_role,
             cws.step_name AS current_step,
             jcs.status_name AS status_name
         FROM job_cards jc
         LEFT JOIN printing_types pt ON pt.id = jc.printing_type_id
-        LEFT JOIN users u ON u.id = jc.assigned_printing_user_id
-        LEFT JOIN roles r ON r.id = u.role_id
+        LEFT JOIN users du ON du.id = jc.assigned_design_user_id
+        LEFT JOIN users pu ON pu.id = jc.assigned_printing_user_id
+        LEFT JOIN roles pr ON pr.id = pu.role_id
         " . dash_join_status_filter() . "
-        WHERE jc.printing_type_id IS NOT NULL
         ORDER BY
-            CASE WHEN jc.assigned_printing_user_id IS NULL THEN 0 ELSE 1 END ASC,
+            CASE WHEN jc.assigned_design_user_id IS NULL OR (jc.printing_type_id IS NOT NULL AND jc.assigned_printing_user_id IS NULL) THEN 0 ELSE 1 END ASC,
             jc.is_delayed DESC,
             jc.id DESC
         LIMIT 15
@@ -1078,7 +1086,12 @@ if ($roleGroup === 'admin' && dash_table_exists($conn, 'job_cards')) {
 // Production stage summary - current step count only
 // -----------------------------------------------------------------------------
 $stageSummary = [];
-$stageAssignmentWhere = $roleGroup === 'printing' ? (' AND jc.assigned_printing_user_id = ' . (int)$currentUserId) : '';
+$stageAssignmentWhere = '';
+if ($roleGroup === 'printing') {
+    $stageAssignmentWhere = ' AND jc.assigned_printing_user_id = ' . (int)$currentUserId;
+} elseif ($roleGroup === 'design') {
+    $stageAssignmentWhere = ' AND jc.assigned_design_user_id = ' . (int)$currentUserId;
+}
 if (dash_table_exists($conn, 'job_cards') && dash_table_exists($conn, 'workflow_steps')) {
     $stageSummary = dash_fetch_all($conn, "
         SELECT
@@ -2287,29 +2300,37 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                             <div
                                 class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
                                 <div>
-                                    <h2 class="dashboard-card-title">Printing Assignment Monitor</h2>
-                                    <p class="text-muted-custom mb-0">Admin overview of printing type, assigned person,
-                                        current stage and delivery.</p>
+                                    <h2 class="dashboard-card-title">Design &amp; Printing Assignment Monitor</h2>
+                                    <p class="text-muted-custom mb-0">Admin-only overview of assigned designer, printing
+                                        person, current stage and delivery.</p>
                                 </div>
                                 <div class="d-flex flex-wrap gap-2 align-items-center">
-                                    <span class="status-pill">Assigned:
+                                    <span class="status-pill">Design Assigned:
+                                        <?= number_format($adminAssignedDesignJobs) ?></span>
+                                    <span
+                                        class="status-pill <?= $adminUnassignedDesignJobs > 0 ? 'text-danger' : '' ?>">Design
+                                        Unassigned:
+                                        <?= number_format($adminUnassignedDesignJobs) ?></span>
+                                    <span class="status-pill">Print Assigned:
                                         <?= number_format($adminAssignedPrintingJobs) ?></span>
                                     <span
-                                        class="status-pill <?= $adminUnassignedPrintingJobs > 0 ? 'text-danger' : '' ?>">Unassigned:
+                                        class="status-pill <?= $adminUnassignedPrintingJobs > 0 ? 'text-danger' : '' ?>">Print
+                                        Unassigned:
                                         <?= number_format($adminUnassignedPrintingJobs) ?></span>
                                     <a href="job_cards.php"
                                         class="btn btn-sm btn-primary rounded-pill fw-bold px-3">View All Job Cards</a>
                                 </div>
                             </div>
 
-                            <?php if (!$adminPrintingAssignments): ?>
-                            <div class="empty-box">No printing assignments found.</div>
+                            <?php if (!$adminAssignments): ?>
+                            <div class="empty-box">No Job Card assignments found.</div>
                             <?php else: ?>
                             <div class="table-responsive">
                                 <table class="queue-table">
                                     <thead>
                                         <tr>
                                             <th>Job Card</th>
+                                            <th>Designer</th>
                                             <th>Printing / Person</th>
                                             <th>Current Stage</th>
                                             <th>Delivery</th>
@@ -2317,7 +2338,7 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        <?php foreach ($adminPrintingAssignments as $assignment): ?>
+                                        <?php foreach ($adminAssignments as $assignment): ?>
                                         <tr>
                                             <td>
                                                 <div class="queue-ref"><?= e($assignment['job_card_no'] ?? '-') ?></div>
@@ -2325,14 +2346,24 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                                     <?= e($assignment['product_name'] ?? '-') ?></div>
                                             </td>
                                             <td>
-                                                <div class="queue-ref"><?= e($assignment['printing_name'] ?? '-') ?>
-                                                </div>
-                                                <?php if (!empty($assignment['assigned_username'])): ?>
-                                                <div class="queue-meta">
-                                                    <?= e($assignment['assigned_person'] ?? '-') ?><?= !empty($assignment['assigned_role']) ? ' — ' . e($assignment['assigned_role']) : '' ?>
+                                                <?php if (!empty($assignment['designer_username'])): ?>
+                                                <div class="queue-ref"><?= e($assignment['designer_name'] ?? '-') ?>
                                                 </div>
                                                 <?php else: ?>
                                                 <span class="badge text-bg-warning">Unassigned</span>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td>
+                                                <div class="queue-ref"><?= e($assignment['printing_name'] ?? '-') ?>
+                                                </div>
+                                                <?php if (!empty($assignment['printer_username'])): ?>
+                                                <div class="queue-meta">
+                                                    <?= e($assignment['printer_name'] ?? '-') ?><?= !empty($assignment['printer_role']) ? ' — ' . e($assignment['printer_role']) : '' ?>
+                                                </div>
+                                                <?php elseif (!empty($assignment['printing_name'])): ?>
+                                                <span class="badge text-bg-warning">Unassigned</span>
+                                                <?php else: ?>
+                                                <span class="queue-meta">-</span>
                                                 <?php endif; ?>
                                             </td>
                                             <td>

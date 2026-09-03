@@ -132,7 +132,7 @@ function jcStatusIdByKey(mysqli $conn, string $statusKey): ?int
 function jcCurrentFilterQuery(array $extra = []): string
 {
     $keep = [];
-    foreach (['order_type', 'status', 'printing_type_id', 'assigned_user_id', 'search', 'from_date', 'to_date', 'page'] as $key) {
+    foreach (['order_type', 'status', 'printing_type_id', 'assigned_design_user_id', 'assigned_user_id', 'search', 'from_date', 'to_date', 'page'] as $key) {
         if (isset($_GET[$key]) && trim((string)$_GET[$key]) !== '') {
             $keep[$key] = trim((string)$_GET[$key]);
         }
@@ -879,8 +879,16 @@ $allAccessRoles = [
     'admin',
     'super_admin',
     'business_admin',
-    'sales',
-    'designing_proofing'
+    'sales'
+];
+
+$designRoleKeys = [
+    'designing_proofing',
+    'design_proofing',
+    'designing',
+    'proofing',
+    'designer',
+    'designing_team'
 ];
 
 $printingRoleKeys = [
@@ -891,6 +899,7 @@ $printingRoleKeys = [
 ];
 
 $hasAllJobCardAccess = in_array($roleKey, $allAccessRoles, true);
+$isDesignRole = in_array($roleKey, $designRoleKeys, true);
 $isSpecificPrintingRole = in_array($roleKey, $printingRoleKeys, true);
 $isGeneralPrintingRole = $roleKey === 'printing';
 $isAdminMonitor = in_array($roleKey, ['admin', 'super_admin', 'business_admin'], true);
@@ -937,6 +946,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)($_POST['action'] ?? '') ==
 $filterOrderType = trim((string)($_GET['order_type'] ?? ''));
 $filterStatus = trim((string)($_GET['status'] ?? ''));
 $filterPrintingTypeId = max(0, (int)($_GET['printing_type_id'] ?? 0));
+$filterDesignUserId = max(0, (int)($_GET['assigned_design_user_id'] ?? 0));
 $filterAssignedUserId = max(0, (int)($_GET['assigned_user_id'] ?? 0));
 $filterSearch = trim((string)($_GET['search'] ?? ''));
 $filterFromDate = trim((string)($_GET['from_date'] ?? ''));
@@ -962,7 +972,12 @@ $params = [];
 $types = '';
 
 if (!$hasAllJobCardAccess) {
-    if ($isSpecificPrintingRole) {
+    if ($isDesignRole) {
+        // Designing / Proofing users see only Job Cards allocated to their own user account.
+        $where[] = "jc.assigned_design_user_id = ?";
+        $params[] = $userId;
+        $types .= 'i';
+    } elseif ($isSpecificPrintingRole) {
         /*
          | Printing users see only job cards matching their printing type.
          | Example:
@@ -1002,6 +1017,12 @@ if (!$hasAllJobCardAccess) {
     }
 }
 
+if ($isAdminMonitor && $filterDesignUserId > 0) {
+    $where[] = "jc.assigned_design_user_id = ?";
+    $params[] = $filterDesignUserId;
+    $types .= 'i';
+}
+
 if ($isAdminMonitor && $filterPrintingTypeId > 0) {
     $where[] = "jc.printing_type_id = ?";
     $params[] = $filterPrintingTypeId;
@@ -1039,19 +1060,34 @@ if ($filterToDate !== '') {
 }
 
 if ($filterSearch !== '') {
-    $where[] = "(
-        jc.job_card_no LIKE ?
-        OR jc.customer_name LIKE ?
-        OR jc.mobile LIKE ?
-        OR jc.product_name LIKE ?
-        OR pt.printing_name LIKE ?
-        OR ws.step_name LIKE ?
-        OR printer.name LIKE ?
-        OR printer.username LIKE ?
-    )";
+    if ($isAdminMonitor) {
+        $where[] = "(
+            jc.job_card_no LIKE ?
+            OR jc.customer_name LIKE ?
+            OR jc.mobile LIKE ?
+            OR jc.product_name LIKE ?
+            OR pt.printing_name LIKE ?
+            OR ws.step_name LIKE ?
+            OR designer.name LIKE ?
+            OR designer.username LIKE ?
+            OR printer.name LIKE ?
+            OR printer.username LIKE ?
+        )";
+        $searchParamCount = 10;
+    } else {
+        $where[] = "(
+            jc.job_card_no LIKE ?
+            OR jc.customer_name LIKE ?
+            OR jc.mobile LIKE ?
+            OR jc.product_name LIKE ?
+            OR pt.printing_name LIKE ?
+            OR ws.step_name LIKE ?
+        )";
+        $searchParamCount = 6;
+    }
 
     $like = '%' . $filterSearch . '%';
-    for ($i = 0; $i < 8; $i++) {
+    for ($i = 0; $i < $searchParamCount; $i++) {
         $params[] = $like;
         $types .= 's';
     }
@@ -1078,6 +1114,7 @@ try {
 }
 
 $printingTypeOptions = [];
+$designerUserOptions = [];
 $printingUserOptions = [];
 if ($isAdminMonitor) {
     try {
@@ -1094,6 +1131,18 @@ if ($isAdminMonitor) {
                 INNER JOIN roles r ON r.id = u.role_id
                 WHERE u.is_active = 1
                   AND r.is_active = 1
+                  AND r.role_key IN ('designing_proofing','design_proofing','designing','proofing','designer','designing_team')
+                ORDER BY r.role_name ASC, u.name ASC, u.username ASC
+            ");
+            while ($row = $res->fetch_assoc()) $designerUserOptions[] = $row;
+            $res->free();
+
+            $res = $conn->query("
+                SELECT u.id, u.name, u.username, r.role_key, r.role_name
+                FROM users u
+                INNER JOIN roles r ON r.id = u.role_id
+                WHERE u.is_active = 1
+                  AND r.is_active = 1
                   AND r.role_key IN ('offset_printing','screen_printing','digital_printing','multicolor_offset_printing','printing')
                 ORDER BY r.role_name ASC, u.name ASC, u.username ASC
             ");
@@ -1102,6 +1151,7 @@ if ($isAdminMonitor) {
         }
     } catch (Throwable $e) {
         $printingTypeOptions = [];
+        $designerUserOptions = [];
         $printingUserOptions = [];
     }
 }
@@ -1141,6 +1191,8 @@ if (!jcTableExists($conn, 'job_cards')) {
                 ON pt.id = jc.printing_type_id
             LEFT JOIN roles rprint
                 ON rprint.id = jc.assigned_printing_role_id
+            LEFT JOIN users designer
+                ON designer.id = jc.assigned_design_user_id
             LEFT JOIN users printer
                 ON printer.id = jc.assigned_printing_user_id
             LEFT JOIN job_card_statuses jcs
@@ -1189,7 +1241,8 @@ if (!jcTableExists($conn, 'job_cards')) {
                 ws.step_key AS current_step_key,
 
                 sales.username AS sales_person,
-                designer.username AS designer_name,
+                COALESCE(NULLIF(designer.name, ''), designer.username) AS designer_name,
+                designer.username AS designer_username,
                 COALESCE(NULLIF(printer.name, ''), printer.username) AS printer_name,
                 printer.username AS printer_username,
 
@@ -1279,8 +1332,8 @@ $showingFrom = $totalRows > 0 ? $offset + 1 : 0;
 $showingTo = $totalRows > 0 ? min($offset + count($rows), $totalRows) : 0;
 
 $pageAccessLabel = $hasAllJobCardAccess
-    ? ($isAdminMonitor ? 'Admin monitoring: all job cards and printing assignments' : 'Showing all job cards')
-    : 'Showing only job cards assigned to ' . jcRoleLabel($roleKey) . ' user';
+    ? ($isAdminMonitor ? 'Admin monitoring: all job cards, designer assignments and printing assignments' : 'Showing all job cards')
+    : 'Showing only Job Cards allocated to your user account';
 
 ?>
 <!doctype html>
@@ -2211,6 +2264,19 @@ $pageAccessLabel = $hasAllJobCardAccess
 
                         <?php if ($isAdminMonitor): ?>
                         <div class="col-12 col-md-6 col-lg-2">
+                            <label class="form-label fw-bold">Designing Person</label>
+                            <select name="assigned_design_user_id" class="form-select">
+                                <option value="">All Designing Persons</option>
+                                <?php foreach ($designerUserOptions as $u): ?>
+                                <option value="<?= (int)$u['id'] ?>"
+                                    <?= $filterDesignUserId === (int)$u['id'] ? 'selected' : '' ?>>
+                                    <?= e(trim((string)($u['name'] ?? '')) ?: ($u['username'] ?? 'User')) ?>
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <div class="col-12 col-md-6 col-lg-2">
                             <label class="form-label fw-bold">Printing Type</label>
                             <select name="printing_type_id" id="adminPrintingTypeFilter" class="form-select">
                                 <option value="">All Printing Types</option>
@@ -2224,7 +2290,7 @@ $pageAccessLabel = $hasAllJobCardAccess
                         </div>
 
                         <div class="col-12 col-md-6 col-lg-2">
-                            <label class="form-label fw-bold">Assigned Person</label>
+                            <label class="form-label fw-bold">Printing Person</label>
                             <select name="assigned_user_id" id="adminAssignedUserFilter" class="form-select">
                                 <option value="">All Printing Persons</option>
                                 <?php foreach ($printingUserOptions as $u): ?>
@@ -2260,7 +2326,7 @@ $pageAccessLabel = $hasAllJobCardAccess
                             </button>
                         </div>
 
-                        <?php if ($filterOrderType !== '' || $filterStatus !== '' || $filterPrintingTypeId > 0 || $filterAssignedUserId > 0 || $filterSearch !== '' || $filterFromDate !== '' || $filterToDate !== ''): ?>
+                        <?php if ($filterOrderType !== '' || $filterStatus !== '' || $filterDesignUserId > 0 || $filterPrintingTypeId > 0 || $filterAssignedUserId > 0 || $filterSearch !== '' || $filterFromDate !== '' || $filterToDate !== ''): ?>
                         <div class="col-12 text-end">
                             <a href="job_cards.php" class="btn btn-sm btn-outline-secondary rounded-pill px-3 fw-bold">
                                 Clear Filters
@@ -2276,8 +2342,8 @@ $pageAccessLabel = $hasAllJobCardAccess
                         <div>
                             <h2 class="module-title">Job Cards List</h2>
                             <p class="text-muted-custom mb-0">
-                                Admin can monitor all jobs and assigned printing persons. Printing users see only jobs
-                                assigned to their own user account.
+                                Admin can monitor all jobs with assigned Designing and Printing persons. Designing and
+                                Printing users see only their own allocated Job Cards.
                             </p>
                             <small class="text-muted-custom fw-bold d-block mt-1">
                                 Showing <?= number_format($showingFrom) ?>-<?= number_format($showingTo) ?> of
@@ -2308,7 +2374,10 @@ $pageAccessLabel = $hasAllJobCardAccess
                                     <th>Order Type</th>
                                     <th>Product</th>
                                     <th>Printing</th>
-                                    <th>Assigned Person</th>
+                                    <?php if ($isAdminMonitor): ?>
+                                    <th>Designer</th>
+                                    <th>Printing Person</th>
+                                    <?php endif; ?>
                                     <th>Current Stage</th>
                                     <th>Progress</th>
                                     <th>Amount</th>
@@ -2320,7 +2389,8 @@ $pageAccessLabel = $hasAllJobCardAccess
                             <tbody>
                                 <?php if (!$rows): ?>
                                 <tr>
-                                    <td colspan="10" class="text-center text-muted-custom py-4">
+                                    <td colspan="<?= $isAdminMonitor ? 12 : 10 ?>"
+                                        class="text-center text-muted-custom py-4">
                                         No job cards found.
                                     </td>
                                 </tr>
@@ -2366,6 +2436,16 @@ $pageAccessLabel = $hasAllJobCardAccess
                                         <?php endif; ?>
                                     </td>
 
+                                    <?php if ($isAdminMonitor): ?>
+                                    <td>
+                                        <?php if (!empty($row['assigned_design_user_id'])): ?>
+                                        <strong><?= e($row['designer_name'] ?? $row['designer_username'] ?? '-') ?></strong>
+                                        <small class="muted-small">Designing / Proofing</small>
+                                        <?php else: ?>
+                                        <span class="badge text-bg-warning">Unassigned</span>
+                                        <?php endif; ?>
+                                    </td>
+
                                     <td>
                                         <?php if (!empty($row['assigned_printing_user_id'])): ?>
                                         <strong><?= e($row['printer_name'] ?? $row['printer_username'] ?? '-') ?></strong>
@@ -2375,6 +2455,7 @@ $pageAccessLabel = $hasAllJobCardAccess
                                         <span class="badge text-bg-warning">Unassigned</span>
                                         <?php endif; ?>
                                     </td>
+                                    <?php endif; ?>
 
                                     <td>
                                         <span class="status-pill <?= e(jcStatusClass($statusKey)) ?>">
@@ -2506,8 +2587,12 @@ $pageAccessLabel = $hasAllJobCardAccess
                                         <?= e($row['product_name'] ?: '-') ?></span>
                                     <span class="mobile-card-subtitle">Printing:
                                         <?= e($row['printing_name'] ?? '-') ?></span>
-                                    <span class="mobile-card-subtitle">Assigned Person:
+                                    <?php if ($isAdminMonitor): ?>
+                                    <span class="mobile-card-subtitle">Designer:
+                                        <?= !empty($row['assigned_design_user_id']) ? e($row['designer_name'] ?? $row['designer_username'] ?? '-') : '⚠ Unassigned' ?></span>
+                                    <span class="mobile-card-subtitle">Printing Person:
                                         <?= !empty($row['assigned_printing_user_id']) ? e($row['printer_name'] ?? $row['printer_username'] ?? '-') : '⚠ Unassigned' ?></span>
+                                    <?php endif; ?>
                                     <span class="mobile-card-subtitle">Stage:
                                         <?= e($row['current_step_name'] ?? '-') ?></span>
                                     <span class="mobile-card-subtitle">Delivery:
