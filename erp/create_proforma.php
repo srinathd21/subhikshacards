@@ -359,6 +359,7 @@ function cpFetchProformaItemsForEdit(mysqli $conn, int $proformaId): array
         $hasReservations = cpTableExists($conn, 'product_stock_reservations');
         $hasItemPlannedDates = cpColumnExists($conn, 'proforma_bill_items', 'planned_dates_json');
         $hasPrintingUserAssignment = cpColumnExists($conn, 'proforma_bill_items', 'assigned_printing_user_id');
+        $hasDesignUserAssignment = cpColumnExists($conn, 'proforma_bill_items', 'assigned_design_user_id');
 
         $plannedDatesSelect = $hasItemPlannedDates
             ? "pbi.planned_dates_json"
@@ -367,6 +368,10 @@ function cpFetchProformaItemsForEdit(mysqli $conn, int $proformaId): array
         $printingUserSelect = $hasPrintingUserAssignment
             ? "pbi.assigned_printing_user_id"
             : "NULL AS assigned_printing_user_id";
+
+        $designUserSelect = $hasDesignUserAssignment
+            ? "pbi.assigned_design_user_id"
+            : "NULL AS assigned_design_user_id";
 
         $stockSelect = $hasProductStock
             ? "
@@ -409,6 +414,7 @@ function cpFetchProformaItemsForEdit(mysqli $conn, int $proformaId): array
                 pbi.printing_type_id,
                 pbi.printing_sub_type_id,
                 {$printingUserSelect},
+                {$designUserSelect},
                 pbi.finishing_required,
                 pbi.size_text,
                 pbi.gsm_thickness,
@@ -470,6 +476,7 @@ function cpFetchProformaItemsForEdit(mysqli $conn, int $proformaId): array
                 'printing_type_id' => !empty($row['printing_type_id']) ? (string)(int)$row['printing_type_id'] : '',
                 'printing_sub_type_id' => !empty($row['printing_sub_type_id']) ? (string)(int)$row['printing_sub_type_id'] : '',
                 'assigned_printing_user_id' => !empty($row['assigned_printing_user_id']) ? (string)(int)$row['assigned_printing_user_id'] : '',
+                'assigned_design_user_id' => !empty($row['assigned_design_user_id']) ? (string)(int)$row['assigned_design_user_id'] : '',
                 'finishing_required' => (int)($row['finishing_required'] ?? 0),
                 'size_text' => (string)($row['size_text'] ?? ''),
                 'gsm_thickness' => (string)($row['gsm_thickness'] ?? ''),
@@ -889,6 +896,36 @@ $printingUsers = cpFetchAll($conn, "
             AND role_key <> ''
       )
     ORDER BY r.role_name ASC, u.name ASC, u.username ASC
+");
+$designerUsers = cpFetchAll($conn, "
+    SELECT
+        u.id,
+        u.name,
+        u.username,
+        u.role_id,
+        r.role_key,
+        r.role_name
+    FROM users u
+    INNER JOIN roles r ON r.id = u.role_id
+    WHERE u.is_active = 1
+      AND r.is_active = 1
+      AND r.id = (
+          SELECT r2.id
+          FROM roles r2
+          WHERE r2.is_active = 1
+            AND r2.role_key IN ('designing_proofing','design_proofing','designing','proofing','designer','designing_team')
+          ORDER BY CASE r2.role_key
+              WHEN 'designing_proofing' THEN 1
+              WHEN 'design_proofing' THEN 2
+              WHEN 'designing' THEN 3
+              WHEN 'proofing' THEN 4
+              WHEN 'designer' THEN 5
+              WHEN 'designing_team' THEN 6
+              ELSE 99
+          END, r2.id ASC
+          LIMIT 1
+      )
+    ORDER BY u.name ASC, u.username ASC
 ");
 $readymadeSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order, is_final_step FROM workflow_steps WHERE order_type = 'readymade' AND is_active = 1 ORDER BY sort_order ASC");
 $customizedSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order, is_final_step FROM workflow_steps WHERE order_type = 'customized' AND is_active = 1 ORDER BY sort_order ASC");
@@ -2280,7 +2317,19 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                             <option value="printing_only">Printing Only</option>
                                         </select>
                                     </div>
-                                    <div class="col-md-9 printing-only-product-field">
+                                    <div class="col-md-3">
+                                        <label class="form-label fw-bold">Designing Person <span class="text-danger">*</span></label>
+                                        <select name="assigned_design_user_id" id="assigned_design_user_id" class="form-select">
+                                            <option value="">Select Designing Person</option>
+                                            <?php foreach ($designerUsers as $designerUser): ?>
+                                            <option value="<?= (int)$designerUser['id'] ?>">
+                                                <?= e(trim((string)($designerUser['name'] ?? '')) ?: ($designerUser['username'] ?? 'User')) ?>
+                                            </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                        <small class="text-muted-custom">Assigned to every Job Card created from this Proforma.</small>
+                                    </div>
+                                    <div class="col-md-6 printing-only-product-field">
                                         <label class="form-label fw-bold">Product Master *</label>
                                         <div class="product-select-wrap">
                                             <select name="product_id" id="product_id"
@@ -3176,7 +3225,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         }
 
         ['quotation_id', 'function_type_id', 'proforma_status_id', 'product_id', 'order_type', 'printing_type_id',
-            'printing_sub_type_id', 'assigned_printing_user_id', 'custom_printing_user_id', 'lamination_type',
+            'printing_sub_type_id', 'assigned_design_user_id', 'assigned_printing_user_id', 'custom_printing_user_id', 'lamination_type',
             'printing_side', 'screening_type', 'payment_mode'
         ].forEach(refreshSelect);
 
@@ -4320,6 +4369,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         setValue('advance_amount', editData.advance_amount || 0);
         setValue('delivery_date', editData.delivery_date || '');
         setValue('remarks', editData.remarks || '');
+        const editDesignUserId = Array.isArray(editItems) && editItems.length ?
+            String(editItems[0].assigned_design_user_id || '') : '';
+        setValue('assigned_design_user_id', editDesignUserId);
         setValue('printing_type_id', editData.item_printing_type_id || '');
         updatePrintingTypeOptions();
         const editCommonPrintingUserId = Array.isArray(editItems) && editItems.length ?
@@ -4336,7 +4388,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         const lamination = document.getElementById('lamination_required');
         if (lamination) lamination.checked = parseInt(editData.item_lamination_required || 0, 10) === 1;
         ['quotation_id', 'function_type_id', 'proforma_status_id', 'product_id', 'order_type', 'printing_type_id',
-            'printing_sub_type_id', 'assigned_printing_user_id', 'custom_printing_user_id', 'lamination_type',
+            'printing_sub_type_id', 'assigned_design_user_id', 'assigned_printing_user_id', 'custom_printing_user_id', 'lamination_type',
             'printing_side', 'screening_type', 'payment_mode'
         ].forEach(refreshSelect);
     }
@@ -4768,6 +4820,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             printing_type_id: String(item.printing_type_id || ''),
             printing_sub_type_id: String(item.printing_sub_type_id || ''),
             assigned_printing_user_id: String(item.assigned_printing_user_id || ''),
+            assigned_design_user_id: String(item.assigned_design_user_id || ''),
             finishing_required: parseInt(item.finishing_required || 0, 10) || 0,
             size_text: String(item.size_text || ''),
             gsm_thickness: String(item.gsm_thickness || ''),
@@ -4890,7 +4943,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             on_hand_stock: stock.on_hand_stock,
             reserved_stock: stock.reserved_stock,
             available_stock: stock.available_stock,
-            projected_available_stock: stock.available_stock - qty
+            projected_available_stock: stock.available_stock - qty,
+            // Designer is a Proforma-level assignment. Keep a copy on each saved
+            // product row so Add Product / reset / edit cannot lose the selection.
+            assigned_design_user_id: String(getValue('assigned_design_user_id') || '').trim()
         };
 
         if (orderType === 'customized') {
@@ -4934,6 +4990,9 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         if (item.rate < 0) {
             return 'Rate cannot be negative.';
         }
+        if (!String(item.assigned_design_user_id || '').trim()) {
+            return 'Please select Designing Person before adding the product.';
+        }
 
         if ((getValue('order_type') || 'readymade') === 'customized') {
             if (!item.printing_type_id) {
@@ -4963,6 +5022,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     }
 
     function resetProductEntryAfterAdd() {
+        // Designing Person belongs to the whole Proforma, not to the temporary
+        // next-product entry form. Preserve it when clearing product fields.
+        const preservedDesignUserId = String(getValue('assigned_design_user_id') || '').trim();
+
         editingProductIndex = -1;
         setValue('product_id', '');
         setValue('product_name', '');
@@ -4997,6 +5060,12 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
             updateCustomizedPrintingPersons();
             toggleLamination();
             renderCustomizedProductWorkflow({}, false);
+        }
+
+        // Restore the Proforma-level designer after the product line reset.
+        if (preservedDesignUserId) {
+            setValue('assigned_design_user_id', preservedDesignUserId);
+            refreshSelect('assigned_design_user_id');
         }
 
         refreshSelect('product_id');
@@ -5178,6 +5247,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         setValue('product_name', item.product_name || '');
         setValue('qty', item.qty || 1);
         setValue('rate', item.rate || 0);
+        if (String(item.assigned_design_user_id || '').trim()) {
+            setValue('assigned_design_user_id', item.assigned_design_user_id);
+            refreshSelect('assigned_design_user_id');
+        }
 
         if ((getValue('order_type') || 'readymade') === 'customized') {
             setValue('custom_item_description', item.description || '');
@@ -5713,6 +5786,33 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                 document.getElementById('custom_gsm_thickness')?.focus();
                 return;
             }
+        }
+
+        // If Add Product/reset cleared the visible select for any reason, recover
+        // the designer already captured on the saved product row. Do not ask the
+        // user to select the same designer twice.
+        let submitDesignUserId = String(getValue('assigned_design_user_id') || '').trim();
+        if (!submitDesignUserId && Array.isArray(proformaItems) && proformaItems.length) {
+            submitDesignUserId = String(proformaItems[0].assigned_design_user_id || '').trim();
+            if (submitDesignUserId) {
+                setValue('assigned_design_user_id', submitDesignUserId);
+                refreshSelect('assigned_design_user_id');
+            }
+        }
+
+        if (!submitDesignUserId) {
+            showActionToast(
+                'Please select the Designing Person for this Proforma.',
+                'danger',
+                'Designing Person'
+            );
+            const target = document.getElementById('assigned_design_user_id');
+            target?.scrollIntoView({
+                behavior: 'smooth',
+                block: 'center'
+            });
+            setTimeout(() => target?.focus(), 250);
+            return;
         }
 
         if (submitOrderType === 'customized') {

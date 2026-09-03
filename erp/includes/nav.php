@@ -35,7 +35,7 @@ try {
                 $stmt = $conn->prepare("
                     UPDATE notifications
                     SET is_read = 1,
-                        read_at = COALESCE(read_at, NOW())
+                        read_at = COALESCE(read_at, UTC_TIMESTAMP())
                     WHERE id = ?
                       AND user_id = ?
                 ");
@@ -68,6 +68,37 @@ try {
 } catch (Throwable $e) {
     $navNotifications = [];
     $navUnreadNotificationCount = 0;
+}
+
+
+
+if (!function_exists('navNotificationDateTimeIst')) {
+    /**
+     * Notifications are stored in UTC and displayed in ERP system time (IST).
+     * Explicit conversion prevents the 5:30 timezone mismatch.
+     */
+    function navNotificationDateTimeIst($value): string
+    {
+        $value = trim((string)$value);
+        if ($value === '') {
+            return '';
+        }
+
+        try {
+            $utc = new DateTimeZone('UTC');
+            $ist = new DateTimeZone('Asia/Kolkata');
+
+            $dt = DateTime::createFromFormat('Y-m-d H:i:s', $value, $utc);
+            if (!$dt) {
+                $dt = new DateTime($value, $utc);
+            }
+
+            $dt->setTimezone($ist);
+            return $dt->format('d-m-Y h:i A');
+        } catch (Throwable $e) {
+            return $value;
+        }
+    }
 }
 
 function navNotificationHref(array $notification): string
@@ -134,7 +165,7 @@ function navNotificationHref(array $notification): string
                             <small class="d-block text-muted-custom mt-1"><?= e($notification['message']) ?></small>
                             <?php endif; ?>
                             <small class="d-block text-muted-custom mt-1">
-                                <?= !empty($notification['created_at']) ? e(date('d-m-Y h:i A', strtotime((string)$notification['created_at']))) : '' ?>
+                                <?= !empty($notification['created_at']) ? e(navNotificationDateTimeIst($notification['created_at'])) : '' ?>
                             </small>
                         </span>
                     </div>

@@ -2138,11 +2138,32 @@ function jcvCancelUploadedTrackingPhoto(mysqli $conn, array $job, int $trackingI
 
 
 $roleKey = strtolower((string)($_SESSION['role_key'] ?? ''));
+$currentUserId = (int)($_SESSION['user_id'] ?? 0);
 
+/*
+ * Row-level Job Card visibility:
+ * - Admin/Sales retain their existing all-job monitoring/workflow access.
+ * - Designing/Proofing users can open only Job Cards assigned to themselves.
+ * - Printing users can open only Job Cards assigned to themselves and belonging
+ *   to their printing department.
+ *
+ * This is an access layer only; workflow/status/payment/WhatsApp logic below
+ * remains unchanged.
+ */
 $allAccessRoles = [
     'admin',
-    'sales',
-    'designing_proofing'
+    'super_admin',
+    'business_admin',
+    'sales'
+];
+
+$designRoleKeys = [
+    'designing_proofing',
+    'design_proofing',
+    'designing',
+    'proofing',
+    'designer',
+    'designing_team'
 ];
 
 $printingRoleKeys = [
@@ -2153,8 +2174,10 @@ $printingRoleKeys = [
 ];
 
 $hasAllJobCardAccess = in_array($roleKey, $allAccessRoles, true);
+$isDesignRole = in_array($roleKey, $designRoleKeys, true);
 $isSpecificPrintingRole = in_array($roleKey, $printingRoleKeys, true);
 $isGeneralPrintingRole = $roleKey === 'printing';
+$isAdminMonitor = in_array($roleKey, ['admin', 'super_admin', 'business_admin'], true);
 
 $canUpdateJob = false;
 $manualApprovalRoleKeys = [
@@ -2254,16 +2277,42 @@ if ($jobId <= 0) {
         $types = 'i';
 
         if (!$hasAllJobCardAccess) {
-            if ($isSpecificPrintingRole) {
+            if ($isDesignRole) {
+                /* A designer can open only the Job Card allocated to that user. */
+                if ($currentUserId > 0) {
+                    $where[] = "jc.assigned_design_user_id = ?";
+                    $params[] = $currentUserId;
+                    $types .= 'i';
+                } else {
+                    $where[] = "1 = 0";
+                }
+            } elseif ($isSpecificPrintingRole) {
+                /* Keep department ownership and add person-level ownership. */
                 $where[] = "(pt.role_key = ? OR rprint.role_key = ?)";
                 $params[] = $roleKey;
                 $params[] = $roleKey;
                 $types .= 'ss';
+
+                if ($currentUserId > 0) {
+                    $where[] = "jc.assigned_printing_user_id = ?";
+                    $params[] = $currentUserId;
+                    $types .= 'i';
+                } else {
+                    $where[] = "1 = 0";
+                }
             } elseif ($isGeneralPrintingRole) {
                 $where[] = "(
                     pt.role_key IN ('offset_printing','screen_printing','digital_printing','multicolor_offset_printing')
                     OR rprint.role_key IN ('offset_printing','screen_printing','digital_printing','multicolor_offset_printing')
                 )";
+
+                if ($currentUserId > 0) {
+                    $where[] = "jc.assigned_printing_user_id = ?";
+                    $params[] = $currentUserId;
+                    $types .= 'i';
+                } else {
+                    $where[] = "1 = 0";
+                }
             } else {
                 $where[] = "1 = 0";
             }
@@ -4149,6 +4198,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                             </div>
                         </div>
 
+                        <?php if ($isAdminMonitor): ?>
                         <div class="col-md-3">
                             <div class="info-card">
                                 <small>Designer</small>
@@ -4162,6 +4212,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                                 <strong><?= e($job['printer_name'] ?? '-') ?></strong>
                             </div>
                         </div>
+                        <?php endif; ?>
 
                         <div class="col-md-3">
                             <div class="info-card">

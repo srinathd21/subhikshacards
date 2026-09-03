@@ -224,6 +224,10 @@ function apiJobCardRow(mysqli $conn, int $id): ?array
             return null;
         }
 
+        if (!jc_job_visible_to_current_user($conn, $row)) {
+            return null;
+        }
+
         return apiApplyJobItemSummary($row, apiJobCardItems($conn, $id));
     } catch (Throwable $e) {
         return null;
@@ -341,6 +345,10 @@ function apiJobCardList(mysqli $conn): array
         $res = $conn->query($sql);
 
         while ($row = $res->fetch_assoc()) {
+            if (!jc_job_visible_to_current_user($conn, $row)) {
+                continue;
+            }
+
             $count = (int)($row['item_count'] ?? 0);
             $firstName = trim((string)($row['item_name'] ?? $row['product_name'] ?? ''));
 
@@ -460,6 +468,70 @@ function jc_is_admin_user(mysqli $conn): bool
     return false;
 }
 
+function jc_current_user_id(): int
+{
+    return (int)($_SESSION['user_id'] ?? 0);
+}
+
+function jc_is_design_role_key(string $roleKey): bool
+{
+    return in_array(strtolower(trim($roleKey)), [
+        'designing_proofing',
+        'design_proofing',
+        'designing',
+        'proofing',
+        'designer',
+        'designing_team'
+    ], true);
+}
+
+function jc_is_printing_role_key(string $roleKey): bool
+{
+    return in_array(strtolower(trim($roleKey)), [
+        'offset_printing',
+        'screen_printing',
+        'digital_printing',
+        'multicolor_offset_printing',
+        'printing'
+    ], true);
+}
+
+/**
+ * Apply the same person-level Job Card visibility used by job_cards.php and
+ * job_card_view.php to this API. Admin/Sales keep their existing broad access;
+ * design and printing employees receive only their allocated Job Cards.
+ */
+function jc_job_visible_to_current_user(mysqli $conn, array $job): bool
+{
+    if (jc_is_admin_user($conn)) {
+        return true;
+    }
+
+    $roleKeys = jc_current_role_keys($conn);
+    if (in_array('sales', $roleKeys, true)) {
+        return true;
+    }
+
+    $userId = jc_current_user_id();
+    if ($userId <= 0) {
+        return false;
+    }
+
+    foreach ($roleKeys as $roleKey) {
+        if (jc_is_design_role_key($roleKey)) {
+            return (int)($job['assigned_design_user_id'] ?? 0) === $userId;
+        }
+    }
+
+    foreach ($roleKeys as $roleKey) {
+        if (jc_is_printing_role_key($roleKey)) {
+            return (int)($job['assigned_printing_user_id'] ?? 0) === $userId;
+        }
+    }
+
+    return false;
+}
+
 function jc_can_update_job_cards(mysqli $conn): bool
 {
     try {
@@ -477,6 +549,40 @@ function jc_can_update_tracking(mysqli $conn, array $trackingRow): bool
     if (!jc_can_update_job_cards($conn)) return false;
 
     if (jc_is_admin_user($conn)) return true;
+
+    $userId = jc_current_user_id();
+    if ($userId <= 0) return false;
+
+    /*
+     * First enforce Job Card allocation. This protects older tracking rows
+     * where responsible_user_id may still be NULL.
+     */
+    $jobCardId = (int)($trackingRow['job_card_id'] ?? 0);
+    if ($jobCardId <= 0 || !jc_table_exists($conn, 'job_cards')) return false;
+
+    try {
+        $stmt = $conn->prepare("
+            SELECT id, assigned_design_user_id, assigned_printing_user_id
+            FROM job_cards
+            WHERE id = ?
+            LIMIT 1
+        ");
+        $stmt->bind_param('i', $jobCardId);
+        $stmt->execute();
+        $job = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$job || !jc_job_visible_to_current_user($conn, $job)) {
+            return false;
+        }
+    } catch (Throwable $e) {
+        return false;
+    }
+
+    $responsibleUserId = (int)($trackingRow['responsible_user_id'] ?? 0);
+    if ($responsibleUserId > 0 && $responsibleUserId !== $userId) {
+        return false;
+    }
 
     $responsibleRoleId = (int)($trackingRow['responsible_role_id'] ?? 0);
     if ($responsibleRoleId <= 0) return false;

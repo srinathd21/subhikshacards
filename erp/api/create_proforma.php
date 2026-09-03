@@ -541,6 +541,18 @@ function pb_ensure_optional_create_proforma_columns(mysqli $conn): void
         }
 
         /*
+         * Designing / Proofing person assignment is common to the Proforma and
+         * copied to every item so all generated Job Cards retain the assignment.
+         */
+        if (!apiColumnExists($conn, 'proforma_bill_items', 'assigned_design_user_id')) {
+            try {
+                $conn->query("ALTER TABLE proforma_bill_items ADD COLUMN assigned_design_user_id BIGINT(20) UNSIGNED DEFAULT NULL AFTER assigned_printing_user_id");
+            } catch (Throwable $e) {
+                // Validation below reports a clear error if assignment cannot be stored.
+            }
+        }
+
+        /*
          * Customized product-wise tracking dates.
          * Older DB dumps do not contain this column, so add it automatically.
          */
@@ -681,6 +693,131 @@ function pb_validate_printing_assignment(mysqli $conn, ?int $printingTypeId, ?in
     ];
 }
 
+/**
+ * Resolve and validate the Designing / Proofing employee selected on Proforma.
+ * The role is resolved through the same preferred designing role used by the
+ * existing workflow, so assignment never changes workflow ownership semantics.
+ */
+function pb_validate_design_assignment(mysqli $conn, ?int $designUserId): array
+{
+    if (!$designUserId) {
+        throw new RuntimeException('Please select Designing Person for this Proforma.');
+    }
+
+    $designRoleId = pb_designing_role_id($conn);
+    if (!$designRoleId) {
+        throw new RuntimeException('Active Designing / Proofing role is not configured.');
+    }
+
+    $stmt = $conn->prepare("
+        SELECT id, role_name, role_key
+        FROM roles
+        WHERE id = ?
+          AND is_active = 1
+        LIMIT 1
+    ");
+    $stmt->bind_param('i', $designRoleId);
+    $stmt->execute();
+    $role = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$role) {
+        throw new RuntimeException('Active Designing / Proofing role is not configured.');
+    }
+
+    $stmt = $conn->prepare("
+        SELECT u.id, u.name, u.username, u.role_id
+        FROM users u
+        WHERE u.id = ?
+          AND u.role_id = ?
+          AND u.is_active = 1
+        LIMIT 1
+    ");
+    $stmt->bind_param('ii', $designUserId, $designRoleId);
+    $stmt->execute();
+    $user = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$user) {
+        throw new RuntimeException('Selected Designing Person does not belong to the active Designing / Proofing team.');
+    }
+
+    return [
+        'role_id' => (int)$role['id'],
+        'role_key' => (string)$role['role_key'],
+        'role_name' => (string)$role['role_name'],
+        'user_id' => (int)$user['id'],
+        'user_name' => trim((string)($user['name'] ?? '')) ?: (string)($user['username'] ?? ''),
+        'username' => (string)($user['username'] ?? ''),
+    ];
+}
+
+/** Create an internal ERP notification only. Customer WhatsApp logic is untouched. */
+function pb_notify_design_assignment(
+    mysqli $conn,
+    int $designUserId,
+    int $jobCardId,
+    string $jobCardNo,
+    string $customerName = '',
+    bool $isReassignment = false
+): void {
+    if ($designUserId <= 0 || $jobCardId <= 0 || !pb_table_exists($conn, 'notifications')) {
+        return;
+    }
+
+    try {
+        $title = $isReassignment ? 'Design Job Reassigned' : 'New Design Job Assigned';
+        $parts = [];
+        if ($jobCardNo !== '') $parts[] = $jobCardNo;
+        if ($customerName !== '') $parts[] = 'Customer: ' . $customerName;
+        $parts[] = 'Team: Designing / Proofing';
+        $message = implode(' | ', $parts);
+
+        $stmt = $conn->prepare("
+            INSERT INTO notifications
+                (user_id, title, message, related_module, related_id, is_read, created_at)
+            VALUES
+                (?, ?, ?, 'job_cards', ?, 0, UTC_TIMESTAMP())
+        ");
+        $stmt->bind_param('issi', $designUserId, $title, $message, $jobCardId);
+        $stmt->execute();
+        $stmt->close();
+    } catch (Throwable $e) {
+        // Internal notification failure must never block Proforma/Job Card creation.
+        error_log('Design assignment notification failed: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Assign the selected designer only to open Designing / Proofing tracking rows.
+ * Existing stage status, responsible role, approvals and sequence are untouched.
+ */
+function pb_assign_open_design_tracking_rows(
+    mysqli $conn,
+    int $jobCardId,
+    ?int $designRoleId,
+    ?int $designUserId
+): void {
+    if (
+        $jobCardId <= 0 || !$designRoleId || !$designUserId ||
+        !pb_table_exists($conn, 'job_tracking') ||
+        !apiColumnExists($conn, 'job_tracking', 'responsible_user_id')
+    ) {
+        return;
+    }
+
+    $stmt = $conn->prepare("
+        UPDATE job_tracking
+        SET responsible_user_id = ?, updated_at = NOW()
+        WHERE job_card_id = ?
+          AND responsible_role_id = ?
+          AND status NOT IN ('completed','skipped','cancelled')
+    ");
+    $stmt->bind_param('iii', $designUserId, $jobCardId, $designRoleId);
+    $stmt->execute();
+    $stmt->close();
+}
+
 /** Create an internal ERP notification only. Customer WhatsApp logic is untouched. */
 function pb_notify_printing_assignment(
     mysqli $conn,
@@ -689,7 +826,8 @@ function pb_notify_printing_assignment(
     string $jobCardNo,
     string $printingName,
     string $customerName = '',
-    bool $isReassignment = false
+    bool $isReassignment = false,
+    ?string $proformaCreatedAtUtc = null
 ): void {
     if ($printingUserId <= 0 || $jobCardId <= 0 || !pb_table_exists($conn, 'notifications')) {
         return;
@@ -703,13 +841,55 @@ function pb_notify_printing_assignment(
         if ($printingName !== '') $parts[] = 'Printing: ' . $printingName;
         $message = implode(' | ', $parts);
 
+        /*
+         * New assignment notifications must carry the same timestamp as the
+         * Proforma that created the Job Card. Database timestamps are UTC;
+         * includes/nav.php converts them to Asia/Kolkata (IST) for display.
+         * Reassignments intentionally use the actual reassignment time.
+         */
+        $notificationCreatedAtUtc = gmdate('Y-m-d H:i:s');
+        if (!$isReassignment && !empty($proformaCreatedAtUtc)) {
+            try {
+                /*
+                 * proforma_bills.created_at is produced by MySQL CURRENT_TIMESTAMP/NOW().
+                 * Local XAMPP may run MySQL in IST while Hostinger may run in UTC.
+                 * Detect the active MySQL session offset and normalize the Proforma
+                 * creation moment to UTC before storing it in notifications.
+                 */
+                $offsetSeconds = 0;
+                $offsetRes = $conn->query(
+                    "SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()) AS offset_seconds"
+                );
+                if ($offsetRes) {
+                    $offsetRow = $offsetRes->fetch_assoc();
+                    $offsetSeconds = (int)($offsetRow['offset_seconds'] ?? 0);
+                    $offsetRes->free();
+                }
+
+                $utc = new DateTimeZone('UTC');
+                $source = trim((string)$proformaCreatedAtUtc);
+                $dt = DateTime::createFromFormat('Y-m-d H:i:s', $source, $utc);
+                if (!$dt) {
+                    $dt = new DateTime($source, $utc);
+                }
+
+                if ($offsetSeconds !== 0) {
+                    $dt->modify(($offsetSeconds > 0 ? '-' : '+') . abs($offsetSeconds) . ' seconds');
+                }
+
+                $notificationCreatedAtUtc = $dt->format('Y-m-d H:i:s');
+            } catch (Throwable $e) {
+                // Keep current UTC time if the source Proforma timestamp cannot be normalized.
+            }
+        }
+
         $stmt = $conn->prepare("
             INSERT INTO notifications
                 (user_id, title, message, related_module, related_id, is_read, created_at)
             VALUES
-                (?, ?, ?, 'job_cards', ?, 0, NOW())
+                (?, ?, ?, 'job_cards', ?, 0, ?)
         ");
-        $stmt->bind_param('issi', $printingUserId, $title, $message, $jobCardId);
+        $stmt->bind_param('issis', $printingUserId, $title, $message, $jobCardId, $notificationCreatedAtUtc);
         $stmt->execute();
         $stmt->close();
     } catch (Throwable $e) {
@@ -1769,6 +1949,8 @@ function pb_create_customized_job_card_for_item(
     $printingSubTypeId = !empty($item['printing_sub_type_id']) ? (int)$item['printing_sub_type_id'] : null;
     $assignedPrintingUserId = !empty($item['assigned_printing_user_id']) ? (int)$item['assigned_printing_user_id'] : null;
     $printingAssignment = pb_validate_printing_assignment($conn, $printingTypeId, $assignedPrintingUserId);
+    $assignedDesignUserId = !empty($item['assigned_design_user_id']) ? (int)$item['assigned_design_user_id'] : null;
+    $designAssignment = pb_validate_design_assignment($conn, $assignedDesignUserId);
 
     $enquiryId = !empty($bill['enquiry_id']) ? (int)$bill['enquiry_id'] : null;
     $quotationId = !empty($bill['quotation_id']) ? (int)$bill['quotation_id'] : null;
@@ -1852,7 +2034,13 @@ function pb_create_customized_job_card_for_item(
     $jobCardId = (int)$stmt->insert_id;
     $stmt->close();
 
-    // Person assignment is additional metadata; Customized role/workflow timing is unchanged.
+    // Person assignments are additional metadata; Customized workflow timing is unchanged.
+    if (apiColumnExists($conn, 'job_cards', 'assigned_design_user_id')) {
+        $stmt = $conn->prepare("UPDATE job_cards SET assigned_design_user_id = ? WHERE id = ?");
+        $stmt->bind_param('ii', $assignedDesignUserId, $jobCardId);
+        $stmt->execute();
+        $stmt->close();
+    }
     if (apiColumnExists($conn, 'job_cards', 'assigned_printing_user_id')) {
         $stmt = $conn->prepare("UPDATE job_cards SET assigned_printing_user_id = ? WHERE id = ?");
         $stmt->bind_param('ii', $assignedPrintingUserId, $jobCardId);
@@ -1948,11 +2136,26 @@ function pb_create_customized_job_card_for_item(
         $stmt->close();
     }
 
+    pb_assign_open_design_tracking_rows(
+        $conn,
+        $jobCardId,
+        (int)($designAssignment['role_id'] ?? $designingRoleId ?? 0),
+        $assignedDesignUserId
+    );
+
     pb_assign_open_printing_tracking_rows(
         $conn,
         $jobCardId,
         (int)($printingAssignment['role_id'] ?? $multicolorRoleId ?? 0),
         $assignedPrintingUserId
+    );
+
+    pb_notify_design_assignment(
+        $conn,
+        $assignedDesignUserId,
+        $jobCardId,
+        $jobNo,
+        (string)($bill['customer_name'] ?? '')
     );
 
     pb_notify_printing_assignment(
@@ -1961,7 +2164,9 @@ function pb_create_customized_job_card_for_item(
         $jobCardId,
         $jobNo,
         (string)($printingAssignment['printing_name'] ?? ''),
-        (string)($bill['customer_name'] ?? '')
+        (string)($bill['customer_name'] ?? ''),
+        false,
+        (string)($bill['created_at'] ?? '')
     );
 
     pb_log(
@@ -2190,6 +2395,8 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
     $printingSubTypeId = !empty($firstItem['printing_sub_type_id']) ? (int)$firstItem['printing_sub_type_id'] : null;
     $assignedPrintingUserId = !empty($firstItem['assigned_printing_user_id']) ? (int)$firstItem['assigned_printing_user_id'] : null;
     $printingAssignment = pb_validate_printing_assignment($conn, $printingTypeId, $assignedPrintingUserId);
+    $assignedDesignUserId = !empty($firstItem['assigned_design_user_id']) ? (int)$firstItem['assigned_design_user_id'] : null;
+    $designAssignment = pb_validate_design_assignment($conn, $assignedDesignUserId);
 
     $stmt = $conn->prepare("
         INSERT INTO job_cards
@@ -2266,6 +2473,12 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
     $jobCardId = (int)$stmt->insert_id;
     $stmt->close();
 
+    if (apiColumnExists($conn, 'job_cards', 'assigned_design_user_id')) {
+        $stmt = $conn->prepare("UPDATE job_cards SET assigned_design_user_id = ? WHERE id = ?");
+        $stmt->bind_param('ii', $assignedDesignUserId, $jobCardId);
+        $stmt->execute();
+        $stmt->close();
+    }
     if (apiColumnExists($conn, 'job_cards', 'assigned_printing_user_id')) {
         $stmt = $conn->prepare("UPDATE job_cards SET assigned_printing_user_id = ? WHERE id = ?");
         $stmt->bind_param('ii', $assignedPrintingUserId, $jobCardId);
@@ -2375,11 +2588,26 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
         $stmt->close();
     }
 
+    pb_assign_open_design_tracking_rows(
+        $conn,
+        $jobCardId,
+        (int)($designAssignment['role_id'] ?? $designingRoleId ?? 0),
+        $assignedDesignUserId
+    );
+
     pb_assign_open_printing_tracking_rows(
         $conn,
         $jobCardId,
         (int)($printingAssignment['role_id'] ?? $assignedPrintingRoleId ?? 0),
         $assignedPrintingUserId
+    );
+
+    pb_notify_design_assignment(
+        $conn,
+        $assignedDesignUserId,
+        $jobCardId,
+        $jobNo,
+        (string)($bill['customer_name'] ?? '')
     );
 
     pb_notify_printing_assignment(
@@ -2388,7 +2616,9 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
         $jobCardId,
         $jobNo,
         (string)($printingAssignment['printing_name'] ?? ''),
-        (string)($bill['customer_name'] ?? '')
+        (string)($bill['customer_name'] ?? ''),
+        false,
+        (string)($bill['created_at'] ?? '')
     );
 
     $jobCardStatusPb = pb_status_id($conn, 'proforma_statuses', 'status_key', 'job_card_created');
@@ -2557,7 +2787,7 @@ function pb_sync_existing_job_card_from_proforma(
             }
 
             $stmt = $conn->prepare("
-                SELECT id, assigned_printing_user_id
+                SELECT id, assigned_design_user_id, assigned_printing_user_id
                 FROM job_cards
                 WHERE proforma_bill_id = ?
                   AND proforma_bill_item_id = ?
@@ -2584,6 +2814,9 @@ function pb_sync_existing_job_card_from_proforma(
             $printingSubTypeId = !empty($item['printing_sub_type_id']) ? (int)$item['printing_sub_type_id'] : null;
             $assignedPrintingUserId = !empty($item['assigned_printing_user_id']) ? (int)$item['assigned_printing_user_id'] : null;
             $printingAssignment = pb_validate_printing_assignment($conn, $printingTypeId, $assignedPrintingUserId);
+            $assignedDesignUserId = !empty($item['assigned_design_user_id']) ? (int)$item['assigned_design_user_id'] : null;
+            $designAssignment = pb_validate_design_assignment($conn, $assignedDesignUserId);
+            $oldAssignedDesignUserId = !empty($jobRow['assigned_design_user_id']) ? (int)$jobRow['assigned_design_user_id'] : 0;
             $oldAssignedPrintingUserId = !empty($jobRow['assigned_printing_user_id']) ? (int)$jobRow['assigned_printing_user_id'] : 0;
             $updatedBy = $userId > 0 ? $userId : null;
 
@@ -2634,6 +2867,12 @@ function pb_sync_existing_job_card_from_proforma(
             $stmt->execute();
             $stmt->close();
 
+            if (apiColumnExists($conn, 'job_cards', 'assigned_design_user_id')) {
+                $stmt = $conn->prepare("UPDATE job_cards SET assigned_design_user_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?");
+                $stmt->bind_param('iii', $assignedDesignUserId, $updatedBy, $jobCardId);
+                $stmt->execute();
+                $stmt->close();
+            }
             if (apiColumnExists($conn, 'job_cards', 'assigned_printing_user_id')) {
                 $stmt = $conn->prepare("UPDATE job_cards SET assigned_printing_user_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?");
                 $stmt->bind_param('iii', $assignedPrintingUserId, $updatedBy, $jobCardId);
@@ -2641,12 +2880,33 @@ function pb_sync_existing_job_card_from_proforma(
                 $stmt->close();
             }
 
+            pb_assign_open_design_tracking_rows(
+                $conn,
+                $jobCardId,
+                (int)($designAssignment['role_id'] ?? 0),
+                $assignedDesignUserId
+            );
+
             pb_assign_open_printing_tracking_rows(
                 $conn,
                 $jobCardId,
                 (int)($printingAssignment['role_id'] ?? 0),
                 $assignedPrintingUserId
             );
+
+            if ($assignedDesignUserId > 0 && $assignedDesignUserId !== $oldAssignedDesignUserId) {
+                $jobNoRow = $conn->query("SELECT job_card_no FROM job_cards WHERE id = " . (int)$jobCardId . " LIMIT 1");
+                $jobNoData = $jobNoRow ? $jobNoRow->fetch_assoc() : null;
+                if ($jobNoRow) $jobNoRow->free();
+                pb_notify_design_assignment(
+                    $conn,
+                    $assignedDesignUserId,
+                    $jobCardId,
+                    (string)($jobNoData['job_card_no'] ?? ''),
+                    $customerName,
+                    $oldAssignedDesignUserId > 0
+                );
+            }
 
             if ($assignedPrintingUserId > 0 && $assignedPrintingUserId !== $oldAssignedPrintingUserId) {
                 $jobNoRow = $conn->query("SELECT job_card_no FROM job_cards WHERE id = " . (int)$jobCardId . " LIMIT 1");
@@ -2659,7 +2919,8 @@ function pb_sync_existing_job_card_from_proforma(
                     (string)($jobNoData['job_card_no'] ?? ''),
                     (string)($printingAssignment['printing_name'] ?? ''),
                     $customerName,
-                    $oldAssignedPrintingUserId > 0
+                    $oldAssignedPrintingUserId > 0,
+                    (string)($bill['created_at'] ?? '')
                 );
             }
 
@@ -2719,7 +2980,7 @@ function pb_sync_existing_job_card_from_proforma(
      * Readymade edit: existing one-Job-Card behavior.
      */
     $stmt = $conn->prepare("
-        SELECT id, assigned_printing_user_id
+        SELECT id, assigned_design_user_id, assigned_printing_user_id
         FROM job_cards
         WHERE proforma_bill_id = ?
         ORDER BY id DESC
@@ -2745,6 +3006,9 @@ function pb_sync_existing_job_card_from_proforma(
     $printingSubTypeId = !empty($firstItem['printing_sub_type_id']) ? (int)$firstItem['printing_sub_type_id'] : null;
     $assignedPrintingUserId = !empty($firstItem['assigned_printing_user_id']) ? (int)$firstItem['assigned_printing_user_id'] : null;
     $printingAssignment = pb_validate_printing_assignment($conn, $printingTypeId, $assignedPrintingUserId);
+    $assignedDesignUserId = !empty($firstItem['assigned_design_user_id']) ? (int)$firstItem['assigned_design_user_id'] : null;
+    $designAssignment = pb_validate_design_assignment($conn, $assignedDesignUserId);
+    $oldAssignedDesignUserId = !empty($jobRow['assigned_design_user_id']) ? (int)$jobRow['assigned_design_user_id'] : 0;
     $oldAssignedPrintingUserId = !empty($jobRow['assigned_printing_user_id']) ? (int)$jobRow['assigned_printing_user_id'] : 0;
 
     $customerName = (string)($bill['customer_name'] ?? '');
@@ -2796,6 +3060,12 @@ function pb_sync_existing_job_card_from_proforma(
     $stmt->execute();
     $stmt->close();
 
+    if (apiColumnExists($conn, 'job_cards', 'assigned_design_user_id')) {
+        $stmt = $conn->prepare("UPDATE job_cards SET assigned_design_user_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?");
+        $stmt->bind_param('iii', $assignedDesignUserId, $updatedBy, $jobCardId);
+        $stmt->execute();
+        $stmt->close();
+    }
     if (apiColumnExists($conn, 'job_cards', 'assigned_printing_user_id')) {
         $stmt = $conn->prepare("UPDATE job_cards SET assigned_printing_user_id = ?, updated_by = ?, updated_at = NOW() WHERE id = ?");
         $stmt->bind_param('iii', $assignedPrintingUserId, $updatedBy, $jobCardId);
@@ -2803,12 +3073,33 @@ function pb_sync_existing_job_card_from_proforma(
         $stmt->close();
     }
 
+    pb_assign_open_design_tracking_rows(
+        $conn,
+        $jobCardId,
+        (int)($designAssignment['role_id'] ?? 0),
+        $assignedDesignUserId
+    );
+
     pb_assign_open_printing_tracking_rows(
         $conn,
         $jobCardId,
         (int)($printingAssignment['role_id'] ?? 0),
         $assignedPrintingUserId
     );
+
+    if ($assignedDesignUserId > 0 && $assignedDesignUserId !== $oldAssignedDesignUserId) {
+        $jobNoRow = $conn->query("SELECT job_card_no FROM job_cards WHERE id = " . (int)$jobCardId . " LIMIT 1");
+        $jobNoData = $jobNoRow ? $jobNoRow->fetch_assoc() : null;
+        if ($jobNoRow) $jobNoRow->free();
+        pb_notify_design_assignment(
+            $conn,
+            $assignedDesignUserId,
+            $jobCardId,
+            (string)($jobNoData['job_card_no'] ?? ''),
+            $customerName,
+            $oldAssignedDesignUserId > 0
+        );
+    }
 
     if ($assignedPrintingUserId > 0 && $assignedPrintingUserId !== $oldAssignedPrintingUserId) {
         $jobNoRow = $conn->query("SELECT job_card_no FROM job_cards WHERE id = " . (int)$jobCardId . " LIMIT 1");
@@ -2821,7 +3112,8 @@ function pb_sync_existing_job_card_from_proforma(
             (string)($jobNoData['job_card_no'] ?? ''),
             (string)($printingAssignment['printing_name'] ?? ''),
             $customerName,
-            $oldAssignedPrintingUserId > 0
+            $oldAssignedPrintingUserId > 0,
+            (string)($bill['created_at'] ?? '')
         );
     }
 
@@ -3823,6 +4115,23 @@ try {
             $globalPrintingTypeId = pb_int($_POST['printing_type_id'] ?? 0) ?: null;
             $globalPrintingSubTypeId = pb_int($_POST['printing_sub_type_id'] ?? 0) ?: null;
             $globalPrintingUserId = pb_int($_POST['assigned_printing_user_id'] ?? 0) ?: null;
+            $globalDesignUserId = pb_int($_POST['assigned_design_user_id'] ?? 0) ?: null;
+
+            /*
+             * The UI stores the Proforma-level designer on every added product row.
+             * If the visible select was cleared while resetting the next-product
+             * entry area, recover that already-selected designer instead of forcing
+             * the user to choose the same person again.
+             */
+            if (!$globalDesignUserId && $orderType !== 'printing_only') {
+                $designItemsPayload = json_decode((string)($_POST['items_json'] ?? ''), true);
+                if (is_array($designItemsPayload) && !empty($designItemsPayload[0]['assigned_design_user_id'])) {
+                    $globalDesignUserId = pb_int($designItemsPayload[0]['assigned_design_user_id']) ?: null;
+                }
+            }
+
+            $designAssignment = pb_validate_design_assignment($conn, $globalDesignUserId);
+            $globalDesignUserId = (int)$designAssignment['user_id'];
             $globalFinishingRequired = pb_int($_POST['finishing_required'] ?? 0) === 1 ? 1 : 0;
             $globalPrintingPriceMasterId = pb_int($_POST['printing_price_master_id'] ?? 0) ?: null;
             $globalPriceSlabText = pb_post('price_slab_text');
@@ -4163,6 +4472,7 @@ try {
                     'printing_type_id' => $printingTypeId,
                     'printing_sub_type_id' => $printingSubTypeId,
                     'assigned_printing_user_id' => $assignedPrintingUserId,
+                    'assigned_design_user_id' => $globalDesignUserId,
                     'finishing_required' => $finishingRequired,
                     'size_text' => $sizeText,
                     'gsm_thickness' => $gsmThickness,
@@ -4611,6 +4921,14 @@ try {
                     $assignedPrintingUserId = !empty($item['assigned_printing_user_id']) ? (int)$item['assigned_printing_user_id'] : null;
                     $stmt = $conn->prepare("UPDATE proforma_bill_items SET assigned_printing_user_id = ? WHERE id = ? AND proforma_bill_id = ?");
                     $stmt->bind_param('iii', $assignedPrintingUserId, $proformaItemId, $proformaId);
+                    $stmt->execute();
+                    $stmt->close();
+                }
+
+                if (apiColumnExists($conn, 'proforma_bill_items', 'assigned_design_user_id')) {
+                    $assignedDesignUserId = !empty($item['assigned_design_user_id']) ? (int)$item['assigned_design_user_id'] : null;
+                    $stmt = $conn->prepare("UPDATE proforma_bill_items SET assigned_design_user_id = ? WHERE id = ? AND proforma_bill_id = ?");
+                    $stmt->bind_param('iii', $assignedDesignUserId, $proformaItemId, $proformaId);
                     $stmt->execute();
                     $stmt->close();
                 }
