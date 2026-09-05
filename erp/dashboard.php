@@ -172,6 +172,24 @@ function dash_datetime_ist($value): string
     }
 }
 
+function dash_month_ist($value): string
+{
+    if (empty($value)) return '';
+
+    try {
+        $utc = new DateTimeZone('UTC');
+        $ist = new DateTimeZone('Asia/Kolkata');
+        $dt = DateTime::createFromFormat('Y-m-d H:i:s', (string)$value, $utc);
+        if (!$dt) {
+            $dt = new DateTime((string)$value, $utc);
+        }
+        $dt->setTimezone($ist);
+        return $dt->format('Y-m');
+    } catch (Throwable $e) {
+        return date('Y-m', strtotime((string)$value));
+    }
+}
+
 function dash_user_role(mysqli $conn): array
 {
     $roleId = (int)($_SESSION['role_id'] ?? 0);
@@ -272,6 +290,60 @@ function dash_completed_job_where(): string
         OR jc.completed_at IS NOT NULL
         OR LOWER(COALESCE(cws.step_key, '')) IN ('completed','google_review_sent')
     )";
+}
+
+
+/**
+ * Printer dashboard state for a Job Card assigned to the logged-in printing user.
+ * This is dashboard-only reporting logic; it does not change Job Card workflow/status.
+ */
+function dash_printer_job_state(array $row): string
+{
+    $statusKey = strtolower(trim((string)($row['status_key'] ?? '')));
+    $stepKey = strtolower(trim((string)($row['step_key'] ?? '')));
+    $ownerRole = strtolower(trim((string)($row['owner_role'] ?? '')));
+    $trackingStatus = strtolower(trim((string)($row['current_tracking_status'] ?? '')));
+
+    if ($statusKey === 'cancelled') {
+        return 'cancelled';
+    }
+
+    if (
+        $statusKey === 'completed' ||
+        !empty($row['completed_at']) ||
+        in_array($stepKey, ['ready_for_dispatch', 'dispatched', 'completed', 'google_review_sent'], true)
+    ) {
+        return 'done';
+    }
+
+    $productionSteps = [
+        'master_copy_received',
+        'printing',
+        'print',
+        'plating',
+        'paper_board_selection',
+        'laminate',
+        'drying',
+        'cutting',
+        'packing',
+        'send_to_dispatch',
+    ];
+
+    $isProductionStep = (
+        strpos($ownerRole, 'printing') !== false ||
+        strpos($ownerRole, 'offset') !== false ||
+        strpos($ownerRole, 'screen') !== false ||
+        strpos($ownerRole, 'digital') !== false ||
+        in_array($stepKey, $productionSteps, true)
+    );
+
+    // Assigned Job Cards waiting to reach/start the printer's production stage are Pending.
+    if (!$isProductionStep || $trackingStatus === '' || $trackingStatus === 'pending') {
+        return 'pending';
+    }
+
+    // Once the assigned production stage is started/delayed, it is Active.
+    return 'active';
 }
 
 [$roleKey, $roleName] = dash_user_role($conn);
@@ -575,10 +647,18 @@ $todayQuotations = dash_count($conn, 'quotations', "DATE(created_at) = '{$today}
 $totalQuotations = dash_count($conn, 'quotations');
 $todayProforma = dash_count($conn, 'proforma_bills', "DATE(created_at) = '{$today}'");
 $totalProforma = dash_count($conn, 'proforma_bills');
-$totalBusinessValue = dash_sum($conn, 'proforma_bills', 'final_amount');
-$pendingBalance = dash_sum($conn, 'proforma_bills', 'balance_amount', 'balance_amount > 0');
-$todayCollection = dash_sum($conn, 'payments', 'amount', "payment_date = '{$today}' AND is_cancelled = 0");
-$monthCollection = dash_sum($conn, 'payments', 'amount', "DATE_FORMAT(payment_date, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m') AND is_cancelled = 0");
+$totalBusinessValue = 0.0;
+$pendingBalance = 0.0;
+$todayCollection = 0.0;
+$monthCollection = 0.0;
+
+// Printing users do not need financial collection/balance data on their dashboard.
+if ($roleGroup !== 'printing') {
+    $totalBusinessValue = dash_sum($conn, 'proforma_bills', 'final_amount');
+    $pendingBalance = dash_sum($conn, 'proforma_bills', 'balance_amount', 'balance_amount > 0');
+    $todayCollection = dash_sum($conn, 'payments', 'amount', "payment_date = '{$today}' AND is_cancelled = 0");
+    $monthCollection = dash_sum($conn, 'payments', 'amount', "DATE_FORMAT(payment_date, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m') AND is_cancelled = 0");
+}
 
 $activeJobs = 0;
 $delayedJobs = 0;
@@ -648,6 +728,108 @@ if (dash_table_exists($conn, 'job_cards')) {
     if ($dispatchedToday === 0 && dash_table_exists($conn, 'dispatches')) {
         $dispatchedToday = dash_count($conn, 'dispatches', "dispatch_date = '{$today}' AND LOWER(COALESCE(status,'')) NOT IN ('cancelled','deleted')");
     }
+}
+
+// -----------------------------------------------------------------------------
+// Printing login: show ONLY Job Cards allocated to this printing user.
+// Financial/company-wide figures are intentionally not used for this role.
+// -----------------------------------------------------------------------------
+$printerTotalAssignedJobs = 0;
+$printerDoneJobs = 0;
+$printerActiveJobs = 0;
+$printerPendingJobs = 0;
+$printerThisMonthAssignedJobs = 0;
+$printerDelayedJobs = 0;
+$printerDueTodayJobs = 0;
+$printerMonthlyRows = [];
+
+$printerReportMonth = trim((string)($_GET['printer_month'] ?? date('Y-m')));
+if (!preg_match('/^\\d{4}-(0[1-9]|1[0-2])$/', $printerReportMonth)) {
+    $printerReportMonth = date('Y-m');
+}
+
+if ($roleGroup === 'printing' && $currentUserId > 0 && dash_table_exists($conn, 'job_cards')) {
+    $printerRows = dash_fetch_all($conn, "
+        SELECT
+            jc.id,
+            jc.job_card_no,
+            jc.customer_name,
+            jc.mobile,
+            jc.product_name,
+            jc.order_type,
+            jc.delivery_date,
+            jc.created_at,
+            jc.updated_at,
+            jc.completed_at,
+            jc.is_delayed,
+            jcs.status_name,
+            LOWER(COALESCE(jcs.status_key, '')) AS status_key,
+            cws.step_name,
+            LOWER(COALESCE(cws.step_key, '')) AS step_key,
+            LOWER(COALESCE(cws.default_owner_role_key, '')) AS owner_role,
+            LOWER(COALESCE(cjt.status, '')) AS current_tracking_status
+        FROM job_cards jc
+        " . dash_join_status_filter() . "
+        LEFT JOIN job_tracking cjt
+            ON cjt.id = (
+                SELECT MAX(jt2.id)
+                FROM job_tracking jt2
+                WHERE jt2.job_card_id = jc.id
+                  AND jt2.workflow_step_id = jc.current_workflow_step_id
+            )
+        WHERE jc.assigned_printing_user_id = " . (int)$currentUserId . "
+        ORDER BY COALESCE(jc.created_at, jc.updated_at) DESC, jc.id DESC
+    ");
+
+    $printerTotalAssignedJobs = count($printerRows);
+
+    foreach ($printerRows as $printerRow) {
+        $printerState = dash_printer_job_state($printerRow);
+        $printerRow['_printer_state'] = $printerState;
+
+        if ($printerState === 'done') {
+            $printerDoneJobs++;
+        } elseif ($printerState === 'active') {
+            $printerActiveJobs++;
+        } elseif ($printerState === 'pending') {
+            $printerPendingJobs++;
+        }
+
+        $deliveryDate = trim((string)($printerRow['delivery_date'] ?? ''));
+        if (
+            $printerState !== 'done' &&
+            $printerState !== 'cancelled' &&
+            (
+                !empty($printerRow['is_delayed']) ||
+                ($deliveryDate !== '' && substr($deliveryDate, 0, 10) < $today)
+            )
+        ) {
+            $printerDelayedJobs++;
+        }
+
+        if (
+            $printerState !== 'done' &&
+            $printerState !== 'cancelled' &&
+            $deliveryDate !== '' &&
+            substr($deliveryDate, 0, 10) === $today
+        ) {
+            $printerDueTodayJobs++;
+        }
+
+        $createdMonth = dash_month_ist($printerRow['created_at'] ?? null);
+
+        if ($createdMonth === date('Y-m')) {
+            $printerThisMonthAssignedJobs++;
+        }
+
+        if ($createdMonth === $printerReportMonth) {
+            $printerMonthlyRows[] = $printerRow;
+        }
+    }
+
+    // Existing attention cards can stay, but their counts must be personal, not company-wide.
+    $delayedJobs = $printerDelayedJobs;
+    $dueTodayJobs = $printerDueTodayJobs;
 }
 
 $pendingApprovals = dash_count($conn, 'customer_approvals', "status = 'pending'");
@@ -753,6 +935,39 @@ foreach ($allKpis as $kpi) {
     }
 }
 $kpiCards = array_slice($kpiCards, 0, 8);
+
+if ($roleGroup === 'printing') {
+    $kpiCards = [
+        [
+            'label' => 'Jobs Done',
+            'value' => number_format($printerDoneJobs),
+            'sub' => 'Your printing work completed',
+            'icon' => 'circle-check-big',
+            'color' => 'linear-gradient(135deg,#15803d,#22c55e)',
+        ],
+        [
+            'label' => 'Active Jobs',
+            'value' => number_format($printerActiveJobs),
+            'sub' => 'Your production work in progress',
+            'icon' => 'printer',
+            'color' => 'linear-gradient(135deg,#2563eb,#0ea5e9)',
+        ],
+        [
+            'label' => 'Pending Jobs',
+            'value' => number_format($printerPendingJobs),
+            'sub' => 'Your assigned jobs waiting to start',
+            'icon' => 'clock-3',
+            'color' => 'linear-gradient(135deg,#f59e0b,#f97316)',
+        ],
+        [
+            'label' => 'This Month Jobs',
+            'value' => number_format($printerThisMonthAssignedJobs),
+            'sub' => date('F Y') . ' assigned Job Cards',
+            'icon' => 'calendar-range',
+            'color' => 'linear-gradient(135deg,#7c3aed,#a855f7)',
+        ],
+    ];
+}
 
 // -----------------------------------------------------------------------------
 // Quick actions - filtered by role group and page permission
@@ -990,7 +1205,7 @@ if ($roleGroup === 'sales' || $roleGroup === 'admin') {
     ");
 } elseif ($roleGroup === 'printing') {
     $workQueueTitle = 'Printing / Production Queue';
-    $workQueueSubtitle = 'Jobs currently owned by printing and finishing stages.';
+    $workQueueSubtitle = 'Only active printing and finishing jobs assigned to you.';
     $roleKeyEsc = $conn->real_escape_string($roleKey);
     $workQueue = dash_fetch_all($conn, "
         SELECT
@@ -1001,7 +1216,7 @@ if ($roleGroup === 'sales' || $roleGroup === 'admin') {
             jc.product_name AS details,
             cws.step_name AS current_step,
             jc.delivery_date,
-            jc.balance_amount,
+            0 AS balance_amount,
             'job_cards.php' AS url
         FROM job_cards jc
         " . dash_join_status_filter() . "
@@ -1112,7 +1327,7 @@ if (dash_table_exists($conn, 'job_cards') && dash_table_exists($conn, 'workflow_
 $roleIntro = 'Overall company summary';
 if ($roleGroup === 'sales') $roleIntro = 'Sales, payment, approval and dispatch summary';
 elseif ($roleGroup === 'design') $roleIntro = 'Design, proofing and customer approval summary';
-elseif ($roleGroup === 'printing') $roleIntro = 'Printing, finishing and production queue summary';
+elseif ($roleGroup === 'printing') $roleIntro = 'Your assigned printing jobs, pending work and monthly report';
 elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary';
 ?>
 <!doctype html>
@@ -2174,7 +2389,7 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                     <?php endforeach; ?>
                 </div>
 
-                <?php if ($followupReminderCanView): ?>
+                <?php if ($followupReminderCanView && $roleGroup !== 'printing'): ?>
                 <div class="row g-3 mb-3">
                     <div class="col-12">
                         <div class="card-ui dashboard-card">
@@ -2421,6 +2636,43 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
 
                     <div class="col-12 col-xl-4">
                         <div class="card-ui dashboard-card h-100">
+                            <?php if ($roleGroup === 'printing'): ?>
+                            <div class="d-flex justify-content-between align-items-center gap-3 mb-3">
+                                <div>
+                                    <h2 class="dashboard-card-title">My Printing Summary</h2>
+                                    <p class="text-muted-custom mb-0">Only Job Cards allocated to you.</p>
+                                </div>
+                                <i data-lucide="printer"></i>
+                            </div>
+                            <div class="row g-3">
+                                <div class="col-6">
+                                    <div class="stage-card">
+                                        <h6>Total Assigned</h6>
+                                        <strong><?= number_format($printerTotalAssignedJobs) ?></strong>
+                                        <p>All your Job Cards</p>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="stage-card">
+                                        <h6>This Month</h6>
+                                        <strong><?= number_format($printerThisMonthAssignedJobs) ?></strong>
+                                        <p><?= e(date('M Y')) ?></p>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="stage-card">
+                                        <h6>Due Today</h6><strong><?= number_format($printerDueTodayJobs) ?></strong>
+                                        <p>Your assigned jobs</p>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="stage-card">
+                                        <h6>Delayed</h6><strong><?= number_format($printerDelayedJobs) ?></strong>
+                                        <p>Your assigned jobs</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <?php else: ?>
                             <div class="d-flex justify-content-between align-items-center gap-3 mb-3">
                                 <div>
                                     <h2 class="dashboard-card-title">Today Summary</h2>
@@ -2455,6 +2707,7 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                     </div>
                                 </div>
                             </div>
+                            <?php endif; ?>
                         </div>
                     </div>
                 </div>
@@ -2490,8 +2743,10 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                             <td>
                                                 <div class="queue-ref"><?= e($row['details'] ?: '-') ?></div>
                                                 <div class="queue-meta">Delivery:
-                                                    <?= e(dash_date($row['delivery_date'] ?? null)) ?> | Balance:
-                                                    <?= e(dash_money($row['balance_amount'] ?? 0)) ?></div>
+                                                    <?= e(dash_date($row['delivery_date'] ?? null)) ?><?php if ($roleGroup !== 'printing'): ?>
+                                                    | Balance:
+                                                    <?= e(dash_money($row['balance_amount'] ?? 0)) ?><?php endif; ?>
+                                                </div>
                                             </td>
                                             <td class="text-end"><a href="<?= e($row['url'] ?: 'job_cards.php') ?>"
                                                     class="btn btn-sm btn-outline-primary rounded-pill fw-bold px-3">Open</a>
@@ -2506,6 +2761,103 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                     </div>
 
                 </div>
+
+                <?php if ($roleGroup === 'printing'): ?>
+                <div class="row g-3 mb-3">
+                    <div class="col-12">
+                        <div class="card-ui dashboard-card">
+                            <div
+                                class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
+                                <div>
+                                    <h2 class="dashboard-card-title">Monthly Assigned Job Report</h2>
+                                    <p class="text-muted-custom mb-0">Every Job Card assigned to your printing login for
+                                        the selected month.</p>
+                                </div>
+                                <form method="get" class="d-flex align-items-center gap-2">
+                                    <input type="month" name="printer_month" value="<?= e($printerReportMonth) ?>"
+                                        class="form-control" style="min-width:170px">
+                                    <button type="submit"
+                                        class="btn btn-primary rounded-pill fw-bold px-4">View</button>
+                                </form>
+                            </div>
+
+                            <div class="d-flex flex-wrap gap-2 mb-3">
+                                <span class="status-pill">Month:
+                                    <?= e(date('F Y', strtotime($printerReportMonth . '-01'))) ?></span>
+                                <span class="status-pill">Total: <?= number_format(count($printerMonthlyRows)) ?></span>
+                            </div>
+
+                            <?php if (!$printerMonthlyRows): ?>
+                            <div class="empty-box">No Job Cards were assigned to you for this month.</div>
+                            <?php else: ?>
+                            <div class="table-responsive">
+                                <table class="table align-middle mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th>Job Card</th>
+                                            <th>Customer / Product</th>
+                                            <th>Job Created</th>
+                                            <th>Current Stage</th>
+                                            <th>Work Status</th>
+                                            <th>Delivery</th>
+                                            <th class="text-end">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($printerMonthlyRows as $printerReportRow): ?>
+                                        <?php
+                                            $printerState = (string)($printerReportRow['_printer_state'] ?? 'pending');
+                                            $printerStateLabel = $printerState === 'done'
+                                                ? 'Done'
+                                                : ($printerState === 'active'
+                                                    ? 'Active'
+                                                    : ($printerState === 'cancelled' ? 'Cancelled' : 'Pending'));
+                                            $printerStateClass = $printerState === 'done'
+                                                ? 'text-bg-success'
+                                                : ($printerState === 'active'
+                                                    ? 'text-bg-primary'
+                                                    : ($printerState === 'cancelled' ? 'text-bg-secondary' : 'text-bg-warning'));
+                                        ?>
+                                        <tr>
+                                            <td>
+                                                <div class="queue-ref"><?= e($printerReportRow['job_card_no'] ?? '-') ?>
+                                                </div>
+                                                <div class="queue-meta">
+                                                    <?= e(ucfirst((string)($printerReportRow['order_type'] ?? '-'))) ?>
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <div class="queue-ref">
+                                                    <?= e($printerReportRow['customer_name'] ?? '-') ?></div>
+                                                <div class="queue-meta">
+                                                    <?= e($printerReportRow['product_name'] ?? '-') ?></div>
+                                            </td>
+                                            <td><?= e(dash_datetime_ist($printerReportRow['created_at'] ?? null)) ?>
+                                            </td>
+                                            <td>
+                                                <span
+                                                    class="status-pill"><?= e($printerReportRow['step_name'] ?? '-') ?></span>
+                                                <div class="queue-meta mt-1">
+                                                    <?= e($printerReportRow['status_name'] ?? '-') ?></div>
+                                            </td>
+                                            <td><span
+                                                    class="badge rounded-pill <?= e($printerStateClass) ?>"><?= e($printerStateLabel) ?></span>
+                                            </td>
+                                            <td><?= e(dash_date($printerReportRow['delivery_date'] ?? null)) ?></td>
+                                            <td class="text-end">
+                                                <a href="job_card_view.php?id=<?= (int)($printerReportRow['id'] ?? 0) ?>"
+                                                    class="btn btn-sm btn-outline-primary rounded-pill fw-bold px-3">Open</a>
+                                            </td>
+                                        </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
     </div>
     </section>
     </main>
