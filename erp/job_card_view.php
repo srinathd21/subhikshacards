@@ -2179,6 +2179,7 @@ $isSpecificPrintingRole = in_array($roleKey, $printingRoleKeys, true);
 $isGeneralPrintingRole = $roleKey === 'printing';
 $isAdminMonitor = in_array($roleKey, ['admin', 'super_admin', 'business_admin'], true);
 $isPrintingJobView = $isSpecificPrintingRole || $isGeneralPrintingRole;
+$isProductionTeamView = $isDesignRole || $isPrintingJobView;
 
 $canUpdateJob = false;
 $manualApprovalRoleKeys = [
@@ -4082,7 +4083,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                 </div>
                 <?php else: ?>
 
-                <?php if (!$isPrintingJobView): ?>
+                <?php if (!$isProductionTeamView): ?>
                 <div class="row g-3 mb-3">
                     <div class="col-12 col-md-4">
                         <div class="amount-card">
@@ -4107,12 +4108,14 @@ if ($message !== '' && $toastTitle === 'Info') {
                 </div>
                 <?php endif; ?>
 
-                <?php if ($isPrintingJobView): ?>
+                <?php if ($isProductionTeamView): ?>
                 <div class="card-ui module-card mb-3">
                     <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-4">
                         <div>
                             <h2 class="module-title mb-1"><?= e($job['job_card_no']) ?></h2>
-                            <p class="text-muted-custom mb-0">Printing Job Details</p>
+                            <p class="text-muted-custom mb-0">
+                                <?= $isDesignRole ? 'Design / Production Job Details' : 'Printing Job Details' ?>
+                            </p>
                         </div>
 
                         <span class="status-pill <?= e(jcvStatusClass($statusKey)) ?>">
@@ -4121,23 +4124,87 @@ if ($message !== '' && $toastTitle === 'Info') {
                     </div>
 
                     <div class="row g-3">
-                        <div class="col-12 col-md-6">
+                        <div class="col-12 col-md-4">
                             <div class="info-card h-100">
-                                <small>Type of Printing</small>
-                                <strong>
-                                    <?= e($job['printing_name'] ?? '-') ?>
-                                    <?php if (!empty($job['sub_type_name'])): ?>
-                                    <span
-                                        class="d-block text-muted-custom small mt-1"><?= e($job['sub_type_name']) ?></span>
-                                    <?php endif; ?>
-                                </strong>
+                                <small>Customer Name</small>
+                                <strong><?= e($job['customer_name'] ?? '-') ?></strong>
                             </div>
                         </div>
 
-                        <div class="col-12 col-md-6">
+                        <div class="col-12 col-md-4">
+                            <div class="info-card h-100">
+                                <small>Mobile</small>
+                                <strong><?= e($job['mobile'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-4">
+                            <div class="info-card h-100">
+                                <small>Function Type</small>
+                                <strong><?= e($job['function_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-4">
+                            <div class="info-card h-100">
+                                <small>Assigned Designer</small>
+                                <strong><?= e($job['designer_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-4">
+                            <div class="info-card h-100">
+                                <small>Assigned Printer</small>
+                                <strong><?= e($job['printer_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-4">
+                            <div class="info-card h-100">
+                                <small>Product</small>
+                                <strong><?= e($jobProductSummary) ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-4">
+                            <div class="info-card h-100">
+                                <small>Total Quantity</small>
+                                <strong><?= number_format($jobItemTotalQty, 2) ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-4">
+                            <div class="info-card h-100">
+                                <small>Printing Type</small>
+                                <strong><?= e($job['printing_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-4">
+                            <div class="info-card h-100">
+                                <small>Printing Sub Type</small>
+                                <strong><?= e($job['sub_type_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-4">
+                            <div class="info-card h-100">
+                                <small>Current Stage</small>
+                                <strong><?= e($job['current_step_name'] ?? '-') ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-4">
                             <div class="info-card h-100">
                                 <small>Expected Delivery Date</small>
                                 <strong><?= e(jcvDate($job['delivery_date'] ?? null)) ?></strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-4">
+                            <div class="info-card h-100">
+                                <small>Assigned Printing Role</small>
+                                <strong><?= e($job['assigned_printing_role_name'] ?? '-') ?></strong>
                             </div>
                         </div>
                     </div>
@@ -4269,8 +4336,8 @@ if ($message !== '' && $toastTitle === 'Info') {
                             <div>
                                 <h2 class="module-title mb-1">Products in this Job Card</h2>
                                 <p class="text-muted-custom mb-0">
-                                    <?= $isPrintingJobView
-                                        ? 'Product name and quantity assigned for this printing Job Card.'
+                                    <?= $isProductionTeamView
+                                        ? 'Production details only. Pricing information is hidden for Designing and Printing teams.'
                                         : 'All products created under the same Job Card ID. Workflow/status remains common for the complete Job Card.' ?>
                                 </p>
                             </div>
@@ -4279,7 +4346,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                                 <span><?= number_format($jobItemCount) ?>
                                     Product<?= $jobItemCount === 1 ? '' : 's' ?></span>
                                 <span>Total Qty: <?= number_format($jobItemTotalQty, 2) ?></span>
-                                <?php if (!$isPrintingJobView): ?>
+                                <?php if (!$isProductionTeamView): ?>
                                 <span>Product Total: <?= e(jcvMoney($jobItemProductTotal)) ?></span>
                                 <?php endif; ?>
                             </div>
@@ -4297,7 +4364,10 @@ if ($message !== '' && $toastTitle === 'Info') {
                                         <th style="width:60px;">#</th>
                                         <th>Product</th>
                                         <th class="text-end">Qty</th>
-                                        <?php if (!$isPrintingJobView): ?>
+                                        <?php if ($isProductionTeamView): ?>
+                                        <th>Printing Details</th>
+                                        <?php endif; ?>
+                                        <?php if (!$isProductionTeamView): ?>
                                         <th class="text-end">Rate / Unit</th>
                                         <th class="text-end">Product Total</th>
                                         <?php endif; ?>
@@ -4311,7 +4381,22 @@ if ($message !== '' && $toastTitle === 'Info') {
                                             <strong><?= e($jobItem['item_name'] ?? 'Cards') ?></strong>
                                         </td>
                                         <td class="text-end"><?= number_format((float)($jobItem['qty'] ?? 0), 2) ?></td>
-                                        <?php if (!$isPrintingJobView): ?>
+                                        <?php if ($isProductionTeamView): ?>
+                                        <td>
+                                            <?php
+                                                $printingDetails = [];
+                                                if (!empty($jobItem['size_text'])) $printingDetails[] = 'Size: ' . $jobItem['size_text'];
+                                                if (!empty($jobItem['gsm_thickness'])) $printingDetails[] = 'GSM/Thickness: ' . $jobItem['gsm_thickness'];
+                                                if (!empty($jobItem['printing_side'])) $printingDetails[] = 'Side: ' . $jobItem['printing_side'];
+                                                if (!empty($jobItem['screening_type'])) $printingDetails[] = 'Screening: ' . $jobItem['screening_type'];
+                                                if (!empty($jobItem['lamination_type'])) $printingDetails[] = 'Lamination: ' . $jobItem['lamination_type'];
+                                                if (!empty($jobItem['finishing_required'])) $printingDetails[] = 'Finishing Required';
+                                                if (!empty($jobItem['description'])) $printingDetails[] = 'Details: ' . $jobItem['description'];
+                                            ?>
+                                            <?= e($printingDetails ? implode(' | ', $printingDetails) : '-') ?>
+                                        </td>
+                                        <?php endif; ?>
+                                        <?php if (!$isProductionTeamView): ?>
                                         <td class="text-end"><?= e(jcvMoney($jobItem['rate'] ?? 0)) ?></td>
                                         <td class="text-end fw-bold"><?= e(jcvMoney($jobItem['amount'] ?? 0)) ?></td>
                                         <?php endif; ?>
@@ -4751,9 +4836,14 @@ if ($message !== '' && $toastTitle === 'Info') {
 
                                             <?php if ($dispatchPaymentPending): ?>
                                             <div class="alert alert-warning rounded-4 fw-bold mb-3">
+                                                <?php if ($isProductionTeamView): ?>
+                                                Payment Pending: Dispatch cannot be completed until the customer payment
+                                                is cleared.
+                                                <?php else: ?>
                                                 Payment Pending: Balance
                                                 <?= e(jcvMoney($paymentSnapshot['balance_amount'] ?? 0)) ?> must be
                                                 collected before completing Dispatch.
+                                                <?php endif; ?>
                                             </div>
                                             <?php endif; ?>
 

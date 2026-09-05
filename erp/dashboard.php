@@ -652,8 +652,9 @@ $pendingBalance = 0.0;
 $todayCollection = 0.0;
 $monthCollection = 0.0;
 
-// Printing users do not need financial collection/balance data on their dashboard.
-if ($roleGroup !== 'printing') {
+// Printing and Designing users do not need financial collection/balance data on their dashboard.
+// Keep money/collection figures limited to Admin/Sales/business-facing roles.
+if (!in_array($roleGroup, ['printing', 'design'], true)) {
     $totalBusinessValue = dash_sum($conn, 'proforma_bills', 'final_amount');
     $pendingBalance = dash_sum($conn, 'proforma_bills', 'balance_amount', 'balance_amount > 0');
     $todayCollection = dash_sum($conn, 'payments', 'amount', "payment_date = '{$today}' AND is_cancelled = 0");
@@ -843,6 +844,113 @@ $whatsappFailed = dash_count($conn, 'whatsapp_logs', "status = 'failed'");
 $whatsappSentToday = dash_count($conn, 'whatsapp_logs', "DATE(COALESCE(sent_at, created_at)) = '{$today}' AND status IN ('sent','delivered','read')");
 
 // -----------------------------------------------------------------------------
+// Designer login: personal workload only. No financial/company collection data.
+// -----------------------------------------------------------------------------
+$designerTotalAssignedJobs = 0;
+$designerActiveJobs = 0;
+$designerDueTodayJobs = 0;
+$designerDelayedJobs = 0;
+$designerCompletedThisMonth = 0;
+$designerPendingApprovals = 0;
+$designerReworkApprovals = 0;
+
+if ($roleGroup === 'design' && $currentUserId > 0 && dash_table_exists($conn, 'job_cards')) {
+    $designerUserId = (int)$currentUserId;
+
+    $designerTotalAssignedJobs = (int)dash_scalar($conn, "
+        SELECT COUNT(DISTINCT jc.id)
+        FROM job_cards jc
+        WHERE jc.assigned_design_user_id = {$designerUserId}
+    ", 0);
+
+    $designerActiveJobs = (int)dash_scalar($conn, "
+        SELECT COUNT(DISTINCT jc.id)
+        FROM job_cards jc
+        " . dash_join_status_filter() . "
+        WHERE " . dash_active_job_where() . "
+          AND jc.assigned_design_user_id = {$designerUserId}
+    ", 0);
+
+    $designerDueTodayJobs = (int)dash_scalar($conn, "
+        SELECT COUNT(DISTINCT jc.id)
+        FROM job_cards jc
+        " . dash_join_status_filter() . "
+        WHERE " . dash_active_job_where() . "
+          AND jc.assigned_design_user_id = {$designerUserId}
+          AND jc.delivery_date IS NOT NULL
+          AND DATE(jc.delivery_date) = '{$today}'
+    ", 0);
+
+    $designerDelayedJobs = (int)dash_scalar($conn, "
+        SELECT COUNT(DISTINCT jc.id)
+        FROM job_cards jc
+        " . dash_join_status_filter() . "
+        LEFT JOIN job_tracking jt
+            ON jt.job_card_id = jc.id
+           AND (jt.status = 'delayed' OR jt.is_delayed = 1)
+        WHERE jc.assigned_design_user_id = {$designerUserId}
+          AND (
+                jc.is_delayed = 1
+             OR LOWER(COALESCE(jcs.status_key, '')) = 'delayed'
+             OR jt.id IS NOT NULL
+             OR (jc.delivery_date IS NOT NULL AND jc.delivery_date < CURDATE() AND " . dash_active_job_where() . ")
+          )
+    ", 0);
+
+    $designerCompletedThisMonth = (int)dash_scalar($conn, "
+        SELECT COUNT(DISTINCT jc.id)
+        FROM job_cards jc
+        " . dash_join_status_filter() . "
+        WHERE jc.assigned_design_user_id = {$designerUserId}
+          AND " . dash_completed_job_where() . "
+          AND DATE_FORMAT(COALESCE(jc.completed_at, jc.updated_at), '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')
+    ", 0);
+
+    if (dash_table_exists($conn, 'customer_approvals')) {
+        $designerPendingApprovals += (int)dash_scalar($conn, "
+            SELECT COUNT(DISTINCT ca.id)
+            FROM customer_approvals ca
+            INNER JOIN job_cards jc ON jc.id = ca.job_card_id
+            WHERE jc.assigned_design_user_id = {$designerUserId}
+              AND ca.status = 'pending'
+        ", 0);
+
+        $designerReworkApprovals += (int)dash_scalar($conn, "
+            SELECT COUNT(DISTINCT ca.id)
+            FROM customer_approvals ca
+            INNER JOIN job_cards jc ON jc.id = ca.job_card_id
+            WHERE jc.assigned_design_user_id = {$designerUserId}
+              AND ca.status IN ('rejected','correction_requested')
+        ", 0);
+    }
+
+    if (dash_table_exists($conn, 'job_tracking_photo_approvals')) {
+        $designerPendingApprovals += (int)dash_scalar($conn, "
+            SELECT COUNT(DISTINCT pa.id)
+            FROM job_tracking_photo_approvals pa
+            INNER JOIN job_cards jc ON jc.id = pa.job_card_id
+            WHERE jc.assigned_design_user_id = {$designerUserId}
+              AND pa.status = 'pending'
+        ", 0);
+
+        $designerReworkApprovals += (int)dash_scalar($conn, "
+            SELECT COUNT(DISTINCT pa.id)
+            FROM job_tracking_photo_approvals pa
+            INNER JOIN job_cards jc ON jc.id = pa.job_card_id
+            WHERE jc.assigned_design_user_id = {$designerUserId}
+              AND pa.status = 'rejected'
+        ", 0);
+    }
+
+    // Reuse the existing attention-card variables, but only with this designer's jobs.
+    $activeJobs = $designerActiveJobs;
+    $dueTodayJobs = $designerDueTodayJobs;
+    $delayedJobs = $designerDelayedJobs;
+    $pendingApprovals = $designerPendingApprovals;
+    $approvalRework = $designerReworkApprovals;
+}
+
+// -----------------------------------------------------------------------------
 // Role based KPI cards
 // -----------------------------------------------------------------------------
 $allKpis = [
@@ -944,6 +1052,7 @@ if ($roleGroup === 'printing') {
             'sub' => 'Your printing work completed',
             'icon' => 'circle-check-big',
             'color' => 'linear-gradient(135deg,#15803d,#22c55e)',
+            'url' => 'job_cards.php',
         ],
         [
             'label' => 'Active Jobs',
@@ -951,6 +1060,7 @@ if ($roleGroup === 'printing') {
             'sub' => 'Your production work in progress',
             'icon' => 'printer',
             'color' => 'linear-gradient(135deg,#2563eb,#0ea5e9)',
+            'url' => 'job_cards.php',
         ],
         [
             'label' => 'Pending Jobs',
@@ -958,6 +1068,7 @@ if ($roleGroup === 'printing') {
             'sub' => 'Your assigned jobs waiting to start',
             'icon' => 'clock-3',
             'color' => 'linear-gradient(135deg,#f59e0b,#f97316)',
+            'url' => 'job_cards.php',
         ],
         [
             'label' => 'This Month Jobs',
@@ -965,6 +1076,42 @@ if ($roleGroup === 'printing') {
             'sub' => date('F Y') . ' assigned Job Cards',
             'icon' => 'calendar-range',
             'color' => 'linear-gradient(135deg,#7c3aed,#a855f7)',
+            'url' => 'job_cards.php',
+        ],
+    ];
+} elseif ($roleGroup === 'design') {
+    $kpiCards = [
+        [
+            'label' => 'My Active Jobs',
+            'value' => number_format($designerActiveJobs),
+            'sub' => 'Assigned design / proofing work',
+            'icon' => 'palette',
+            'color' => 'linear-gradient(135deg,#7c3aed,#a855f7)',
+            'url' => 'job_cards.php',
+        ],
+        [
+            'label' => 'Pending Approval',
+            'value' => number_format($designerPendingApprovals),
+            'sub' => 'Customer proof/design approvals',
+            'icon' => 'badge-check',
+            'color' => 'linear-gradient(135deg,#2563eb,#6366f1)',
+            'url' => 'customer_approvals.php',
+        ],
+        [
+            'label' => 'Due Today',
+            'value' => number_format($designerDueTodayJobs),
+            'sub' => 'Assigned jobs due today',
+            'icon' => 'calendar-clock',
+            'color' => 'linear-gradient(135deg,#f59e0b,#f97316)',
+            'url' => 'job_cards.php',
+        ],
+        [
+            'label' => 'Completed This Month',
+            'value' => number_format($designerCompletedThisMonth),
+            'sub' => date('F Y') . ' completed jobs',
+            'icon' => 'circle-check-big',
+            'color' => 'linear-gradient(135deg,#16a34a,#22c55e)',
+            'url' => 'job_cards.php',
         ],
     ];
 }
@@ -1251,51 +1398,11 @@ if ($roleGroup === 'sales' || $roleGroup === 'admin') {
 }
 
 // -----------------------------------------------------------------------------
-// Admin Design + Printing assignment monitor
-// Personnel identity is exposed only inside this Admin-only dashboard block.
-// Full record monitoring and filters remain available in job_cards.php.
+// Admin production overview
+// Dashboard intentionally avoids listing individual Job Cards. Detailed records,
+// people assignments and filters remain in job_cards.php.
 // -----------------------------------------------------------------------------
-$adminAssignments = [];
-$adminAssignedDesignJobs = 0;
-$adminUnassignedDesignJobs = 0;
-$adminAssignedPrintingJobs = 0;
-$adminUnassignedPrintingJobs = 0;
-
-if ($roleGroup === 'admin' && dash_table_exists($conn, 'job_cards')) {
-    $adminAssignedDesignJobs = dash_count($conn, 'job_cards', 'assigned_design_user_id IS NOT NULL');
-    $adminUnassignedDesignJobs = dash_count($conn, 'job_cards', 'assigned_design_user_id IS NULL');
-    $adminAssignedPrintingJobs = dash_count($conn, 'job_cards', 'assigned_printing_user_id IS NOT NULL');
-    $adminUnassignedPrintingJobs = dash_count($conn, 'job_cards', 'printing_type_id IS NOT NULL AND assigned_printing_user_id IS NULL');
-
-    $adminAssignments = dash_fetch_all($conn, "
-        SELECT
-            jc.id,
-            jc.job_card_no,
-            jc.customer_name,
-            jc.product_name,
-            jc.delivery_date,
-            jc.is_delayed,
-            pt.printing_name,
-            COALESCE(NULLIF(du.name, ''), du.username, 'Unassigned') AS designer_name,
-            du.username AS designer_username,
-            COALESCE(NULLIF(pu.name, ''), pu.username, 'Unassigned') AS printer_name,
-            pu.username AS printer_username,
-            pr.role_name AS printer_role,
-            cws.step_name AS current_step,
-            jcs.status_name AS status_name
-        FROM job_cards jc
-        LEFT JOIN printing_types pt ON pt.id = jc.printing_type_id
-        LEFT JOIN users du ON du.id = jc.assigned_design_user_id
-        LEFT JOIN users pu ON pu.id = jc.assigned_printing_user_id
-        LEFT JOIN roles pr ON pr.id = pu.role_id
-        " . dash_join_status_filter() . "
-        ORDER BY
-            CASE WHEN jc.assigned_design_user_id IS NULL OR (jc.printing_type_id IS NOT NULL AND jc.assigned_printing_user_id IS NULL) THEN 0 ELSE 1 END ASC,
-            jc.is_delayed DESC,
-            jc.id DESC
-        LIMIT 15
-    ");
-}
+$adminPrintingWorkload = [];
 
 // -----------------------------------------------------------------------------
 // Production stage summary - current step count only
@@ -1324,9 +1431,24 @@ if (dash_table_exists($conn, 'job_cards') && dash_table_exists($conn, 'workflow_
     ");
 }
 
+if ($roleGroup === 'admin' && dash_table_exists($conn, 'job_cards') && dash_table_exists($conn, 'printing_types')) {
+    $adminPrintingWorkload = dash_fetch_all($conn, "
+        SELECT
+            COALESCE(NULLIF(pt.printing_name, ''), 'Not Set') AS printing_name,
+            COUNT(DISTINCT jc.id) AS total_jobs
+        FROM job_cards jc
+        LEFT JOIN printing_types pt ON pt.id = jc.printing_type_id
+        " . dash_join_status_filter() . "
+        WHERE " . dash_active_job_where() . "
+        GROUP BY pt.id, pt.printing_name
+        ORDER BY total_jobs DESC, printing_name ASC
+        LIMIT 6
+    ");
+}
+
 $roleIntro = 'Overall company summary';
 if ($roleGroup === 'sales') $roleIntro = 'Sales, payment, approval and dispatch summary';
-elseif ($roleGroup === 'design') $roleIntro = 'Design, proofing and customer approval summary';
+elseif ($roleGroup === 'design') $roleIntro = 'Your assigned design, proofing and approval workspace';
 elseif ($roleGroup === 'printing') $roleIntro = 'Your assigned printing jobs, pending work and monthly report';
 elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary';
 ?>
@@ -1394,6 +1516,35 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
         border-color: color-mix(in srgb, #16a34a 22%, var(--border-soft))
     }
 
+
+    .dashboard-refresh-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        min-height: 38px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--border-soft);
+        background: var(--card-bg);
+        color: var(--text-main);
+        font-size: 11.5px;
+        font-weight: 800;
+        transition: .18s ease;
+    }
+
+    .dashboard-refresh-btn:hover {
+        transform: translateY(-1px);
+        border-color: color-mix(in srgb, var(--brand-1) 35%, var(--border-soft));
+        color: var(--brand-1);
+        box-shadow: 0 8px 18px rgba(15, 23, 42, .08);
+    }
+
+    .dashboard-refresh-btn svg {
+        width: 15px;
+        height: 15px;
+    }
+
     .dash-kpi-card {
         min-height: 128px;
         padding: 20px;
@@ -1402,6 +1553,51 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
         gap: 15px;
         position: relative;
         overflow: hidden
+    }
+
+    .dash-kpi-link {
+        display: block;
+        height: 100%;
+        text-decoration: none;
+        color: inherit;
+        border-radius: 18px;
+    }
+
+    .dash-kpi-link:hover,
+    .dash-kpi-link:focus {
+        color: inherit;
+        text-decoration: none;
+    }
+
+    .dash-kpi-card {
+        transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }
+
+    .dash-kpi-link:hover .dash-kpi-card,
+    .dash-kpi-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 16px 34px rgba(15, 23, 42, .10);
+        border-color: color-mix(in srgb, var(--brand-1) 28%, var(--border-soft));
+    }
+
+    .dash-kpi-open {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        width: 26px;
+        height: 26px;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        color: var(--text-muted);
+        background: color-mix(in srgb, var(--card-bg) 90%, var(--body-bg));
+        border: 1px solid var(--border-soft);
+        z-index: 2;
+    }
+
+    .dash-kpi-open svg {
+        width: 13px;
+        height: 13px;
     }
 
     .dash-kpi-card:after {
@@ -1666,7 +1862,14 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
         border-radius: 18px;
         padding: 16px;
         background: color-mix(in srgb, var(--card-bg) 96%, var(--body-bg));
-        height: 100%
+        height: 100%;
+        transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }
+
+    .stage-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 12px 28px rgba(15, 23, 42, .08);
+        border-color: color-mix(in srgb, var(--brand-1) 24%, var(--border-soft));
     }
 
     .stage-card h6 {
@@ -2369,22 +2572,32 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                             <div class="dashboard-role-chip"><i data-lucide="shield-check"></i><?= e($roleName) ?></div>
                             <div class="dashboard-date-chip"><i
                                     data-lucide="calendar-days"></i><?= e(date('d M Y, l')) ?></div>
+                            <button type="button" class="dashboard-refresh-btn" onclick="window.location.reload()"
+                                title="Refresh dashboard">
+                                <i data-lucide="refresh-cw"></i> Refresh
+                            </button>
                         </div>
                     </div>
                 </div>
 
                 <div class="row g-3 mb-3">
                     <?php foreach ($kpiCards as $card): ?>
+                    <?php $kpiUrl = trim((string)($card['url'] ?? '')); ?>
                     <div class="col-12 col-sm-6 col-xl-3">
-                        <div class="card-ui dash-kpi-card h-100">
-                            <div class="dash-kpi-icon" style="background:<?= e($card['color']) ?>"><i
-                                    data-lucide="<?= e($card['icon']) ?>"></i></div>
-                            <div>
-                                <span class="dash-kpi-label"><?= e($card['label']) ?></span>
-                                <span class="dash-kpi-value"><?= e($card['value']) ?></span>
-                                <span class="dash-kpi-sub"><?= e($card['sub']) ?></span>
+                        <?php if ($kpiUrl !== ''): ?><a href="<?= e($kpiUrl) ?>" class="dash-kpi-link"><?php endif; ?>
+                            <div class="card-ui dash-kpi-card h-100">
+                                <div class="dash-kpi-icon" style="background:<?= e($card['color']) ?>"><i
+                                        data-lucide="<?= e($card['icon']) ?>"></i></div>
+                                <div>
+                                    <span class="dash-kpi-label"><?= e($card['label']) ?></span>
+                                    <span class="dash-kpi-value"><?= e($card['value']) ?></span>
+                                    <span class="dash-kpi-sub"><?= e($card['sub']) ?></span>
+                                </div>
+                                <?php if ($kpiUrl !== ''): ?><span class="dash-kpi-open"><i
+                                        data-lucide="arrow-up-right"></i></span><?php endif; ?>
                             </div>
-                        </div>
+                            <?php if ($kpiUrl !== ''): ?>
+                        </a><?php endif; ?>
                     </div>
                     <?php endforeach; ?>
                 </div>
@@ -2510,93 +2723,98 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                 </div>
                 <?php if ($roleGroup === 'admin'): ?>
                 <div class="row g-3 mb-3">
+                    <div class="col-12 col-xl-8">
+                        <div class="card-ui dashboard-card h-100">
+                            <div
+                                class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
+                                <div>
+                                    <h2 class="dashboard-card-title">Production Pipeline</h2>
+                                    <p class="text-muted-custom mb-0">Current active Job Cards grouped by their present
+                                        workflow stage.</p>
+                                </div>
+                                <a href="job_cards.php"
+                                    class="btn btn-sm btn-outline-primary rounded-pill fw-bold px-3">
+                                    View Job Cards
+                                </a>
+                            </div>
+
+                            <?php if (!$stageSummary): ?>
+                            <div class="empty-box">No active production stages found.</div>
+                            <?php else: ?>
+                            <div class="stage-grid">
+                                <?php foreach (array_slice($stageSummary, 0, 8) as $stage): ?>
+                                <div class="stage-card">
+                                    <h6><?= e($stage['step_name'] ?? 'Stage') ?></h6>
+                                    <strong><?= number_format((int)($stage['total_jobs'] ?? 0)) ?></strong>
+                                    <p>Current jobs</p>
+                                </div>
+                                <?php endforeach; ?>
+                            </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+
+                    <div class="col-12 col-xl-4">
+                        <div class="card-ui dashboard-card h-100">
+                            <div class="d-flex justify-content-between align-items-center gap-3 mb-3">
+                                <div>
+                                    <h2 class="dashboard-card-title">Printing Workload</h2>
+                                    <p class="text-muted-custom mb-0">Active jobs by printing type.</p>
+                                </div>
+                                <i data-lucide="printer"></i>
+                            </div>
+
+                            <?php if (!$adminPrintingWorkload): ?>
+                            <div class="empty-box">No active printing workload found.</div>
+                            <?php else: ?>
+                            <div class="row g-2">
+                                <?php foreach ($adminPrintingWorkload as $workload): ?>
+                                <div class="col-12 col-sm-6 col-xl-12">
+                                    <div class="stage-card d-flex justify-content-between align-items-center gap-3">
+                                        <div>
+                                            <h6 class="mb-1"><?= e($workload['printing_name'] ?? 'Printing') ?></h6>
+                                            <p class="mt-0">Active production</p>
+                                        </div>
+                                        <strong><?= number_format((int)($workload['total_jobs'] ?? 0)) ?></strong>
+                                    </div>
+                                </div>
+                                <?php endforeach; ?>
+                            </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <?php if ($roleGroup === 'design'): ?>
+                <div class="row g-3 mb-3">
                     <div class="col-12">
                         <div class="card-ui dashboard-card">
                             <div
                                 class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-3">
                                 <div>
-                                    <h2 class="dashboard-card-title">Design &amp; Printing Assignment Monitor</h2>
-                                    <p class="text-muted-custom mb-0">Admin-only overview of assigned designer, printing
-                                        person, current stage and delivery.</p>
+                                    <h2 class="dashboard-card-title">My Design Pipeline</h2>
+                                    <p class="text-muted-custom mb-0">Live stage summary for Job Cards allocated to you.
+                                    </p>
                                 </div>
-                                <div class="d-flex flex-wrap gap-2 align-items-center">
-                                    <span class="status-pill">Design Assigned:
-                                        <?= number_format($adminAssignedDesignJobs) ?></span>
-                                    <span
-                                        class="status-pill <?= $adminUnassignedDesignJobs > 0 ? 'text-danger' : '' ?>">Design
-                                        Unassigned:
-                                        <?= number_format($adminUnassignedDesignJobs) ?></span>
-                                    <span class="status-pill">Print Assigned:
-                                        <?= number_format($adminAssignedPrintingJobs) ?></span>
-                                    <span
-                                        class="status-pill <?= $adminUnassignedPrintingJobs > 0 ? 'text-danger' : '' ?>">Print
-                                        Unassigned:
-                                        <?= number_format($adminUnassignedPrintingJobs) ?></span>
-                                    <a href="job_cards.php"
-                                        class="btn btn-sm btn-primary rounded-pill fw-bold px-3">View All Job Cards</a>
-                                </div>
+                                <a href="job_cards.php"
+                                    class="btn btn-sm btn-outline-primary rounded-pill fw-bold px-3">
+                                    Open My Job Cards
+                                </a>
                             </div>
-
-                            <?php if (!$adminAssignments): ?>
-                            <div class="empty-box">No Job Card assignments found.</div>
+                            <?php if (!$stageSummary): ?>
+                            <div class="empty-box">No active design / proofing jobs assigned to you.</div>
                             <?php else: ?>
-                            <div class="table-responsive">
-                                <table class="queue-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Job Card</th>
-                                            <th>Designer</th>
-                                            <th>Printing / Person</th>
-                                            <th>Current Stage</th>
-                                            <th>Delivery</th>
-                                            <th class="text-end">Action</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php foreach ($adminAssignments as $assignment): ?>
-                                        <tr>
-                                            <td>
-                                                <div class="queue-ref"><?= e($assignment['job_card_no'] ?? '-') ?></div>
-                                                <div class="queue-meta"><?= e($assignment['customer_name'] ?? '-') ?> |
-                                                    <?= e($assignment['product_name'] ?? '-') ?></div>
-                                            </td>
-                                            <td>
-                                                <?php if (!empty($assignment['designer_username'])): ?>
-                                                <div class="queue-ref"><?= e($assignment['designer_name'] ?? '-') ?>
-                                                </div>
-                                                <?php else: ?>
-                                                <span class="badge text-bg-warning">Unassigned</span>
-                                                <?php endif; ?>
-                                            </td>
-                                            <td>
-                                                <div class="queue-ref"><?= e($assignment['printing_name'] ?? '-') ?>
-                                                </div>
-                                                <?php if (!empty($assignment['printer_username'])): ?>
-                                                <div class="queue-meta">
-                                                    <?= e($assignment['printer_name'] ?? '-') ?><?= !empty($assignment['printer_role']) ? ' — ' . e($assignment['printer_role']) : '' ?>
-                                                </div>
-                                                <?php elseif (!empty($assignment['printing_name'])): ?>
-                                                <span class="badge text-bg-warning">Unassigned</span>
-                                                <?php else: ?>
-                                                <span class="queue-meta">-</span>
-                                                <?php endif; ?>
-                                            </td>
-                                            <td>
-                                                <span
-                                                    class="status-pill"><?= e($assignment['current_step'] ?? '-') ?></span>
-                                                <div class="queue-meta mt-1">
-                                                    <?= e($assignment['status_name'] ?? '-') ?><?= !empty($assignment['is_delayed']) ? ' | Delayed' : '' ?>
-                                                </div>
-                                            </td>
-                                            <td><?= e(dash_date($assignment['delivery_date'] ?? null)) ?></td>
-                                            <td class="text-end">
-                                                <a href="job_card_view.php?id=<?= (int)$assignment['id'] ?>"
-                                                    class="btn btn-sm btn-outline-primary rounded-pill fw-bold px-3">Open</a>
-                                            </td>
-                                        </tr>
-                                        <?php endforeach; ?>
-                                    </tbody>
-                                </table>
+                            <div class="stage-grid">
+                                <?php foreach (array_slice($stageSummary, 0, 8) as $stage): ?>
+                                <a href="job_cards.php" class="text-decoration-none text-reset">
+                                    <div class="stage-card">
+                                        <h6><?= e($stage['step_name'] ?? 'Stage') ?></h6>
+                                        <strong><?= number_format((int)($stage['total_jobs'] ?? 0)) ?></strong>
+                                        <p>Assigned current jobs</p>
+                                    </div>
+                                </a>
+                                <?php endforeach; ?>
                             </div>
                             <?php endif; ?>
                         </div>
@@ -2672,6 +2890,51 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                     </div>
                                 </div>
                             </div>
+                            <?php elseif ($roleGroup === 'design'): ?>
+                            <div class="d-flex justify-content-between align-items-center gap-3 mb-3">
+                                <div>
+                                    <h2 class="dashboard-card-title">My Design Summary</h2>
+                                    <p class="text-muted-custom mb-0">Personal workload snapshot.</p>
+                                </div>
+                                <i data-lucide="palette"></i>
+                            </div>
+                            <div class="row g-3">
+                                <div class="col-6">
+                                    <a href="job_cards.php" class="text-decoration-none text-reset">
+                                        <div class="stage-card">
+                                            <h6>Total Assigned</h6>
+                                            <strong><?= number_format($designerTotalAssignedJobs) ?></strong>
+                                            <p>Your Job Cards</p>
+                                        </div>
+                                    </a>
+                                </div>
+                                <div class="col-6">
+                                    <a href="job_cards.php" class="text-decoration-none text-reset">
+                                        <div class="stage-card">
+                                            <h6>This Month Done</h6>
+                                            <strong><?= number_format($designerCompletedThisMonth) ?></strong>
+                                            <p><?= e(date('M Y')) ?></p>
+                                        </div>
+                                    </a>
+                                </div>
+                                <div class="col-6">
+                                    <a href="job_cards.php" class="text-decoration-none text-reset">
+                                        <div class="stage-card">
+                                            <h6>Due Today</h6>
+                                            <strong><?= number_format($designerDueTodayJobs) ?></strong>
+                                            <p>Your assigned jobs</p>
+                                        </div>
+                                    </a>
+                                </div>
+                                <div class="col-6">
+                                    <a href="job_cards.php" class="text-decoration-none text-reset">
+                                        <div class="stage-card">
+                                            <h6>Delayed</h6><strong><?= number_format($designerDelayedJobs) ?></strong>
+                                            <p>Needs attention</p>
+                                        </div>
+                                    </a>
+                                </div>
+                            </div>
                             <?php else: ?>
                             <div class="d-flex justify-content-between align-items-center gap-3 mb-3">
                                 <div>
@@ -2743,7 +3006,7 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                             <td>
                                                 <div class="queue-ref"><?= e($row['details'] ?: '-') ?></div>
                                                 <div class="queue-meta">Delivery:
-                                                    <?= e(dash_date($row['delivery_date'] ?? null)) ?><?php if ($roleGroup !== 'printing'): ?>
+                                                    <?= e(dash_date($row['delivery_date'] ?? null)) ?><?php if (!in_array($roleGroup, ['printing','design'], true)): ?>
                                                     | Balance:
                                                     <?= e(dash_money($row['balance_amount'] ?? 0)) ?><?php endif; ?>
                                                 </div>
