@@ -2178,6 +2178,7 @@ $isDesignRole = in_array($roleKey, $designRoleKeys, true);
 $isSpecificPrintingRole = in_array($roleKey, $printingRoleKeys, true);
 $isGeneralPrintingRole = $roleKey === 'printing';
 $isAdminMonitor = in_array($roleKey, ['admin', 'super_admin', 'business_admin'], true);
+$isPrintingJobView = $isSpecificPrintingRole || $isGeneralPrintingRole;
 
 $canUpdateJob = false;
 $manualApprovalRoleKeys = [
@@ -4081,6 +4082,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                 </div>
                 <?php else: ?>
 
+                <?php if (!$isPrintingJobView): ?>
                 <div class="row g-3 mb-3">
                     <div class="col-12 col-md-4">
                         <div class="amount-card">
@@ -4103,7 +4105,44 @@ if ($message !== '' && $toastTitle === 'Info') {
                         </div>
                     </div>
                 </div>
+                <?php endif; ?>
 
+                <?php if ($isPrintingJobView): ?>
+                <div class="card-ui module-card mb-3">
+                    <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-4">
+                        <div>
+                            <h2 class="module-title mb-1"><?= e($job['job_card_no']) ?></h2>
+                            <p class="text-muted-custom mb-0">Printing Job Details</p>
+                        </div>
+
+                        <span class="status-pill <?= e(jcvStatusClass($statusKey)) ?>">
+                            <?= e($job['status_name'] ?? 'Status') ?>
+                        </span>
+                    </div>
+
+                    <div class="row g-3">
+                        <div class="col-12 col-md-6">
+                            <div class="info-card h-100">
+                                <small>Type of Printing</small>
+                                <strong>
+                                    <?= e($job['printing_name'] ?? '-') ?>
+                                    <?php if (!empty($job['sub_type_name'])): ?>
+                                    <span
+                                        class="d-block text-muted-custom small mt-1"><?= e($job['sub_type_name']) ?></span>
+                                    <?php endif; ?>
+                                </strong>
+                            </div>
+                        </div>
+
+                        <div class="col-12 col-md-6">
+                            <div class="info-card h-100">
+                                <small>Expected Delivery Date</small>
+                                <strong><?= e(jcvDate($job['delivery_date'] ?? null)) ?></strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <?php else: ?>
                 <div class="card-ui module-card mb-3">
                     <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-4">
                         <div>
@@ -4222,6 +4261,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                         </div>
                     </div>
                 </div>
+                <?php endif; ?>
 
                 <div class="card-ui module-card mb-3">
                     <div class="job-items-card">
@@ -4229,8 +4269,9 @@ if ($message !== '' && $toastTitle === 'Info') {
                             <div>
                                 <h2 class="module-title mb-1">Products in this Job Card</h2>
                                 <p class="text-muted-custom mb-0">
-                                    All products created under the same Job Card ID. Workflow/status remains common for
-                                    the complete Job Card.
+                                    <?= $isPrintingJobView
+                                        ? 'Product name and quantity assigned for this printing Job Card.'
+                                        : 'All products created under the same Job Card ID. Workflow/status remains common for the complete Job Card.' ?>
                                 </p>
                             </div>
 
@@ -4238,7 +4279,9 @@ if ($message !== '' && $toastTitle === 'Info') {
                                 <span><?= number_format($jobItemCount) ?>
                                     Product<?= $jobItemCount === 1 ? '' : 's' ?></span>
                                 <span>Total Qty: <?= number_format($jobItemTotalQty, 2) ?></span>
+                                <?php if (!$isPrintingJobView): ?>
                                 <span>Product Total: <?= e(jcvMoney($jobItemProductTotal)) ?></span>
+                                <?php endif; ?>
                             </div>
                         </div>
 
@@ -4254,8 +4297,10 @@ if ($message !== '' && $toastTitle === 'Info') {
                                         <th style="width:60px;">#</th>
                                         <th>Product</th>
                                         <th class="text-end">Qty</th>
+                                        <?php if (!$isPrintingJobView): ?>
                                         <th class="text-end">Rate / Unit</th>
                                         <th class="text-end">Product Total</th>
+                                        <?php endif; ?>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -4266,8 +4311,10 @@ if ($message !== '' && $toastTitle === 'Info') {
                                             <strong><?= e($jobItem['item_name'] ?? 'Cards') ?></strong>
                                         </td>
                                         <td class="text-end"><?= number_format((float)($jobItem['qty'] ?? 0), 2) ?></td>
+                                        <?php if (!$isPrintingJobView): ?>
                                         <td class="text-end"><?= e(jcvMoney($jobItem['rate'] ?? 0)) ?></td>
                                         <td class="text-end fw-bold"><?= e(jcvMoney($jobItem['amount'] ?? 0)) ?></td>
+                                        <?php endif; ?>
                                     </tr>
                                     <?php endforeach; ?>
                                 </tbody>
