@@ -673,7 +673,7 @@ if ($editQuotationId > 0) {
 }
 
 $quotations = cpFetchAll($conn, "SELECT q.*, e.enquiry_no, e.created_at AS enquiry_created_at, e.updated_at AS enquiry_completed_at, ft.function_name, ft.field_group, c.gst_number, c.address AS customer_address FROM quotations q LEFT JOIN enquiries e ON e.id = q.enquiry_id LEFT JOIN function_types ft ON ft.id = q.function_type_id LEFT JOIN customers c ON c.id = q.customer_id LEFT JOIN proforma_bills pb ON pb.quotation_id = q.id WHERE {$quotationWhere} ORDER BY q.id DESC LIMIT 500");
-$functionTypes = cpFetchAll($conn, "SELECT id, function_name, field_group FROM function_types WHERE is_active = 1 ORDER BY sort_order ASC, function_name ASC");
+$functionTypes = cpFetchAll($conn, "SELECT id, function_name, function_key, field_group FROM function_types WHERE is_active = 1 ORDER BY sort_order ASC, function_name ASC");
 $proformaStatuses = cpFetchAll($conn, "SELECT id, status_name, status_key, color_code FROM proforma_statuses WHERE is_active = 1 ORDER BY sort_order ASC, id ASC");
 $defaultProformaStatusId = 0;
 foreach ($proformaStatuses as $statusRow) {
@@ -927,14 +927,81 @@ $designerUsers = cpFetchAll($conn, "
       )
     ORDER BY u.name ASC, u.username ASC
 ");
-$readymadeSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order, is_final_step FROM workflow_steps WHERE order_type = 'readymade' AND is_active = 1 ORDER BY sort_order ASC");
+/*
+ * Normal Readymade keeps the existing workflow. Binding is a Bill Book-only
+ * production step, so exclude it from every other Readymade function type.
+ */
+$readymadeSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order, is_final_step FROM workflow_steps WHERE order_type = 'readymade' AND is_active = 1 AND step_key <> 'binding' ORDER BY sort_order ASC");
+
+/*
+ * Bill Book is still order_type = readymade. It shares the normal Readymade
+ * flow through Master Copy Received, then uses Printing -> Binding -> Dispatch
+ * -> Completed -> Google Review.
+ */
+$billBookSteps = cpFetchAll($conn, "
+    SELECT
+        id,
+        step_name,
+        step_key,
+        CASE step_key
+            WHEN 'enquiry' THEN 1
+            WHEN 'sales_order_proforma_invoice' THEN 2
+            WHEN 'proofing' THEN 3
+            WHEN 'proofing_approval' THEN 4
+            WHEN 'master_copy' THEN 5
+            WHEN 'master_copy_received' THEN 6
+            WHEN 'printing' THEN 7
+            WHEN 'binding' THEN 8
+            WHEN 'dispatched' THEN 9
+            WHEN 'completed' THEN 10
+            WHEN 'google_review_sent' THEN 11
+            ELSE 99
+        END AS sort_order,
+        is_final_step
+    FROM workflow_steps
+    WHERE order_type = 'readymade'
+      AND is_active = 1
+      AND step_key IN (
+          'enquiry',
+          'sales_order_proforma_invoice',
+          'proofing',
+          'proofing_approval',
+          'master_copy',
+          'master_copy_received',
+          'printing',
+          'binding',
+          'dispatched',
+          'completed',
+          'google_review_sent'
+      )
+    ORDER BY FIELD(
+        step_key,
+        'enquiry',
+        'sales_order_proforma_invoice',
+        'proofing',
+        'proofing_approval',
+        'master_copy',
+        'master_copy_received',
+        'printing',
+        'binding',
+        'dispatched',
+        'completed',
+        'google_review_sent'
+    )
+");
+
 $customizedSteps = cpFetchAll($conn, "SELECT id, step_name, step_key, sort_order, is_final_step FROM workflow_steps WHERE order_type = 'customized' AND is_active = 1 ORDER BY sort_order ASC");
 
 $quotationJson = json_encode($quotations, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $subTypeJson = json_encode($printingSubTypes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $printingTypeJson = json_encode($printingTypes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $printingUsersJson = json_encode($printingUsers, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
-$stepsJson = json_encode(['readymade' => $readymadeSteps, 'printing_only' => $readymadeSteps, 'customized' => $customizedSteps], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+$stepsJson = json_encode([
+    'readymade' => $readymadeSteps,
+    'bill_book' => $billBookSteps,
+    'printing_only' => $readymadeSteps,
+    'customized' => $customizedSteps
+], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $plannedDatesJson = json_encode($plannedDates ?: new stdClass(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $editJson = json_encode($editData ?: null, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
 $editItemsJson = json_encode($editItems ?: [], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
@@ -2273,7 +2340,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                         <div class="col-md-4"><label class="form-label fw-bold">Function / Product Type</label><select
                                 name="function_type_id" id="function_type_id" class="form-select select2-autotype">
                                 <option value="">Select Type</option><?php foreach ($functionTypes as $type): ?><option
-                                    value="<?= e($type['id']) ?>" data-field-group="<?= e($type['field_group']) ?>">
+                                    value="<?= e($type['id']) ?>" data-field-group="<?= e($type['field_group']) ?>"
+                                    data-function-key="<?= e($type['function_key'] ?? '') ?>">
                                     <?= e($type['function_name']) ?></option><?php endforeach; ?>
                             </select></div>
                         <div class="col-md-4 wedding-field"><label class="form-label fw-bold">Groom Name</label><input
@@ -2318,8 +2386,10 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                         </select>
                                     </div>
                                     <div class="col-md-3">
-                                        <label class="form-label fw-bold">Designing Person <span class="text-danger">*</span></label>
-                                        <select name="assigned_design_user_id" id="assigned_design_user_id" class="form-select">
+                                        <label class="form-label fw-bold">Designing Person <span
+                                                class="text-danger">*</span></label>
+                                        <select name="assigned_design_user_id" id="assigned_design_user_id"
+                                            class="form-select">
                                             <option value="">Select Designing Person</option>
                                             <?php foreach ($designerUsers as $designerUser): ?>
                                             <option value="<?= (int)$designerUser['id'] ?>">
@@ -2327,7 +2397,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
                                             </option>
                                             <?php endforeach; ?>
                                         </select>
-                                        <small class="text-muted-custom">Assigned to every Job Card created from this Proforma.</small>
+                                        <small class="text-muted-custom">Assigned to every Job Card created from this
+                                            Proforma.</small>
                                     </div>
                                     <div class="col-md-6 printing-only-product-field">
                                         <label class="form-label fw-bold">Product Master *</label>
@@ -3225,7 +3296,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         }
 
         ['quotation_id', 'function_type_id', 'proforma_status_id', 'product_id', 'order_type', 'printing_type_id',
-            'printing_sub_type_id', 'assigned_design_user_id', 'assigned_printing_user_id', 'custom_printing_user_id', 'lamination_type',
+            'printing_sub_type_id', 'assigned_design_user_id', 'assigned_printing_user_id', 'custom_printing_user_id',
+            'lamination_type',
             'printing_side', 'screening_type', 'payment_mode'
         ].forEach(refreshSelect);
 
@@ -4248,8 +4320,22 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         });
     }
 
+    function selectedFunctionKey() {
+        const opt = document.getElementById('function_type_id')?.selectedOptions?. [0];
+        return String(opt?.dataset?.functionKey || '').trim().toLowerCase();
+    }
+
+    function workflowDataKey() {
+        const type = getValue('order_type') || 'readymade';
+        if (type === 'readymade' && selectedFunctionKey() === 'bill_book') {
+            return 'bill_book';
+        }
+        return type;
+    }
+
     function renderWorkflowSteps() {
         const type = getValue('order_type') || 'readymade';
+        const dataKey = workflowDataKey();
         const box = document.getElementById('workflowSteps');
         if (!box) return;
 
@@ -4264,7 +4350,7 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
 
         box.innerHTML = '';
 
-        (workflowData[type] || []).forEach(step => {
+        (workflowData[dataKey] || []).forEach(step => {
             const stepId = String(step.id || '');
             const saved = plannedStepData[stepId] || {};
             const defaultStart = defaultPlannedDateForStep(step, 'start');
@@ -4388,7 +4474,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         const lamination = document.getElementById('lamination_required');
         if (lamination) lamination.checked = parseInt(editData.item_lamination_required || 0, 10) === 1;
         ['quotation_id', 'function_type_id', 'proforma_status_id', 'product_id', 'order_type', 'printing_type_id',
-            'printing_sub_type_id', 'assigned_design_user_id', 'assigned_printing_user_id', 'custom_printing_user_id', 'lamination_type',
+            'printing_sub_type_id', 'assigned_design_user_id', 'assigned_printing_user_id', 'custom_printing_user_id',
+            'lamination_type',
             'printing_side', 'screening_type', 'payment_mode'
         ].forEach(refreshSelect);
     }
@@ -5367,6 +5454,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
     document.getElementById('function_type_id')?.addEventListener('change', () => {
         toggleFunctionFields();
         syncBillingDetails();
+        renderWorkflowSteps();
+        saveFormDraft();
     });
     ['customer_name', 'mobile', 'groom_name', 'bride_name'].forEach(id => {
         document.getElementById(id)?.addEventListener('input', syncBillingDetails);
@@ -5451,6 +5540,8 @@ $editReservationJson = json_encode($editReservationMap ?: new stdClass(), JSON_H
         $('#function_type_id').on('select2:select select2:clear', function() {
             toggleFunctionFields();
             syncBillingDetails();
+            renderWorkflowSteps();
+            saveFormDraft();
         });
         $('#product_id').on('select2:select select2:clear', productChanged);
     }

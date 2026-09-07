@@ -1567,6 +1567,8 @@ function pb_readymade_printing_steps(): array
     return [
         'master_copy_received',
         'printing',
+        /* Bill Book-only production step. Other Readymade jobs do not load it. */
+        'binding',
         'drying',
         'packing',
         'send_to_dispatch'
@@ -1647,6 +1649,26 @@ function pb_function_type_id(mysqli $conn, string $value): ?int
         return $newId;
     } catch (Throwable $e) {
         throw new RuntimeException('Unable to create new function type: ' . $e->getMessage());
+    }
+}
+
+
+/** Resolve the stable Function Type key used for workflow branching. */
+function pb_function_type_key(mysqli $conn, ?int $functionTypeId): string
+{
+    if (!$functionTypeId || !pb_table_exists($conn, 'function_types')) {
+        return '';
+    }
+
+    try {
+        $stmt = $conn->prepare("SELECT function_key FROM function_types WHERE id = ? LIMIT 1");
+        $stmt->bind_param('i', $functionTypeId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return strtolower(trim((string)($row['function_key'] ?? '')));
+    } catch (Throwable $e) {
+        return '';
     }
 }
 
@@ -2349,6 +2371,9 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
     $firstItem = $items[0];
     $orderType = (string)$bill['order_type'];
     $workflowOrderType = $orderType === 'printing_only' ? 'readymade' : $orderType;
+    $functionTypeIdForWorkflow = !empty($bill['function_type_id']) ? (int)$bill['function_type_id'] : null;
+    $functionTypeKeyForWorkflow = pb_function_type_key($conn, $functionTypeIdForWorkflow);
+    $isBillBookWorkflow = ($orderType === 'readymade' && $functionTypeKeyForWorkflow === 'bill_book');
     $jobNo = pb_next_no($conn, 'job_cards', 'job_card_no', 'SC-JOB');
     $trackingToken = bin2hex(random_bytes(24));
     $currentStepId = pb_first_workflow_step($conn, $orderType);
@@ -2490,15 +2515,71 @@ function pb_create_job_card(mysqli $conn, int $proformaId, array $plannedDates =
         pb_insert_job_card_item_compatible($conn, $jobCardId, $item);
     }
 
-    $stmt = $conn->prepare("
-        SELECT ws.*, r.id AS role_id
-        FROM workflow_steps ws
-        LEFT JOIN roles r ON r.role_key = ws.default_owner_role_key
-        WHERE ws.order_type = ?
-          AND ws.is_active = 1
-        ORDER BY ws.sort_order ASC
-    ");
-    $stmt->bind_param('s', $workflowOrderType);
+    /*
+     * Bill Book is a special Readymade function type, not a new order_type.
+     * Keep the standard Readymade stages through Master Copy Received, then use:
+     * Printing -> Binding -> Dispatch -> Completed -> Google Review.
+     *
+     * All other Readymade function types keep the existing workflow and explicitly
+     * exclude the Bill Book-only Binding master step.
+     */
+    if ($isBillBookWorkflow) {
+        $stmt = $conn->prepare("
+            SELECT ws.*, r.id AS role_id
+            FROM workflow_steps ws
+            LEFT JOIN roles r ON r.role_key = ws.default_owner_role_key
+            WHERE ws.order_type = 'readymade'
+              AND ws.is_active = 1
+              AND ws.step_key IN (
+                    'enquiry',
+                    'sales_order_proforma_invoice',
+                    'proofing',
+                    'proofing_approval',
+                    'master_copy',
+                    'master_copy_received',
+                    'printing',
+                    'binding',
+                    'dispatched',
+                    'completed',
+                    'google_review_sent'
+              )
+            ORDER BY FIELD(
+                ws.step_key,
+                'enquiry',
+                'sales_order_proforma_invoice',
+                'proofing',
+                'proofing_approval',
+                'master_copy',
+                'master_copy_received',
+                'printing',
+                'binding',
+                'dispatched',
+                'completed',
+                'google_review_sent'
+            )
+        ");
+    } elseif ($workflowOrderType === 'readymade') {
+        $stmt = $conn->prepare("
+            SELECT ws.*, r.id AS role_id
+            FROM workflow_steps ws
+            LEFT JOIN roles r ON r.role_key = ws.default_owner_role_key
+            WHERE ws.order_type = 'readymade'
+              AND ws.is_active = 1
+              AND ws.step_key <> 'binding'
+            ORDER BY ws.sort_order ASC
+        ");
+    } else {
+        $stmt = $conn->prepare("
+            SELECT ws.*, r.id AS role_id
+            FROM workflow_steps ws
+            LEFT JOIN roles r ON r.role_key = ws.default_owner_role_key
+            WHERE ws.order_type = ?
+              AND ws.is_active = 1
+            ORDER BY ws.sort_order ASC
+        ");
+        $stmt->bind_param('s', $workflowOrderType);
+    }
+
     $stmt->execute();
     $res = $stmt->get_result();
 
