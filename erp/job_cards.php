@@ -515,7 +515,7 @@ function jcSendReadymadeScreenStartWhatsapp(mysqli $conn, array $job): array
 
     $customerName = trim((string)($job['customer_name'] ?? 'Customer')) ?: 'Customer';
     $jobNo = trim((string)($job['job_card_no'] ?? ($job['job_no'] ?? '')));
-    $productName = trim((string)($job['product_name'] ?? 'Cards')) ?: 'Cards';
+    $productName = trim((string)($job['resolved_product_name'] ?? $job['product_name'] ?? 'Cards')) ?: 'Cards';
     $trackingLink = jcBuildCustomerTrackingLink($job);
     $deliveryDate = !empty($job['delivery_date'])
         ? date('d-m-Y', strtotime((string)$job['delivery_date']))
@@ -739,11 +739,14 @@ function jcRunReadymadeScreenShortcut(mysqli $conn, int $jobId, string $shortcut
     $stmt = $conn->prepare("
         SELECT
             jc.*,
+            p.product_name AS resolved_product_name,
             pt.printing_name,
             pt.printing_key,
             pt.role_key AS printing_role_key,
             rprint.role_key AS assigned_printing_role_key
         FROM job_cards jc
+        LEFT JOIN products p
+            ON p.id = jc.product_id
         LEFT JOIN printing_types pt
             ON pt.id = jc.printing_type_id
         LEFT JOIN roles rprint
