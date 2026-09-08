@@ -541,6 +541,27 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
                     'required' => true
                 ]
             ],
+            'dispatch_challan' => [
+                'meta_id' => null,
+                'module' => 'Dispatch',
+                'body_variables' => [
+                    'customer_name',
+                    'dispatch_challan_no',
+                    'job_card_no',
+                    'product_name',
+                    'quantity',
+                    'dispatch_date',
+                    'dispatch_mode',
+                    'dispatch_reference'
+                ],
+                'button' => [
+                    'index' => '0',
+                    'sub_type' => 'url',
+                    'variable' => 'dispatch_challan_link',
+                    'value_mode' => 'query:token',
+                    'required' => true
+                ]
+            ],
             'google_review_link' => [
                 'meta_id' => '14922693262765208',
                 'module' => 'Reviews',
@@ -645,7 +666,15 @@ if (!function_exists('subhiksha_meta_variable_value')) {
             'stage_name' => ['current_stage', 'completed_stage'],
             'status_name' => ['status'],
             'delay_reason' => ['delay_reason_name'],
-            'dispatch_reference' => ['reference_no', 'dispatch_no']
+            'dispatch_challan_no' => ['dispatch_no', 'challan_no'],
+            'quantity' => ['qty', 'total_qty'],
+            'dispatch_mode' => ['delivery_mode', 'courier_name'],
+            'dispatch_reference' => ['reference_no', 'dispatch_no', 'tracking_no', 'lr_no'],
+            'dispatch_challan_link' => [
+                'challan_link',
+                'dispatch_link',
+                'dispatch_challan_url'
+            ]
         ];
 
         foreach (($aliases[$variableKey] ?? []) as $alias) {
