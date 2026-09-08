@@ -7,6 +7,16 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+/* Dispatch Challan + secure WhatsApp link support. Existing dispatch workflow remains unchanged. */
+$dispatchChallanHelper = __DIR__ . '/includes/dispatch-challan-pdf.php';
+if (is_file($dispatchChallanHelper)) {
+    require_once $dispatchChallanHelper;
+}
+$dispatchWhatsappHelper = __DIR__ . '/includes/whatsapp-api.php';
+if (is_file($dispatchWhatsappHelper)) {
+    require_once $dispatchWhatsappHelper;
+}
+
 if (!defined('DSP_DATABASE_TIMEZONE')) {
     define('DSP_DATABASE_TIMEZONE', 'UTC');
 }
@@ -414,13 +424,92 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST'  && ($_POST['action'] ?? '') === 'mark
             dspUpdateColumns($conn, 'job_cards', $data, $jobId);
             dspLog($conn, 'dispatch_job_card', $jobId, 'Job card marked as dispatched.');
 
-            header('Location: dispatch.php?filter=dispatched&msg=dispatched');
+            /*
+             * Keep the existing Dispatch status update authoritative.
+             * Challan generation / WhatsApp is an after-save notification step:
+             * failure here must NOT undo or block the existing Dispatch action.
+             */
+            $challanStatus = 'failed';
+            $waStatus = 'not_attempted';
+
+            try {
+                if (
+                    function_exists('sdc_ensure_dispatch_record')
+                    && function_exists('sdc_generate_dispatch_challan_pdf')
+                ) {
+                    $dispatchRecord = sdc_ensure_dispatch_record($conn, $jobId, [
+                        'dispatch_date' => $dispatchDate,
+                        'delivery_mode' => $deliveryMode,
+                        'delivery_person' => $deliveryPerson,
+                        'tracking_no' => $trackingNo,
+                        'remarks' => $remarks,
+                    ]);
+
+                    $pdfResult = sdc_generate_dispatch_challan_pdf(
+                        $conn,
+                        $jobId,
+                        !empty($dispatchRecord['id']) ? (int)$dispatchRecord['id'] : null
+                    );
+                    $challanStatus = !empty($pdfResult['success']) ? 'generated' : 'failed';
+
+                    if (
+                        $challanStatus === 'generated'
+                        && function_exists('sdc_send_dispatch_challan_whatsapp')
+                    ) {
+                        $waResult = sdc_send_dispatch_challan_whatsapp($conn, $jobId, $pdfResult);
+                        $waStatus = !empty($waResult['success']) ? 'sent' : 'failed';
+                    }
+                }
+            } catch (Throwable $challanError) {
+                $challanStatus = 'failed';
+                $waStatus = 'failed';
+            }
+
+            header(
+                'Location: dispatch.php?filter=dispatched&msg=dispatched'
+                . '&challan=' . rawurlencode($challanStatus)
+                . '&wa=' . rawurlencode($waStatus)
+            );
             exit;
         } catch (Throwable $e) {
             $message = 'Dispatch update failed: ' . $e->getMessage();
             $messageType = 'danger';
             $toastTitle = 'Failed';
         }
+    }
+}
+
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'send_dispatch_challan_whatsapp') {
+    dspCsrf();
+
+    $jobId = (int)($_POST['job_card_id'] ?? 0);
+    $returnFilter = strtolower(trim((string)($_POST['return_filter'] ?? 'dispatched')));
+    if (!in_array($returnFilter, ['ready', 'dispatched', 'completed'], true)) {
+        $returnFilter = 'dispatched';
+    }
+
+    if ($jobId <= 0) {
+        header('Location: dispatch.php?filter=' . rawurlencode($returnFilter) . '&msg=challan_whatsapp_failed');
+        exit;
+    }
+
+    try {
+        if (!function_exists('sdc_generate_dispatch_challan_pdf') || !function_exists('sdc_send_dispatch_challan_whatsapp')) {
+            throw new RuntimeException('Dispatch Challan WhatsApp helper is not available.');
+        }
+
+        $pdfResult = sdc_generate_dispatch_challan_pdf($conn, $jobId);
+        $waResult = sdc_send_dispatch_challan_whatsapp($conn, $jobId, $pdfResult);
+
+        header(
+            'Location: dispatch.php?filter=' . rawurlencode($returnFilter)
+            . '&msg=' . (!empty($waResult['success']) ? 'challan_whatsapp_sent' : 'challan_whatsapp_failed')
+        );
+        exit;
+    } catch (Throwable $e) {
+        header('Location: dispatch.php?filter=' . rawurlencode($returnFilter) . '&msg=challan_whatsapp_failed');
+        exit;
     }
 }
 
@@ -493,6 +582,33 @@ if ($msg === 'dispatched') {
     $message = 'Job card marked as dispatched successfully.';
     $messageType = 'success';
     $toastTitle = 'Success';
+
+    $challanStatus = strtolower(trim((string)($_GET['challan'] ?? '')));
+    $waStatus = strtolower(trim((string)($_GET['wa'] ?? '')));
+
+    if ($challanStatus === 'generated') {
+        $message .= ' Dispatch Challan PDF generated.';
+    } elseif ($challanStatus === 'failed') {
+        $message .= ' Dispatch saved, but Challan PDF could not be generated.';
+        $messageType = 'warning';
+        $toastTitle = 'Dispatch Saved - Challan Attention';
+    }
+
+    if ($waStatus === 'sent') {
+        $message .= ' Dispatch Challan link sent to customer through WhatsApp.';
+    } elseif ($waStatus === 'failed') {
+        $message .= ' WhatsApp sending failed. Use Send Challan Link to retry.';
+        $messageType = 'warning';
+        $toastTitle = 'Dispatch Saved - WhatsApp Attention';
+    }
+} elseif ($msg === 'challan_whatsapp_sent') {
+    $message = 'Dispatch Challan link sent to customer through WhatsApp successfully.';
+    $messageType = 'success';
+    $toastTitle = 'WhatsApp Sent';
+} elseif ($msg === 'challan_whatsapp_failed') {
+    $message = 'Dispatch Challan WhatsApp could not be sent. Dispatch status is unchanged. Check WhatsApp template/API settings and retry.';
+    $messageType = 'warning';
+    $toastTitle = 'WhatsApp Failed';
 } elseif ($msg === 'delivered') {
     $message = 'Job card marked as delivered/completed successfully.';
     $messageType = 'success';
@@ -1577,6 +1693,28 @@ if (dspTableExists($conn, 'job_cards')) {
                                             aria-label="View / Update Job Card Status">
                                             <i data-lucide="eye"></i>
                                         </a>
+                                        <?php if ($isDispatched || $isCompleted): ?>
+                                        <a href="dispatch_challan.php?job_card_id=<?= (int)$row['id'] ?>"
+                                            target="_blank"
+                                            class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon ms-1"
+                                            title="View Dispatch Challan PDF"
+                                            aria-label="View Dispatch Challan PDF">
+                                            <i data-lucide="file-text"></i>
+                                        </a>
+                                        <form method="post" class="d-inline-block ms-1">
+                                            <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                                            <input type="hidden" name="action" value="send_dispatch_challan_whatsapp">
+                                            <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
+                                            <input type="hidden" name="return_filter" value="<?= e($filter) ?>">
+                                            <button type="submit"
+                                                class="btn btn-sm btn-success rounded-circle fw-bold btn-action-icon"
+                                                title="Send Dispatch Challan link through WhatsApp"
+                                                aria-label="Send Dispatch Challan link through WhatsApp"
+                                                onclick="return confirm('Send the Dispatch Challan secure link to the customer through WhatsApp?');">
+                                                <i data-lucide="message-circle"></i>
+                                            </button>
+                                        </form>
+                                        <?php endif; ?>
                                         <?php if ($isReady): ?>
                                         <button type="button"
                                             class="btn btn-sm btn-success rounded-pill fw-bold px-3 ms-1 js-dispatch-record"
@@ -1663,6 +1801,18 @@ if (dspTableExists($conn, 'job_cards')) {
                             <div class="mobile-card-actions">
                                 <a href="<?= e($jobCardViewPage) ?>?id=<?= (int)$row['id'] ?>"
                                     class="btn btn-outline-secondary rounded-pill fw-bold">View / Update Status</a>
+                                <?php if ($isDispatched || $isCompleted): ?>
+                                <a href="dispatch_challan.php?job_card_id=<?= (int)$row['id'] ?>"
+                                    target="_blank" class="btn btn-outline-primary rounded-pill fw-bold">Challan PDF</a>
+                                <form method="post">
+                                    <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                                    <input type="hidden" name="action" value="send_dispatch_challan_whatsapp">
+                                    <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
+                                    <input type="hidden" name="return_filter" value="<?= e($filter) ?>">
+                                    <button type="submit" class="btn btn-success rounded-pill fw-bold"
+                                        onclick="return confirm('Send the Dispatch Challan secure link to the customer through WhatsApp?');">Send Challan Link</button>
+                                </form>
+                                <?php endif; ?>
                                 <?php if ($isReady): ?>
                                 <button type="button" class="btn btn-success rounded-pill fw-bold js-dispatch-record"
                                     data-bs-toggle="modal" data-bs-target="#dispatchModal"
