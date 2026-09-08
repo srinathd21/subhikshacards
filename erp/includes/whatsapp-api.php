@@ -544,21 +544,39 @@ if (!function_exists('subhiksha_wa_supported_template_keys')) {
             'dispatch_challan' => [
                 'meta_id' => null,
                 'module' => 'Dispatch',
+
+                /*
+                 * APPROVED META TEMPLATE - dispatch_challan
+                 *
+                 * BODY variable order:
+                 * {{1}} customer_name
+                 * {{2}} dispatch_challan_no
+                 * {{3}} job_card_no
+                 * {{4}} product_details
+                 * {{5}} total_quantity
+                 * {{6}} dispatch_date
+                 *
+                 * BUTTON 0:
+                 * View Dispatch Challan
+                 * https://subhikshacards.in/erp/dispatch_challan.php?job_card_id={{1}}
+                 *
+                 * The button parameter is a separate Meta component, so its
+                 * {{1}} is NOT BODY {{1}}. We pass the Job Card ID extracted
+                 * from dispatch_challan_link.
+                 */
                 'body_variables' => [
                     'customer_name',
                     'dispatch_challan_no',
                     'job_card_no',
-                    'product_name',
-                    'quantity',
-                    'dispatch_date',
-                    'dispatch_mode',
-                    'dispatch_reference'
+                    'product_details',
+                    'total_quantity',
+                    'dispatch_date'
                 ],
                 'button' => [
                     'index' => '0',
                     'sub_type' => 'url',
                     'variable' => 'dispatch_challan_link',
-                    'value_mode' => 'query:token',
+                    'value_mode' => 'query:job_card_id',
                     'required' => true
                 ]
             ],
@@ -668,6 +686,8 @@ if (!function_exists('subhiksha_meta_variable_value')) {
             'delay_reason' => ['delay_reason_name'],
             'dispatch_challan_no' => ['dispatch_no', 'challan_no'],
             'quantity' => ['qty', 'total_qty'],
+            'total_quantity' => ['quantity', 'qty', 'total_qty'],
+            'job_card_id' => ['job_id'],
             'dispatch_mode' => ['delivery_mode', 'courier_name'],
             'dispatch_reference' => ['reference_no', 'dispatch_no', 'tracking_no', 'lr_no'],
             'dispatch_challan_link' => [

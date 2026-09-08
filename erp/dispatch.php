@@ -1697,8 +1697,7 @@ if (dspTableExists($conn, 'job_cards')) {
                                         <a href="dispatch_challan.php?job_card_id=<?= (int)$row['id'] ?>"
                                             target="_blank"
                                             class="btn btn-sm btn-outline-primary rounded-circle fw-bold btn-action-icon ms-1"
-                                            title="View Dispatch Challan PDF"
-                                            aria-label="View Dispatch Challan PDF">
+                                            title="View Dispatch Challan PDF" aria-label="View Dispatch Challan PDF">
                                             <i data-lucide="file-text"></i>
                                         </a>
                                         <form method="post" class="d-inline-block ms-1">
@@ -1802,15 +1801,16 @@ if (dspTableExists($conn, 'job_cards')) {
                                 <a href="<?= e($jobCardViewPage) ?>?id=<?= (int)$row['id'] ?>"
                                     class="btn btn-outline-secondary rounded-pill fw-bold">View / Update Status</a>
                                 <?php if ($isDispatched || $isCompleted): ?>
-                                <a href="dispatch_challan.php?job_card_id=<?= (int)$row['id'] ?>"
-                                    target="_blank" class="btn btn-outline-primary rounded-pill fw-bold">Challan PDF</a>
+                                <a href="dispatch_challan.php?job_card_id=<?= (int)$row['id'] ?>" target="_blank"
+                                    class="btn btn-outline-primary rounded-pill fw-bold">Challan PDF</a>
                                 <form method="post">
                                     <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                                     <input type="hidden" name="action" value="send_dispatch_challan_whatsapp">
                                     <input type="hidden" name="job_card_id" value="<?= (int)$row['id'] ?>">
                                     <input type="hidden" name="return_filter" value="<?= e($filter) ?>">
                                     <button type="submit" class="btn btn-success rounded-pill fw-bold"
-                                        onclick="return confirm('Send the Dispatch Challan secure link to the customer through WhatsApp?');">Send Challan Link</button>
+                                        onclick="return confirm('Send the Dispatch Challan secure link to the customer through WhatsApp?');">Send
+                                        Challan Link</button>
                                 </form>
                                 <?php endif; ?>
                                 <?php if ($isReady): ?>

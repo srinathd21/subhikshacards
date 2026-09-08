@@ -631,15 +631,23 @@ if (!function_exists('sdc_dispatch_value')) {
 if (!function_exists('sdc_product_summary')) {
     function sdc_product_summary(array $items): string
     {
-        $names = [];
+        $parts = [];
+
         foreach ($items as $item) {
             $name = trim((string)($item['_resolved_name'] ?? $item['item_name'] ?? ''));
-            if ($name !== '') $names[] = $name;
+            if ($name === '') {
+                continue;
+            }
+
+            $qty = sdc_qty($item['qty'] ?? 0);
+            $parts[] = $name . ' - ' . $qty . ' Qty';
         }
-        $names = array_values(array_unique($names));
-        if (!$names) return 'Cards';
-        if (count($names) === 1) return $names[0];
-        return $names[0] . ' +' . (count($names) - 1) . ' more';
+
+        if (!$parts) {
+            return 'Cards';
+        }
+
+        return implode(', ', $parts);
     }
 }
 
@@ -1026,26 +1034,27 @@ if (!function_exists('sdc_send_dispatch_challan_whatsapp')) {
             return ['success' => false, 'message' => 'Dispatch Challan secure link could not be generated.'];
         }
 
-        $publicUrl = trim((string)($pdfResult['public_url'] ?? ''));
-        if ($publicUrl === '') {
-            $publicUrl = sdc_public_challan_url($conn, $token);
-        }
+        /*
+         * The approved Meta template has 6 BODY variables and a dynamic URL
+         * button based on job_card_id. The secure token URL is still generated
+         * and kept for backward compatibility, but the WhatsApp button uses
+         * the public Job Card ID URL requested for this template.
+         */
+        $publicUrl = sdc_base_url($conn)
+            . '/dispatch_challan.php?job_card_id=' . rawurlencode((string)$jobId);
 
-        $dispatchMode = sdc_dispatch_value($dispatch, $job, ['delivery_mode', 'courier_name'], ['delivery_mode', 'courier_name']);
-        $trackingNo = sdc_dispatch_value($dispatch, $job, ['tracking_no', 'vehicle_no'], ['tracking_no']);
         $mobile = trim((string)($job['mobile'] ?? ''));
+        $productDetails = sdc_product_summary($items);
+        $totalQuantity = sdc_qty(sdc_total_qty($items));
 
         $variables = [
             'customer_name' => sdc_clean($job['customer_name'] ?? '', 'Customer'),
             'dispatch_challan_no' => sdc_clean($pdfResult['dispatch_no'] ?? ($dispatch['dispatch_no'] ?? ''), '-'),
             'job_card_no' => sdc_clean($job['job_card_no'] ?? '', '-'),
-            'product_name' => sdc_product_summary($items),
-            'quantity' => sdc_qty(sdc_total_qty($items)),
+            'product_details' => $productDetails,
+            'total_quantity' => $totalQuantity,
             'dispatch_date' => sdc_date($dispatch['dispatch_date'] ?? ($job['dispatch_date'] ?? null)),
-            'dispatch_mode' => sdc_clean($dispatchMode, '-'),
-            'dispatch_reference' => sdc_clean($trackingNo, '-'),
-            // Full URL is stored in ERP. whatsapp-api.php extracts only the token
-            // because the approved Meta URL button contains the fixed URL prefix.
+            'job_card_id' => (string)$jobId,
             'dispatch_challan_link' => $publicUrl,
         ];
 
