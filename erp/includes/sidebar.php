@@ -188,10 +188,7 @@ try {
     }
 } catch (Throwable $e) {
     $sidebarMenus = [];
-$sidebarLoadedFromDb = false;
-} catch (Throwable $e) {
-    $sidebarMenus = [];
-$sidebarLoadedFromDb = false;
+    $sidebarLoadedFromDb = false;
 }
 
 if (!$sidebarLoadedFromDb && !$sidebarMenus) {
@@ -230,10 +227,20 @@ $logoPath = 'assets/img/subhiksha-logo.png';
 $logoFullPath = __DIR__ . '/../' . $logoPath;
 ?>
 <style id="compact-sidebar-size-overrides">
-/* Compact desktop sidebar - visual sizing only. */
+/*
+ * Compact desktop sidebar.
+ * Expanded width  : 232px
+ * Collapsed width : 72px
+ *
+ * IMPORTANT:
+ * The old code forced #sidebar and #main to 232px even when
+ * body.sidebar-collapsed was active. That is why only the icons
+ * disappeared/appeared while the dark sidebar area stayed wide.
+ */
 :root {
     --erp-sidebar-width: 232px;
     --sidebar-width: 232px;
+    --erp-sidebar-collapsed-width: 72px;
 }
 
 @media (min-width:1200px) {
@@ -241,12 +248,106 @@ $logoFullPath = __DIR__ . '/../' . $logoPath;
         width: 232px !important;
         min-width: 232px !important;
         max-width: 232px !important;
+        transition: width .22s ease, min-width .22s ease, max-width .22s ease !important;
     }
 
     #main {
         margin-left: 232px !important;
         width: calc(100% - 232px) !important;
         max-width: calc(100% - 232px) !important;
+        transition: margin-left .22s ease, width .22s ease, max-width .22s ease !important;
+    }
+
+    /* Real desktop collapsed state */
+    body.sidebar-collapsed {
+        --erp-sidebar-width: 72px;
+        --sidebar-width: 72px;
+    }
+
+    body.sidebar-collapsed #sidebar {
+        width: 72px !important;
+        min-width: 72px !important;
+        max-width: 72px !important;
+    }
+
+    body.sidebar-collapsed #main {
+        margin-left: 72px !important;
+        width: calc(100% - 72px) !important;
+        max-width: calc(100% - 72px) !important;
+    }
+
+    /* Header / logo */
+    body.sidebar-collapsed #sidebar .sidebar-header {
+        padding-left: 8px !important;
+        padding-right: 8px !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-header>.d-flex {
+        justify-content: center !important;
+        gap: 0 !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-brand-text {
+        display: none !important;
+    }
+
+    /* Main menu icons */
+    body.sidebar-collapsed #sidebar .sidebar-nav {
+        padding-left: 8px !important;
+        padding-right: 8px !important;
+    }
+
+    body.sidebar-collapsed #sidebar .nav-link-custom {
+        width: 48px !important;
+        min-width: 48px !important;
+        max-width: 48px !important;
+        min-height: 46px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        padding: 0 !important;
+        justify-content: center !important;
+        gap: 0 !important;
+    }
+
+    body.sidebar-collapsed #sidebar .nav-link-custom>svg,
+    body.sidebar-collapsed #sidebar .nav-link-custom>i>svg {
+        width: 19px !important;
+        height: 19px !important;
+        min-width: 19px !important;
+        margin: 0 !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-text,
+    body.sidebar-collapsed #sidebar .sidebar-sub-arrow {
+        display: none !important;
+    }
+
+    /*
+     * Bootstrap can leave a submenu with .show from expanded mode.
+     * Hide it inside the narrow sidebar; the JS flyout adds
+     * .sidebar-flyout-open when the user clicks the parent icon.
+     */
+    body.sidebar-collapsed #sidebar .sidebar-submenu:not(.sidebar-flyout-open) {
+        display: none !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open {
+        display: block !important;
+    }
+
+    /* Footer */
+    body.sidebar-collapsed #sidebar .sidebar-footer {
+        padding-left: 8px !important;
+        padding-right: 8px !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-footer>.d-flex {
+        justify-content: center !important;
+        gap: 0 !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-help-text {
+        display: none !important;
     }
 }
 
@@ -352,6 +453,148 @@ $logoFullPath = __DIR__ . '/../' . $logoPath;
         width: min(84vw, 250px) !important;
         max-width: 250px !important;
     }
+
+    /* Desktop collapsed state must never affect the mobile drawer. */
+    body.sidebar-collapsed #sidebar {
+        width: min(84vw, 250px) !important;
+        max-width: 250px !important;
+    }
+}
+
+
+/* ============================================================
+ * FIX: desktop collapse toggle + compact submenu flyout
+ * ============================================================ */
+@media (min-width:1200px) {
+
+    html,
+    body {
+        overflow-x: hidden;
+    }
+
+    #sidebar,
+    #main {
+        box-sizing: border-box !important;
+    }
+
+    #sidebar {
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+        overflow: visible !important;
+    }
+
+    #sidebar .sidebar-nav {
+        overflow-x: visible !important;
+    }
+
+    /* The title is only needed when a submenu is used as a flyout. */
+    #sidebar .sidebar-flyout-title {
+        display: none !important;
+    }
+
+    /* Never let an expanded Bootstrap submenu become a large panel
+       inside the collapsed 72px sidebar. */
+    body.sidebar-collapsed #sidebar .sidebar-submenu {
+        position: fixed !important;
+        left: 82px;
+        top: 80px;
+        width: 265px !important;
+        min-width: 265px !important;
+        max-width: min(265px, calc(100vw - 100px)) !important;
+        max-height: calc(100vh - 24px) !important;
+        margin: 0 !important;
+        padding: 8px !important;
+        overflow-x: hidden !important;
+        overflow-y: auto !important;
+        border: 1px solid rgba(255, 255, 255, .10) !important;
+        border-radius: 14px !important;
+        background: #0d1b2d !important;
+        box-shadow: 0 18px 45px rgba(0, 0, 0, .28) !important;
+        z-index: 10050 !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu:not(.sidebar-flyout-open) {
+        display: none !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open {
+        display: block !important;
+        height: auto !important;
+        visibility: visible !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-flyout-title {
+        display: block !important;
+        padding: 8px 10px 10px !important;
+        margin: 0 0 5px !important;
+        border-bottom: 1px solid rgba(255, 255, 255, .10) !important;
+        color: #fff !important;
+        font-size: 13px !important;
+        line-height: 1.2 !important;
+        font-weight: 800 !important;
+        letter-spacing: .01em !important;
+        white-space: normal !important;
+    }
+
+    /* Restore normal link dimensions/text INSIDE the flyout. The old
+       collapsed rule applied 48px width to every nav-link, including
+       submenu links, which caused the large empty Products Master box. */
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .nav-link-custom.sidebar-sub-link {
+        display: flex !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        min-height: 38px !important;
+        margin: 2px 0 !important;
+        padding: 8px 10px !important;
+        justify-content: flex-start !important;
+        align-items: center !important;
+        gap: 10px !important;
+        border-radius: 9px !important;
+        font-size: 12px !important;
+        line-height: 1.25 !important;
+        text-decoration: none !important;
+        white-space: normal !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .nav-link-custom.sidebar-sub-link>svg,
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .nav-link-custom.sidebar-sub-link>i>svg {
+        width: 17px !important;
+        height: 17px !important;
+        min-width: 17px !important;
+        margin: 0 !important;
+        flex: 0 0 17px !important;
+    }
+
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open .sidebar-text {
+        display: inline-block !important;
+        width: auto !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        color: inherit !important;
+        overflow: visible !important;
+        white-space: normal !important;
+    }
+
+    /* Small pointer toward the selected sidebar icon. */
+    body.sidebar-collapsed #sidebar .sidebar-submenu.sidebar-flyout-open::before {
+        content: '';
+        position: absolute;
+        left: -7px;
+        top: var(--flyout-arrow-top, 18px);
+        width: 14px;
+        height: 14px;
+        background: #0d1b2d;
+        border-left: 1px solid rgba(255, 255, 255, .10);
+        border-bottom: 1px solid rgba(255, 255, 255, .10);
+        transform: rotate(45deg);
+    }
+
+    /* Keep the selected parent icon highlighted while its flyout is open. */
+    body.sidebar-collapsed #sidebar .sidebar-collapse-link.sidebar-parent-open {
+        background: linear-gradient(135deg, #ff4b36, #ff9f38) !important;
+        color: #fff !important;
+    }
 }
 </style>
 
@@ -439,3 +682,133 @@ $logoFullPath = __DIR__ . '/../' . $logoPath;
         </div>
     </div>
 </aside>
+
+<script>
+(function() {
+    'use strict';
+
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+
+    const desktopMq = window.matchMedia('(min-width: 1200px)');
+
+    function isDesktopCollapsed() {
+        return desktopMq.matches && document.body.classList.contains('sidebar-collapsed');
+    }
+
+    function closeSidebarFlyouts(exceptMenu) {
+        sidebar.querySelectorAll('.sidebar-submenu.sidebar-flyout-open').forEach(function(menu) {
+            if (exceptMenu && menu === exceptMenu) return;
+            menu.classList.remove('sidebar-flyout-open');
+            menu.style.removeProperty('top');
+            menu.style.removeProperty('left');
+            menu.style.removeProperty('--flyout-arrow-top');
+        });
+
+        sidebar.querySelectorAll('.sidebar-collapse-link.sidebar-parent-open').forEach(function(link) {
+            if (exceptMenu && link.getAttribute('aria-controls') === exceptMenu.id) return;
+            link.classList.remove('sidebar-parent-open');
+            if (isDesktopCollapsed()) {
+                link.setAttribute('aria-expanded', 'false');
+            }
+        });
+    }
+
+    function positionFlyout(parentLink, menu) {
+        const parentRect = parentLink.getBoundingClientRect();
+
+        // First make it measurable.
+        menu.classList.add('sidebar-flyout-open');
+
+        const menuRect = menu.getBoundingClientRect();
+        const gap = 10;
+        const safe = 12;
+
+        let left = parentRect.right + gap;
+        let top = parentRect.top - 7;
+
+        if (left + menuRect.width > window.innerWidth - safe) {
+            left = Math.max(safe, window.innerWidth - menuRect.width - safe);
+        }
+
+        if (top + menuRect.height > window.innerHeight - safe) {
+            top = Math.max(safe, window.innerHeight - menuRect.height - safe);
+        }
+
+        if (top < safe) top = safe;
+
+        const arrowTop = Math.max(
+            12,
+            Math.min(menuRect.height - 26, (parentRect.top + parentRect.height / 2) - top - 7)
+        );
+
+        menu.style.left = Math.round(left) + 'px';
+        menu.style.top = Math.round(top) + 'px';
+        menu.style.setProperty('--flyout-arrow-top', Math.round(arrowTop) + 'px');
+    }
+
+    sidebar.querySelectorAll('.sidebar-collapse-link').forEach(function(parentLink) {
+        parentLink.addEventListener('click', function(event) {
+            if (!isDesktopCollapsed()) {
+                closeSidebarFlyouts();
+                return; // Bootstrap collapse works normally while expanded.
+            }
+
+            // In compact mode use our flyout instead of Bootstrap's inline collapse.
+            event.preventDefault();
+            event.stopPropagation();
+
+            const menuId = parentLink.getAttribute('aria-controls');
+            if (!menuId) return;
+
+            const menu = document.getElementById(menuId);
+            if (!menu) return;
+
+            const wasOpen = menu.classList.contains('sidebar-flyout-open');
+            closeSidebarFlyouts(menu);
+
+            if (wasOpen) {
+                menu.classList.remove('sidebar-flyout-open');
+                parentLink.classList.remove('sidebar-parent-open');
+                parentLink.setAttribute('aria-expanded', 'false');
+                return;
+            }
+
+            parentLink.classList.add('sidebar-parent-open');
+            parentLink.setAttribute('aria-expanded', 'true');
+            positionFlyout(parentLink, menu);
+        }, true);
+    });
+
+    // Close when clicking anywhere outside the currently opened parent/flyout.
+    document.addEventListener('click', function(event) {
+        if (!isDesktopCollapsed()) return;
+        if (event.target.closest('#sidebar .sidebar-submenu.sidebar-flyout-open')) return;
+        if (event.target.closest('#sidebar .sidebar-collapse-link')) return;
+        closeSidebarFlyouts();
+    });
+
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'Escape') closeSidebarFlyouts();
+    });
+
+    window.addEventListener('resize', function() {
+        closeSidebarFlyouts();
+    });
+
+    // If the existing topbar hamburger adds/removes body.sidebar-collapsed,
+    // clean up any popup left from the previous state immediately.
+    const bodyObserver = new MutationObserver(function(mutations) {
+        for (const mutation of mutations) {
+            if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+                closeSidebarFlyouts();
+                break;
+            }
+        }
+    });
+
+    bodyObserver.observe(document.body, {
+        attributes: true
+    });
+})();
+</script>
