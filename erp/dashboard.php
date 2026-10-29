@@ -2546,6 +2546,253 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
         word-break: break-word;
     }
 
+    .ready-dispatch-mobile-list {
+        display: none;
+    }
+
+    @media (max-width: 767.98px) {
+        .ready-dispatch-modal {
+            padding: 0 !important;
+        }
+
+        .ready-dispatch-modal .modal-dialog {
+            width: auto;
+            max-width: none;
+            margin: 8px;
+            min-height: calc(100dvh - 16px);
+            align-items: center;
+        }
+
+        .ready-dispatch-modal .modal-content {
+            width: 100%;
+            max-height: calc(100dvh - 16px);
+            border-radius: 18px;
+            overflow: hidden;
+        }
+
+        .ready-dispatch-modal .modal-header {
+            flex: 0 0 auto;
+            padding: 14px 15px 12px;
+            align-items: flex-start;
+        }
+
+        .ready-dispatch-modal .modal-title {
+            font-size: 16px;
+            line-height: 1.2;
+        }
+
+        .ready-dispatch-modal .modal-header .small {
+            font-size: 11px;
+            margin-top: 3px;
+        }
+
+        .ready-dispatch-modal .modal-body {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow: hidden;
+            background: color-mix(in srgb, var(--body-bg) 55%, var(--card-bg));
+        }
+
+        .ready-dispatch-table-wrap {
+            display: none !important;
+        }
+
+        .ready-dispatch-mobile-list {
+            display: block;
+            height: 100%;
+            max-height: calc(100dvh - 170px);
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 10px;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .ready-dispatch-mobile-card {
+            border: 1px solid var(--border-soft);
+            border-radius: 15px;
+            background: var(--card-bg);
+            padding: 12px;
+            margin-bottom: 9px;
+            box-shadow: 0 5px 14px rgba(15, 23, 42, .05);
+        }
+
+        .ready-dispatch-mobile-card:last-child {
+            margin-bottom: 0;
+        }
+
+        .ready-mobile-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 10px;
+            padding-bottom: 9px;
+            border-bottom: 1px solid var(--border-soft);
+        }
+
+        .ready-mobile-job {
+            font-size: 13px;
+            line-height: 1.3;
+            font-weight: 900;
+            color: var(--text-main);
+            overflow-wrap: anywhere;
+        }
+
+        .ready-mobile-delivery {
+            flex: 0 0 auto;
+            padding: 4px 8px;
+            border-radius: 999px;
+            background: rgba(20, 184, 166, .10);
+            color: #0f766e;
+            font-size: 10px;
+            font-weight: 900;
+            white-space: nowrap;
+        }
+
+        .ready-mobile-customer {
+            margin-top: 9px;
+            font-size: 13px;
+            font-weight: 900;
+            color: var(--text-main);
+        }
+
+        .ready-mobile-phone {
+            margin-top: 2px;
+            font-size: 10px;
+            color: var(--text-muted);
+            font-weight: 700;
+        }
+
+        .ready-mobile-product {
+            margin-top: 7px;
+            padding: 8px 9px;
+            border-radius: 10px;
+            background: color-mix(in srgb, var(--body-bg) 70%, var(--card-bg));
+            color: var(--text-main);
+            font-size: 11px;
+            line-height: 1.45;
+            font-weight: 700;
+            overflow-wrap: anywhere;
+        }
+
+        .ready-mobile-metrics {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .ready-mobile-metric {
+            min-width: 0;
+            border: 1px solid var(--border-soft);
+            border-radius: 10px;
+            padding: 7px 5px;
+            text-align: center;
+            background: var(--card-bg);
+        }
+
+        .ready-mobile-metric small {
+            display: block;
+            font-size: 8px;
+            line-height: 1.2;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            font-weight: 900;
+        }
+
+        .ready-mobile-metric strong {
+            display: block;
+            margin-top: 3px;
+            font-size: 13px;
+            color: var(--text-main);
+            font-weight: 900;
+            overflow-wrap: anywhere;
+        }
+
+        .ready-mobile-remark {
+            margin-top: 8px;
+            padding: 8px 9px;
+            border-left: 3px solid #14b8a6;
+            border-radius: 8px;
+            background: rgba(20, 184, 166, .07);
+            font-size: 10px;
+            line-height: 1.4;
+            color: var(--text-main);
+            overflow-wrap: anywhere;
+        }
+
+        .ready-mobile-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 7px;
+            margin-top: 9px;
+        }
+
+        .ready-mobile-actions .btn {
+            width: 100%;
+            min-height: 38px;
+            padding: 7px 8px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .ready-dispatch-modal .modal-footer {
+            flex: 0 0 auto;
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 8px;
+            padding: 10px;
+            border-top: 1px solid var(--border-soft);
+            background: var(--card-bg);
+        }
+
+        .ready-dispatch-modal .modal-footer .btn {
+            margin: 0;
+            min-height: 40px;
+            padding: 8px 12px !important;
+            font-size: 11px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            white-space: nowrap;
+        }
+    }
+
+    @media (max-width: 380px) {
+        .ready-dispatch-modal .modal-dialog {
+            margin: 5px;
+            min-height: calc(100dvh - 10px);
+        }
+
+        .ready-dispatch-modal .modal-content {
+            max-height: calc(100dvh - 10px);
+            border-radius: 15px;
+        }
+
+        .ready-dispatch-mobile-list {
+            max-height: calc(100dvh - 158px);
+            padding: 8px;
+        }
+
+        .ready-dispatch-mobile-card {
+            padding: 10px;
+        }
+
+        .ready-mobile-actions {
+            grid-template-columns: 1fr;
+        }
+
+        .ready-dispatch-modal .modal-footer {
+            grid-template-columns: 1fr;
+        }
+
+        .ready-dispatch-modal .modal-footer .btn {
+            width: 100%;
+        }
+    }
+
     .customer-approval-reminder-modal .modal-dialog {
         max-width: 780px;
     }
@@ -3304,6 +3551,46 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
                                 </tr><?php endforeach; ?><?php endif; ?>
                             </tbody>
                         </table>
+                    </div>
+
+                    <div class="ready-dispatch-mobile-list">
+                        <?php if (!$readyDispatchPopupRows): ?>
+                        <div class="text-center text-muted-custom py-4 fw-bold">No Job Cards are currently Ready for
+                            Dispatch.</div>
+                        <?php else: ?>
+                        <?php foreach ($readyDispatchPopupRows as $readyRow): ?>
+                        <article class="ready-dispatch-mobile-card">
+                            <div class="ready-mobile-head">
+                                <div class="ready-mobile-job"><?= e($readyRow['job_card_no'] ?? '-') ?></div>
+                                <div class="ready-mobile-delivery">
+                                    <?= e(dash_date($readyRow['delivery_date'] ?? null)) ?></div>
+                            </div>
+                            <div class="ready-mobile-customer"><?= e($readyRow['customer_name'] ?? '-') ?></div>
+                            <div class="ready-mobile-phone"><?= e($readyRow['mobile'] ?? '-') ?></div>
+                            <div class="ready-mobile-product"><?= e($readyRow['products'] ?? '-') ?></div>
+                            <div class="ready-mobile-metrics">
+                                <div class="ready-mobile-metric"><small>Order
+                                        Qty</small><strong><?= e(number_format((float)($readyRow['order_qty'] ?? 0),0)) ?></strong>
+                                </div>
+                                <div class="ready-mobile-metric"><small>Packed
+                                        Qty</small><strong><?= e(number_format((float)($readyRow['packed_item_count'] ?? 0),0)) ?></strong>
+                                </div>
+                                <div class="ready-mobile-metric">
+                                    <small>Parcels</small><strong><?= e(number_format((int)($readyRow['package_count'] ?? 0))) ?></strong>
+                                </div>
+                            </div>
+                            <div class="ready-mobile-remark"><strong>Remark:</strong>
+                                <?= e(($readyRow['packing_remarks'] ?? '') !== '' ? $readyRow['packing_remarks'] : '-') ?>
+                            </div>
+                            <div class="ready-mobile-actions">
+                                <a href="dispatch.php?filter=ready&job_card_id=<?= (int)($readyRow['job_card_id'] ?? 0) ?>"
+                                    class="btn btn-success rounded-pill fw-bold">Open Dispatch</a>
+                                <a href="job_card_view.php?id=<?= (int)($readyRow['job_card_id'] ?? 0) ?>"
+                                    class="btn btn-outline-primary rounded-pill fw-bold">Job Card</a>
+                            </div>
+                        </article>
+                        <?php endforeach; ?>
+                        <?php endif; ?>
                     </div>
                 </div>
                 <div class="modal-footer"><a href="dispatch.php?filter=ready"
