@@ -60,6 +60,53 @@ function jcvTableExists(mysqli $conn, string $table): bool
     }
 }
 
+function jcvColExists(mysqli $conn, string $table, string $column): bool
+{
+    static $cache = [];
+    $key = strtolower($table . '.' . $column);
+    if (array_key_exists($key, $cache)) return $cache[$key];
+
+    if (!jcvTableExists($conn, $table)) return $cache[$key] = false;
+
+    try {
+        $tableEsc = $conn->real_escape_string($table);
+        $columnEsc = $conn->real_escape_string($column);
+        $res = $conn->query("SHOW COLUMNS FROM `{$tableEsc}` LIKE '{$columnEsc}'");
+        $ok = $res && $res->num_rows > 0;
+        if ($res) $res->free();
+        return $cache[$key] = $ok;
+    } catch (Throwable $e) {
+        return $cache[$key] = false;
+    }
+}
+
+function jcvEnsureDispatchPackingColumns(mysqli $conn): bool
+{
+    if (!jcvTableExists($conn, 'job_tracking')) return false;
+
+    try {
+        $alters = [];
+        if (!jcvColExists($conn, 'job_tracking', 'packed_item_count')) {
+            $alters[] = "ADD COLUMN `packed_item_count` DECIMAL(12,2) DEFAULT NULL AFTER `remarks`";
+        }
+        if (!jcvColExists($conn, 'job_tracking', 'package_count')) {
+            $alters[] = "ADD COLUMN `package_count` INT UNSIGNED DEFAULT NULL AFTER `packed_item_count`";
+        }
+
+        if ($alters) {
+            $conn->query('ALTER TABLE `job_tracking` ' . implode(', ', $alters));
+        }
+
+        // Do not trust the static column cache after an ALTER in this request.
+        $res = $conn->query("SELECT COUNT(*) AS total FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'job_tracking' AND COLUMN_NAME IN ('packed_item_count','package_count')");
+        $row = $res ? $res->fetch_assoc() : null;
+        if ($res) $res->free();
+        return (int)($row['total'] ?? 0) === 2;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
 function jcvValidProductName($value): bool
 {
     $value = trim((string)$value);
@@ -401,8 +448,22 @@ function jcvPaymentSnapshot(mysqli $conn, array $job): array
     $storedBalance = (float)($job['balance_amount'] ?? 0);
     $paid = $storedAdvance;
     $usedLedger = false;
+    $paymentDiscount = 0.0;
 
     $proformaId = (int)($job['proforma_bill_id'] ?? 0);
+
+    if ($proformaId > 0 && jcvColExists($conn, 'proforma_bills', 'payment_discount_amount')) {
+        try {
+            $stmt = $conn->prepare("SELECT COALESCE(payment_discount_amount, 0) AS payment_discount_amount FROM proforma_bills WHERE id = ? LIMIT 1");
+            $stmt->bind_param('i', $proformaId);
+            $stmt->execute();
+            $discountRow = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            $paymentDiscount = max(0, (float)($discountRow['payment_discount_amount'] ?? 0));
+        } catch (Throwable $e) {
+            $paymentDiscount = 0.0;
+        }
+    }
     if ($proformaId > 0 && jcvTableExists($conn, 'payments')) {
         try {
             $stmt = $conn->prepare("\n                SELECT\n                    COUNT(*) AS cnt,\n                    COALESCE(SUM(CASE WHEN payment_type = 'refund' THEN -amount ELSE amount END), 0) AS paid_amount\n                FROM payments\n                WHERE proforma_bill_id = ?\n                  AND COALESCE(is_cancelled, 0) = 0\n            ");
@@ -420,16 +481,21 @@ function jcvPaymentSnapshot(mysqli $conn, array $job): array
         }
     }
 
+    $settlementAmount = max(0, $final - $paymentDiscount);
+
     if ($final <= 0 && $storedBalance > 0) {
         $balance = $storedBalance;
     } else {
-        $balance = max(0, $final - $paid);
+        $balance = max(0, $settlementAmount - $paid);
     }
 
-    $isPaid = ($final > 0 && $balance <= 0.01) || ($final <= 0 && $storedBalance <= 0.01 && $storedAdvance > 0);
+    $isPaid = ($settlementAmount > 0 && $balance <= 0.01)
+        || ($settlementAmount <= 0 && ($paymentDiscount > 0 || $storedAdvance > 0 || $storedBalance <= 0.01));
 
     return [
         'final_amount' => $final,
+        'payment_discount_amount' => $paymentDiscount,
+        'settlement_amount' => $settlementAmount,
         'paid_amount' => $paid,
         'balance_amount' => $balance,
         'is_paid' => $isPaid,
@@ -2535,6 +2601,20 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
     $trackingId = (int)($_POST['tracking_id'] ?? 0);
     $newStatus = strtolower(trim((string)($_POST['status'] ?? '')));
     $remarks = trim((string)($_POST['remarks'] ?? ''));
+    $packedItemCount = round((float)str_replace(',', '', (string)($_POST['packed_item_count'] ?? '0')), 2);
+    $parcelChoice = strtolower(trim((string)($_POST['parcel_count_choice'] ?? '')));
+    $customParcelCount = max(0, (int)($_POST['custom_package_count'] ?? 0));
+    $legacyPackageCount = max(0, (int)($_POST['package_count'] ?? 0));
+    $packageCount = $legacyPackageCount;
+    if ($parcelChoice !== '') {
+        if (ctype_digit($parcelChoice) && (int)$parcelChoice >= 1 && (int)$parcelChoice <= 10) {
+            $packageCount = (int)$parcelChoice;
+        } elseif ($parcelChoice === 'custom') {
+            $packageCount = $customParcelCount;
+        } else {
+            $packageCount = 0;
+        }
+    }
     $delayReasonId = (int)($_POST['delay_reason_id'] ?? 0);
     $delayDays = max(0, (int)($_POST['delay_days'] ?? 0));
 
@@ -2630,6 +2710,50 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                     }
 
                     jcvAssertDispatchPaymentAllowed($conn, $job, $stepRow, $newStatus);
+
+                    $isReadyForDispatchStage = jcvIsReadyForDispatchStageKey(
+                        $stepRow['step_key'] ?? '',
+                        $stepRow['step_name'] ?? ''
+                    );
+
+                    if ($isReadyForDispatchStage) {
+                        if (!jcvEnsureDispatchPackingColumns($conn)) {
+                            throw new RuntimeException('Ready for Dispatch packing columns are missing. Please run the supplied SQL patch.');
+                        }
+
+                        if ($newStatus === 'completed' && $packedItemCount <= 0) {
+                            throw new RuntimeException('Packed Item Quantity is required before completing Ready for Dispatch.');
+                        }
+
+                        if ($newStatus === 'completed' && $parcelChoice === '') {
+                            throw new RuntimeException('Dispatch Parcel count is required before completing Ready for Dispatch.');
+                        }
+
+                        if ($newStatus === 'completed' && $parcelChoice === 'custom' && $customParcelCount <= 10) {
+                            throw new RuntimeException('Custom Dispatch Parcel count must be greater than 10.');
+                        }
+
+                        if ($newStatus === 'completed' && $packageCount <= 0) {
+                            throw new RuntimeException('Dispatch Parcel count is required before completing Ready for Dispatch.');
+                        }
+
+                        if ($newStatus === 'completed' && $remarks === '') {
+                            throw new RuntimeException('Dispatch Remark / Note is required before completing Ready for Dispatch.');
+                        }
+
+                        $stmt = $conn->prepare("
+                            UPDATE job_tracking
+                            SET
+                                packed_item_count = NULLIF(?, 0),
+                                package_count = NULLIF(?, 0),
+                                updated_at = UTC_TIMESTAMP()
+                            WHERE id = ?
+                              AND job_card_id = ?
+                        ");
+                        $stmt->bind_param('diii', $packedItemCount, $packageCount, $trackingId, $jobId);
+                        $stmt->execute();
+                        $stmt->close();
+                    }
 
                     if ($newStatus === 'completed' && $isApprovalStage) {
                         $approvalType = jcvApprovalTypeForStep($stepRow);
@@ -2941,6 +3065,8 @@ if ($job && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') ==
                         $redirectWa = !empty($trackingSendResult['success']) ? '&wa=tracking_sent' : '&wa=tracking_failed';
                     }
 
+                    // Ready for Dispatch completion stays on Job Card View.
+                    // Admin/Sales can open the prepared job from the Dashboard popup or Dispatch page.
                     header('Location: job_card_view.php?id=' . $jobId . '&msg=status_updated' . $redirectWa);
                     exit;
                 }
@@ -4446,6 +4572,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                         <?php foreach ($trackingRows as $step): ?>
                         <?php
                             $stepStatus = strtolower((string)($step['status'] ?? 'pending'));
+                            $isReadyForDispatchStage = jcvIsReadyForDispatchStageKey($step['step_key'] ?? '', $step['step_name'] ?? '');
                             $isDispatchStage = jcvIsDispatchStageKey($step['step_key'] ?? '', $step['step_name'] ?? '');
                             $dispatchPaymentPending = $isDispatchStage && empty($paymentSnapshot['is_paid']);
                             $statusClass = jcvStatusClass($stepStatus);
@@ -4573,6 +4700,22 @@ if ($message !== '' && $toastTitle === 'Info') {
                                     <div class="info-card delay-card">
                                         <small>Delay Remarks</small>
                                         <span><?= e($step['delay_remarks'] ?? '-') ?></span>
+                                    </div>
+                                </div>
+                                <?php endif; ?>
+
+                                <?php if ($isReadyForDispatchStage && (!empty($step['packed_item_count']) || !empty($step['package_count']))): ?>
+                                <div class="col-md-6">
+                                    <div class="info-card">
+                                        <small>Packed Item Quantity</small>
+                                        <strong><?= e(number_format((float)($step['packed_item_count'] ?? 0), 2)) ?></strong>
+                                    </div>
+                                </div>
+
+                                <div class="col-md-6">
+                                    <div class="info-card">
+                                        <small>Dispatch Parcels</small>
+                                        <strong><?= (int)($step['package_count'] ?? 0) ?></strong>
                                     </div>
                                 </div>
                                 <?php endif; ?>
@@ -4830,6 +4973,7 @@ if ($message !== '' && $toastTitle === 'Info') {
                                             data-approval-done="<?= $approvalDone ? '1' : '0' ?>"
                                             data-can-manual-approval="<?= $canManualCustomerApproval ? '1' : '0' ?>"
                                             data-design-photo-required="<?= $requiresDesignPhotoUpload ? '1' : '0' ?>"
+                                            data-ready-dispatch="<?= $isReadyForDispatchStage ? '1' : '0' ?>"
                                             data-has-existing-photos="<?= !empty($stepPhotos) ? '1' : '0' ?>">
                                             <input type="hidden" name="action" value="update_step_status">
                                             <input type="hidden" name="tracking_id" value="<?= (int)$step['id'] ?>">
@@ -4897,11 +5041,59 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                         value="<?= e($step['delay_days'] ?? 0) ?>">
                                                 </div>
 
+                                                <?php if ($isReadyForDispatchStage): ?>
+                                                <div class="col-lg-2 col-md-3 ready-dispatch-field">
+                                                    <label class="form-label fw-bold">Packed Item Qty <span
+                                                            class="required-star js-packed-star d-none">*</span></label>
+                                                    <input type="number" name="packed_item_count"
+                                                        class="form-control js-packed-item-count" min="0" step="0.01"
+                                                        value="<?= e($step['packed_item_count'] ?? '') ?>"
+                                                        placeholder="e.g. 500">
+                                                </div>
+
+                                                <?php
+                                                $savedParcelCount = (int)($step['package_count'] ?? 0);
+                                                $savedParcelChoice = ($savedParcelCount >= 1 && $savedParcelCount <= 10)
+                                                    ? (string)$savedParcelCount
+                                                    : ($savedParcelCount > 10 ? 'custom' : '');
+                                                ?>
+                                                <div class="col-lg-2 col-md-3 ready-dispatch-field">
+                                                    <label class="form-label fw-bold">Dispatch Parcels <span
+                                                            class="required-star js-package-star d-none">*</span></label>
+                                                    <select name="parcel_count_choice"
+                                                        class="form-select js-parcel-choice">
+                                                        <option value="">Select Parcels</option>
+                                                        <?php for ($parcelNo = 1; $parcelNo <= 10; $parcelNo++): ?>
+                                                        <option value="<?= $parcelNo ?>"
+                                                            <?= $savedParcelChoice === (string)$parcelNo ? 'selected' : '' ?>>
+                                                            <?= $parcelNo ?>
+                                                            <?= $parcelNo === 1 ? 'Parcel' : 'Parcels' ?>
+                                                        </option>
+                                                        <?php endfor; ?>
+                                                        <option value="custom"
+                                                            <?= $savedParcelChoice === 'custom' ? 'selected' : '' ?>>
+                                                            Custom</option>
+                                                    </select>
+                                                </div>
+
+                                                <div
+                                                    class="col-lg-2 col-md-3 ready-dispatch-field js-custom-parcel-wrap <?= $savedParcelChoice === 'custom' ? '' : 'd-none' ?>">
+                                                    <label class="form-label fw-bold">Custom Parcel Count <span
+                                                            class="required-star">*</span></label>
+                                                    <input type="number" name="custom_package_count"
+                                                        class="form-control js-custom-parcel-count" min="11" step="1"
+                                                        value="<?= $savedParcelCount > 10 ? $savedParcelCount : '' ?>"
+                                                        placeholder="Enter parcel count">
+                                                </div>
+                                                <?php endif; ?>
+
                                                 <div class="col-lg-4 col-md-6">
-                                                    <label class="form-label fw-bold">Remark <span
+                                                    <label
+                                                        class="form-label fw-bold"><?= $isReadyForDispatchStage ? 'Dispatch Remark / Note' : 'Remark' ?>
+                                                        <span
                                                             class="required-star js-remark-star d-none">*</span></label>
                                                     <textarea name="remarks" class="form-control js-remark" rows="2"
-                                                        placeholder="Enter update remark"><?= e($step['remarks'] ?? '') ?></textarea>
+                                                        placeholder="<?= $isReadyForDispatchStage ? 'Enter parcel / packing remark' : 'Enter update remark' ?>"><?= e($step['remarks'] ?? '') ?></textarea>
                                                 </div>
 
                                                 <?php if ($requiresDesignPhotoUpload): ?>
@@ -4983,6 +5175,9 @@ if ($message !== '' && $toastTitle === 'Info') {
                                                 photos are required only when the production stage is marked Completed.
                                                 Proofing Approval / Design Approval does not need photo upload; it needs
                                                 customer approval or Admin/Sales manual confirmation.
+                                                Ready for Dispatch requires Packed Item Qty, Dispatch Parcels and
+                                                Dispatch Remark / Note when marked Completed. Select 1–10 parcels or
+                                                Custom for more than 10.
                                             </small>
                                         </form>
                                     </div>
@@ -5058,6 +5253,12 @@ if ($message !== '' && $toastTitle === 'Info') {
             const approvalRemarks = form.querySelector('.js-approval-remarks');
             const manualApproval = form.querySelector('.js-manual-approval');
             const photoInput = form.querySelector('.js-tracking-photos');
+            const packedItemCount = form.querySelector('.js-packed-item-count');
+            const parcelChoice = form.querySelector('.js-parcel-choice');
+            const customParcelWrap = form.querySelector('.js-custom-parcel-wrap');
+            const customParcelCount = form.querySelector('.js-custom-parcel-count');
+            const packedStar = form.querySelector('.js-packed-star');
+            const packageStar = form.querySelector('.js-package-star');
 
             if (!select) return;
 
@@ -5072,6 +5273,29 @@ if ($message !== '' && $toastTitle === 'Info') {
                 if (delayReason) delayReason.removeAttribute('required');
                 if (delayDays) delayDays.removeAttribute('required');
             }
+
+            const readyDispatch = form.dataset.readyDispatch === '1';
+            const readyDispatchCompleted = readyDispatch && select.value === 'completed';
+
+            if (packedItemCount) {
+                if (readyDispatchCompleted) packedItemCount.setAttribute('required', 'required');
+                else packedItemCount.removeAttribute('required');
+            }
+            if (parcelChoice) {
+                if (readyDispatchCompleted) parcelChoice.setAttribute('required', 'required');
+                else parcelChoice.removeAttribute('required');
+            }
+
+            const customParcelSelected = parcelChoice && parcelChoice.value === 'custom';
+            if (customParcelWrap) customParcelWrap.classList.toggle('d-none', !customParcelSelected);
+            if (customParcelCount) {
+                if (readyDispatchCompleted && customParcelSelected) customParcelCount.setAttribute('required',
+                    'required');
+                else customParcelCount.removeAttribute('required');
+            }
+
+            if (packedStar) packedStar.classList.toggle('d-none', !readyDispatchCompleted);
+            if (packageStar) packageStar.classList.toggle('d-none', !readyDispatchCompleted);
 
             const approvalStage = form.dataset.approvalStage === '1';
             const approvalDone = form.dataset.approvalDone === '1';
@@ -5090,7 +5314,11 @@ if ($message !== '' && $toastTitle === 'Info') {
                 if (approvalRemarks) approvalRemarks.removeAttribute('required');
             }
 
-            if (select.value !== 'delayed' && !needsApproval) {
+            const readyDispatchRemarkRequired = readyDispatchCompleted;
+            if (readyDispatchRemarkRequired) {
+                if (remark) remark.setAttribute('required', 'required');
+                if (remarkStar) remarkStar.classList.remove('d-none');
+            } else if (select.value !== 'delayed') {
                 if (remark) remark.removeAttribute('required');
                 if (remarkStar) remarkStar.classList.add('d-none');
             }
@@ -5116,6 +5344,19 @@ if ($message !== '' && $toastTitle === 'Info') {
             if (select) {
                 select.addEventListener('change', function() {
                     refreshDelayFields(form);
+                });
+            }
+
+            const parcelChoice = form.querySelector('.js-parcel-choice');
+            if (parcelChoice) {
+                parcelChoice.addEventListener('change', function() {
+                    refreshDelayFields(form);
+                    const customInput = form.querySelector('.js-custom-parcel-count');
+                    if (parcelChoice.value === 'custom') {
+                        customInput?.focus();
+                    } else if (customInput) {
+                        customInput.value = '';
+                    }
                 });
             }
         });

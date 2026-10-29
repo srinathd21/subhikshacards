@@ -752,9 +752,11 @@ $profileLogoPath = 'assets/img/ecommer-logo.png';
         html,
         body {
             width: 100%;
+            height: 100%;
             min-height: 100%;
-            overflow-x: hidden;
-            overflow-y: auto;
+            margin: 0;
+            overflow: hidden;
+            overscroll-behavior: none;
             background: var(--cream);
         }
 
@@ -767,7 +769,12 @@ $profileLogoPath = 'assets/img/ecommer-logo.png';
         .invitation-card,
         .card-inside {
             width: 100%;
-            min-height: 100dvh;
+            height: 100vh;
+            height: 100svh;
+            height: 100dvh;
+            min-height: 0;
+            max-height: 100dvh;
+            overflow: hidden;
         }
 
         /* Mobile shows only the credential-entry section. */
@@ -787,16 +794,19 @@ $profileLogoPath = 'assets/img/ecommer-logo.png';
             border: 0;
             border-radius: 0;
             box-shadow: none;
-            overflow: visible;
         }
 
         .login-panel {
             width: 100%;
-            min-height: 100dvh;
-            padding: 40px 22px 64px;
+            height: 100vh;
+            height: 100svh;
+            height: 100dvh;
+            min-height: 0;
+            padding: clamp(18px, 4vh, 34px) 22px clamp(38px, 6vh, 56px);
             display: flex;
             align-items: center;
             justify-content: center;
+            overflow: hidden;
             background:
                 radial-gradient(circle at 92% 8%, rgba(182, 139, 66, .15), transparent 25%),
                 radial-gradient(circle at 6% 92%, rgba(184, 109, 126, .13), transparent 27%),
@@ -811,42 +821,56 @@ $profileLogoPath = 'assets/img/ecommer-logo.png';
         .login-area {
             width: 100%;
             max-width: 430px;
-            margin: auto;
+            margin: 0 auto;
         }
 
         .ecommer-logo {
-            margin-bottom: 18px;
+            margin-bottom: clamp(10px, 2vh, 18px);
         }
 
         .ecommer-logo img {
-            width: 165px;
-            max-height: 48px;
+            width: clamp(145px, 38vw, 165px);
+            max-height: 46px;
         }
 
         .login-heading {
-            font-size: 36px;
+            font-size: clamp(30px, 8vw, 36px);
+            line-height: 1;
         }
 
         .login-subtitle {
-            margin-bottom: 17px;
+            margin: 7px 0 clamp(10px, 2vh, 17px);
         }
 
         .mini-ornament {
-            margin-bottom: 20px;
+            margin-bottom: clamp(10px, 2.2vh, 20px);
+        }
+
+        .form-control-wrap {
+            margin-bottom: clamp(10px, 1.8vh, 16px);
+        }
+
+        .form-meta {
+            margin: 4px 0 clamp(12px, 2vh, 20px);
+        }
+
+        .secure-note {
+            margin-top: clamp(9px, 1.8vh, 16px);
         }
 
         .page-footer {
             position: absolute;
-            bottom: 12px;
+            bottom: max(8px, env(safe-area-inset-bottom));
             padding: 0 18px;
             background: transparent;
+            font-size: 10px;
         }
     }
 
     @media (max-width: 560px) {
         .login-panel {
-            min-height: 100dvh;
-            padding: 34px 16px 58px;
+            padding-left: 16px;
+            padding-right: 16px;
         }
 
         .login-panel::before {
@@ -854,12 +878,8 @@ $profileLogoPath = 'assets/img/ecommer-logo.png';
             border-radius: 17px;
         }
 
-        .login-heading {
-            font-size: 33px;
-        }
-
         .login-subtitle {
-            font-size: 12.5px;
+            font-size: 12px;
         }
 
         .form-control-wrap,
@@ -867,12 +887,16 @@ $profileLogoPath = 'assets/img/ecommer-logo.png';
         .eye-btn,
         .form-control-wrap input[type="text"],
         .form-control-wrap input[type="password"] {
-            min-height: 54px;
-            height: 54px;
+            min-height: 50px;
+            height: 50px;
+        }
+
+        .field-icon {
+            width: 48px;
         }
 
         .login-btn {
-            min-height: 54px;
+            min-height: 50px;
         }
 
         .petal {
@@ -880,21 +904,87 @@ $profileLogoPath = 'assets/img/ecommer-logo.png';
         }
     }
 
-    @media (max-width: 380px) {
+    /* Short mobile screens: keep the complete form visible with no page scroll. */
+    @media (max-width: 560px) and (max-height: 700px) {
         .login-panel {
-            padding: 28px 13px 54px;
+            padding-top: 16px;
+            padding-bottom: 38px;
         }
 
-        .login-heading {
-            font-size: 30px;
-        }
-
-        .form-meta {
-            font-size: 11px;
+        .ecommer-logo {
+            margin-bottom: 8px;
         }
 
         .ecommer-logo img {
-            width: 150px;
+            width: 145px;
+            max-height: 40px;
+        }
+
+        .login-heading {
+            font-size: 29px;
+        }
+
+        .login-subtitle {
+            font-size: 11px;
+            line-height: 1.35;
+            margin: 5px 0 8px;
+        }
+
+        .mini-ornament {
+            margin-bottom: 10px;
+        }
+
+        .form-control-wrap {
+            min-height: 46px;
+            height: 46px;
+            margin-bottom: 9px;
+        }
+
+        .field-icon,
+        .eye-btn,
+        .form-control-wrap input[type="text"],
+        .form-control-wrap input[type="password"] {
+            min-height: 46px;
+            height: 46px;
+        }
+
+        .form-meta {
+            margin: 3px 0 10px;
+            font-size: 10.5px;
+        }
+
+        .remember input {
+            width: 14px;
+            height: 14px;
+        }
+
+        .login-btn {
+            min-height: 46px;
+        }
+
+        .secure-note {
+            margin-top: 8px;
+            font-size: 10px;
+        }
+
+        .page-footer {
+            bottom: 7px;
+            font-size: 9px;
+        }
+    }
+
+    @media (max-width: 380px) {
+        .login-panel {
+            padding-left: 13px;
+            padding-right: 13px;
+        }
+
+        .form-meta {
+            font-size: 10.5px;
+        }
+
+        .ecommer-logo img {
+            width: 140px;
         }
     }
 

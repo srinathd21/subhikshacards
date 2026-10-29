@@ -274,11 +274,25 @@ function dash_ready_dispatch_where(): string
 {
     return "
         (
-            LOWER(COALESCE(cws.step_key, '')) = 'ready_for_dispatch'
+            EXISTS (
+                SELECT 1
+                FROM job_tracking rdjt
+                INNER JOIN workflow_steps rdws ON rdws.id = rdjt.workflow_step_id
+                WHERE rdjt.job_card_id = jc.id
+                  AND LOWER(COALESCE(rdws.step_key, '')) = 'ready_for_dispatch'
+                  AND LOWER(COALESCE(rdjt.status, '')) = 'completed'
+            )
             OR LOWER(COALESCE(jcs.status_key, '')) = 'ready_for_dispatch'
         )
-        AND LOWER(COALESCE(cws.step_key, '')) NOT IN ('dispatched','completed','google_review_sent')
-        AND LOWER(COALESCE(jcs.status_key, '')) NOT IN ('dispatched','completed','cancelled')
+        AND NOT EXISTS (
+            SELECT 1
+            FROM job_tracking djt
+            INNER JOIN workflow_steps dws ON dws.id = djt.workflow_step_id
+            WHERE djt.job_card_id = jc.id
+              AND LOWER(COALESCE(dws.step_key, '')) IN ('dispatch','dispatched','despatch','delivered')
+              AND LOWER(COALESCE(djt.status, '')) = 'completed'
+        )
+        AND LOWER(COALESCE(jcs.status_key, '')) NOT IN ('completed','cancelled')
         AND jc.completed_at IS NULL
     ";
 }
@@ -664,6 +678,8 @@ if (!in_array($roleGroup, ['printing', 'design'], true)) {
 $activeJobs = 0;
 $delayedJobs = 0;
 $readyDispatch = 0;
+$readyDispatchPopupRows = [];
+$showReadyDispatchAlert = false;
 $dispatchedToday = 0;
 $completedJobs = 0;
 $dueTodayJobs = 0;
@@ -704,6 +720,47 @@ if (dash_table_exists($conn, 'job_cards')) {
         " . dash_join_status_filter() . "
         WHERE " . dash_ready_dispatch_where() . "
     ", 0);
+
+    if (in_array($roleGroup, ['admin','sales'], true) && dash_table_exists($conn, 'job_tracking') && dash_table_exists($conn, 'workflow_steps')) {
+        $packedSelect = dash_col_exists($conn, 'job_tracking', 'packed_item_count') ? 'COALESCE(rjt.packed_item_count,0)' : '0';
+        $packageSelect = dash_col_exists($conn, 'job_tracking', 'package_count') ? 'COALESCE(rjt.package_count,0)' : '0';
+        $itemJoin = dash_table_exists($conn, 'job_card_items')
+            ? "LEFT JOIN (SELECT job_card_id, COALESCE(SUM(qty),0) AS order_qty, GROUP_CONCAT(item_name ORDER BY id SEPARATOR ', ') AS products FROM job_card_items GROUP BY job_card_id) ji ON ji.job_card_id = jc.id"
+            : '';
+        $itemSelect = dash_table_exists($conn, 'job_card_items')
+            ? "COALESCE(ji.order_qty,0) AS order_qty, COALESCE(NULLIF(ji.products,''), NULLIF(jc.product_name,''), 'Cards') AS products"
+            : "0 AS order_qty, COALESCE(NULLIF(jc.product_name,''), 'Cards') AS products";
+
+        $readyDispatchPopupRows = dash_fetch_all($conn, "
+            SELECT jc.id AS job_card_id, jc.job_card_no, jc.customer_name, jc.mobile, jc.delivery_date,
+                   {$itemSelect}, {$packedSelect} AS packed_item_count, {$packageSelect} AS package_count,
+                   COALESCE(rjt.remarks,'') AS packing_remarks
+            FROM job_cards jc
+            " . dash_join_status_filter() . "
+            LEFT JOIN workflow_steps rws
+                   ON rws.order_type = CASE WHEN jc.order_type = 'printing_only' THEN 'readymade' ELSE jc.order_type END
+                  AND LOWER(rws.step_key) = 'ready_for_dispatch' AND rws.is_active = 1
+            LEFT JOIN job_tracking rjt ON rjt.job_card_id = jc.id AND rjt.workflow_step_id = rws.id
+            {$itemJoin}
+            WHERE " . dash_ready_dispatch_where() . "
+            ORDER BY COALESCE(jc.delivery_date, DATE(jc.created_at)) ASC, jc.id DESC
+            LIMIT 50
+        ");
+    }
+
+    if (in_array($roleGroup, ['admin','sales'], true) && !empty($readyDispatchPopupRows)) {
+        $readyIds = array_map(static function ($row) {
+            return (int)($row['job_card_id'] ?? 0);
+        }, $readyDispatchPopupRows);
+        $readyIds = array_values(array_filter($readyIds));
+        sort($readyIds);
+        $readyFingerprint = md5(implode(',', $readyIds));
+        $readySessionKey = 'ready_dispatch_alert_' . $readyFingerprint;
+        if (empty($_SESSION[$readySessionKey])) {
+            $showReadyDispatchAlert = true;
+            $_SESSION[$readySessionKey] = 1;
+        }
+    }
 
     $completedJobs = (int)dash_scalar($conn, "
         SELECT COUNT(DISTINCT jc.id)
@@ -1009,6 +1066,7 @@ $allKpis = [
         'icon' => 'package-check',
         'color' => 'linear-gradient(135deg,#0f766e,#14b8a6)',
         'groups' => ['admin','sales'],
+        'modal_target' => '#readyDispatchJobsModal',
     ],
     'dispatched_today' => [
         'label' => 'Dispatched Today',
@@ -2430,6 +2488,64 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
 
     <style>
     /* Customer approved - continue Job Card reminder popup */
+    .dash-kpi-link-button {
+        width: 100%;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        text-align: left;
+        cursor: pointer;
+    }
+
+    .ready-dispatch-modal .modal-dialog {
+        max-width: 980px;
+    }
+
+    .ready-dispatch-modal .modal-content {
+        border: 0;
+        border-radius: 22px;
+        overflow: hidden;
+        box-shadow: 0 28px 80px rgba(15, 23, 42, .20);
+    }
+
+    .ready-dispatch-modal .modal-header {
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--border-soft);
+        background: color-mix(in srgb, #14b8a6 10%, var(--card-bg));
+    }
+
+    .ready-dispatch-table-wrap {
+        max-height: min(66vh, 620px);
+        overflow: auto;
+    }
+
+    .ready-dispatch-table {
+        min-width: 880px;
+        margin-bottom: 0;
+    }
+
+    .ready-dispatch-table th {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        background: var(--card-bg);
+        font-size: 11px;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        white-space: nowrap;
+    }
+
+    .ready-dispatch-table td {
+        vertical-align: middle;
+        font-size: 12px;
+    }
+
+    .ready-dispatch-remark {
+        max-width: 220px;
+        white-space: normal;
+        word-break: break-word;
+    }
+
     .customer-approval-reminder-modal .modal-dialog {
         max-width: 780px;
     }
@@ -2582,22 +2698,26 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
 
                 <div class="row g-3 mb-3">
                     <?php foreach ($kpiCards as $card): ?>
-                    <?php $kpiUrl = trim((string)($card['url'] ?? '')); ?>
+                    <?php $kpiUrl = trim((string)($card['url'] ?? '')); $kpiModalTarget = trim((string)($card['modal_target'] ?? '')); ?>
                     <div class="col-12 col-sm-6 col-xl-3">
-                        <?php if ($kpiUrl !== ''): ?><a href="<?= e($kpiUrl) ?>" class="dash-kpi-link"><?php endif; ?>
-                            <div class="card-ui dash-kpi-card h-100">
-                                <div class="dash-kpi-icon" style="background:<?= e($card['color']) ?>"><i
-                                        data-lucide="<?= e($card['icon']) ?>"></i></div>
-                                <div>
-                                    <span class="dash-kpi-label"><?= e($card['label']) ?></span>
-                                    <span class="dash-kpi-value"><?= e($card['value']) ?></span>
-                                    <span class="dash-kpi-sub"><?= e($card['sub']) ?></span>
+                        <?php if ($kpiModalTarget !== ''): ?>
+                        <button type="button" class="dash-kpi-link dash-kpi-link-button" data-bs-toggle="modal"
+                            data-bs-target="<?= e($kpiModalTarget) ?>">
+                            <?php elseif ($kpiUrl !== ''): ?><a href="<?= e($kpiUrl) ?>"
+                                class="dash-kpi-link"><?php endif; ?>
+                                <div class="card-ui dash-kpi-card h-100">
+                                    <div class="dash-kpi-icon" style="background:<?= e($card['color']) ?>"><i
+                                            data-lucide="<?= e($card['icon']) ?>"></i></div>
+                                    <div>
+                                        <span class="dash-kpi-label"><?= e($card['label']) ?></span>
+                                        <span class="dash-kpi-value"><?= e($card['value']) ?></span>
+                                        <span class="dash-kpi-sub"><?= e($card['sub']) ?></span>
+                                    </div>
+                                    <?php if ($kpiUrl !== '' || $kpiModalTarget !== ''): ?><span
+                                        class="dash-kpi-open"><i
+                                            data-lucide="<?= $kpiModalTarget !== '' ? 'list' : 'arrow-up-right' ?>"></i></span><?php endif; ?>
                                 </div>
-                                <?php if ($kpiUrl !== ''): ?><span class="dash-kpi-open"><i
-                                        data-lucide="arrow-up-right"></i></span><?php endif; ?>
-                            </div>
-                            <?php if ($kpiUrl !== ''): ?>
-                        </a><?php endif; ?>
+                                <?php if ($kpiModalTarget !== ''): ?></button><?php elseif ($kpiUrl !== ''): ?></a><?php endif; ?>
                     </div>
                     <?php endforeach; ?>
                 </div>
@@ -3128,7 +3248,75 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
     <?php include __DIR__ . '/includes/rightsidebar.php'; ?>
     </div>
 
+    <?php if (in_array($roleGroup, ['admin','sales'], true)): ?>
+    <div class="modal fade ready-dispatch-modal" id="readyDispatchJobsModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div>
+                        <h5 class="modal-title fw-bold mb-1">Ready for Dispatch Job Cards</h5>
+                        <div class="text-muted-custom small fw-semibold">
+                            <?= number_format(count($readyDispatchPopupRows)) ?> job card(s) ready.</div>
+                    </div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body p-0">
+                    <div class="ready-dispatch-table-wrap">
+                        <table class="table table-hover ready-dispatch-table">
+                            <thead>
+                                <tr>
+                                    <th>Job Card</th>
+                                    <th>Customer</th>
+                                    <th>Products</th>
+                                    <th>Order Qty</th>
+                                    <th>Packed Qty</th>
+                                    <th>Parcels</th>
+                                    <th>Remarks</th>
+                                    <th>Delivery</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (!$readyDispatchPopupRows): ?><tr>
+                                    <td colspan="9" class="text-center text-muted-custom py-4 fw-bold">No Job Cards are
+                                        currently Ready for Dispatch.</td>
+                                </tr><?php else: ?>
+                                <?php foreach ($readyDispatchPopupRows as $readyRow): ?><tr>
+                                    <td><strong><?= e($readyRow['job_card_no'] ?? '-') ?></strong></td>
+                                    <td><strong><?= e($readyRow['customer_name'] ?? '-') ?></strong><small
+                                            class="d-block text-muted-custom"><?= e($readyRow['mobile'] ?? '-') ?></small>
+                                    </td>
+                                    <td><?= e($readyRow['products'] ?? '-') ?></td>
+                                    <td><?= e(number_format((float)($readyRow['order_qty'] ?? 0),0)) ?></td>
+                                    <td><strong><?= e(number_format((float)($readyRow['packed_item_count'] ?? 0),0)) ?></strong>
+                                    </td>
+                                    <td><strong><?= e(number_format((int)($readyRow['package_count'] ?? 0))) ?></strong>
+                                    </td>
+                                    <td class="ready-dispatch-remark">
+                                        <?= e(($readyRow['packing_remarks'] ?? '') !== '' ? $readyRow['packing_remarks'] : '-') ?>
+                                    </td>
+                                    <td><?= e(dash_date($readyRow['delivery_date'] ?? null)) ?></td>
+                                    <td class="text-nowrap"><a
+                                            href="dispatch.php?filter=ready&job_card_id=<?= (int)($readyRow['job_card_id'] ?? 0) ?>"
+                                            class="btn btn-sm btn-success rounded-pill fw-bold px-3">Open Dispatch</a><a
+                                            href="job_card_view.php?id=<?= (int)($readyRow['job_card_id'] ?? 0) ?>"
+                                            class="btn btn-sm btn-outline-primary rounded-pill fw-bold px-3 ms-1">Job
+                                            Card</a></td>
+                                </tr><?php endforeach; ?><?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="modal-footer"><a href="dispatch.php?filter=ready"
+                        class="btn btn-success rounded-pill fw-bold px-4">View All Dispatch Products</a><button
+                        type="button" class="btn btn-secondary rounded-pill fw-bold px-4"
+                        data-bs-dismiss="modal">Close</button></div>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
+
     <?php if ($customerApprovalReminderTotal > 0): ?>
+
     <div class="modal fade customer-approval-reminder-modal" id="customerApprovalReminderModal" tabindex="-1"
         aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
@@ -3475,6 +3663,8 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
             });
         });
 
+        const autoShowReadyDispatch = <?= $showReadyDispatchAlert ? 'true' : 'false' ?>;
+        const readyDispatchModalEl = document.getElementById('readyDispatchJobsModal');
         const autoShowApprovalReminder = <?= $showCustomerApprovalReminder ? 'true' : 'false' ?>;
         const autoShowReminder = <?= $showFollowupReminder ? 'true' : 'false' ?>;
 
@@ -3491,35 +3681,57 @@ elseif ($roleGroup === 'general') $roleIntro = 'Your available ERP work summary'
         }
 
         if (
+            (autoShowReadyDispatch && readyDispatchModalEl) ||
             (autoShowApprovalReminder && approvalReminderModalEl) ||
             (autoShowReminder && reminderModalEl)
         ) {
             window.addEventListener('load', function() {
                 setTimeout(function() {
-                    if (
-                        autoShowApprovalReminder &&
-                        approvalReminderModalEl &&
-                        window.bootstrap &&
-                        bootstrap.Modal
-                    ) {
-                        const approvalModal = bootstrap.Modal.getOrCreateInstance(
-                            approvalReminderModalEl, {
-                                backdrop: true,
-                                keyboard: true
-                            });
+                    const showApprovalThenFollowup = function() {
+                        if (autoShowApprovalReminder && approvalReminderModalEl && window
+                            .bootstrap && bootstrap.Modal) {
+                            const approvalModal = bootstrap.Modal.getOrCreateInstance(
+                                approvalReminderModalEl, {
+                                    backdrop: true,
+                                    keyboard: true
+                                });
 
-                        if (autoShowReminder && reminderModalEl) {
-                            approvalReminderModalEl.addEventListener('hidden.bs.modal', function() {
-                                setTimeout(showFollowupReminderModal, 180);
+                            if (autoShowReminder && reminderModalEl) {
+                                approvalReminderModalEl.addEventListener('hidden.bs.modal',
+                                    function() {
+                                        setTimeout(showFollowupReminderModal, 180);
+                                    }, {
+                                        once: true
+                                    });
+                            }
+
+                            approvalModal.show();
+                            refreshIcons();
+                        } else {
+                            showFollowupReminderModal();
+                        }
+                    };
+
+                    if (autoShowReadyDispatch && readyDispatchModalEl && window.bootstrap &&
+                        bootstrap.Modal) {
+                        const readyModal = bootstrap.Modal.getOrCreateInstance(
+                        readyDispatchModalEl, {
+                            backdrop: true,
+                            keyboard: true
+                        });
+
+                        if (autoShowApprovalReminder || autoShowReminder) {
+                            readyDispatchModalEl.addEventListener('hidden.bs.modal', function() {
+                                setTimeout(showApprovalThenFollowup, 180);
                             }, {
                                 once: true
                             });
                         }
 
-                        approvalModal.show();
+                        readyModal.show();
                         refreshIcons();
                     } else {
-                        showFollowupReminderModal();
+                        showApprovalThenFollowup();
                     }
                 }, 280);
             });

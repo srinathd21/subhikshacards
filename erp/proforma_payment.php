@@ -80,6 +80,55 @@ function pp_ensure_payment_return_columns(mysqli $conn): void
     }
 }
 
+function pp_ensure_payment_discount_column(mysqli $conn): void
+{
+    if (!pp_table_exists($conn, 'proforma_bills')) return;
+    if (!pp_col_exists($conn, 'proforma_bills', 'payment_discount_amount')) {
+        $conn->query("ALTER TABLE `proforma_bills` ADD COLUMN `payment_discount_amount` DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER `discount_amount`");
+    }
+}
+
+function pp_payment_discount_ready(mysqli $conn): bool
+{
+    return pp_col_exists($conn, 'proforma_bills', 'payment_discount_amount');
+}
+
+function pp_apply_payment_discount(mysqli $conn, int $proformaId, float $discountAmount): float
+{
+    $discountAmount = round(max(0, $discountAmount), 2);
+    if ($discountAmount <= 0.009) {
+        $stmt = $conn->prepare("SELECT final_amount FROM proforma_bills WHERE id = ? LIMIT 1");
+        $stmt->bind_param('i', $proformaId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        return (float)($row['final_amount'] ?? 0);
+    }
+
+    if (!pp_payment_discount_ready($conn)) {
+        throw new RuntimeException('Payment discount column is missing. Run the supplied SQL patch first.');
+    }
+
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+    $stmt = $conn->prepare("
+        UPDATE proforma_bills
+        SET payment_discount_amount = COALESCE(payment_discount_amount, 0) + ?,
+            updated_by = ?,
+            updated_at = NOW()
+        WHERE id = ?
+    ");
+    $stmt->bind_param('dii', $discountAmount, $userId, $proformaId);
+    $stmt->execute();
+    $stmt->close();
+
+    $stmt = $conn->prepare("SELECT final_amount FROM proforma_bills WHERE id = ? LIMIT 1");
+    $stmt->bind_param('i', $proformaId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return max(0, (float)($row['final_amount'] ?? 0));
+}
+
 function pp_payment_return_columns_ready(mysqli $conn): bool
 {
     try {
@@ -317,8 +366,11 @@ function pp_update_bill_and_job_amounts(mysqli $conn, int $proformaId, float $ne
  */
 function pp_payment_totals_from_db(mysqli $conn, int $proformaId): array
 {
+    $discountSelect = pp_payment_discount_ready($conn)
+        ? 'payment_discount_amount'
+        : '0 AS payment_discount_amount';
     $stmt = $conn->prepare("
-        SELECT final_amount, advance_amount
+        SELECT final_amount, advance_amount, {$discountSelect}
         FROM proforma_bills
         WHERE id = ?
         LIMIT 1
@@ -334,6 +386,7 @@ function pp_payment_totals_from_db(mysqli $conn, int $proformaId): array
 
     $finalAmount = max(0, (float)($bill['final_amount'] ?? 0));
     $storedAdvance = max(0, (float)($bill['advance_amount'] ?? 0));
+    $paymentDiscount = max(0, (float)($bill['payment_discount_amount'] ?? 0));
     $paymentCount = 0;
     $activePaid = 0.0;
 
@@ -364,11 +417,13 @@ function pp_payment_totals_from_db(mysqli $conn, int $proformaId): array
      */
     $paidAmount = $paymentCount > 0 ? $activePaid : $storedAdvance;
     $paidAmount = min($paidAmount, $finalAmount);
-    $balanceAmount = max(0, $finalAmount - $paidAmount);
+    $paymentDiscount = min($paymentDiscount, max(0, $finalAmount - $paidAmount));
+    $balanceAmount = max(0, $finalAmount - $paidAmount - $paymentDiscount);
 
     return [
         'final_amount' => round($finalAmount, 2),
         'paid_amount' => round($paidAmount, 2),
+        'payment_discount_amount' => round($paymentDiscount, 2),
         'balance_amount' => round($balanceAmount, 2),
         'payment_count' => $paymentCount,
     ];
@@ -514,6 +569,7 @@ function pp_payment_whatsapp_row(mysqli $conn, int $proformaId, int $paymentId):
     }
 
     try {
+        $paymentDiscountExpr = pp_payment_discount_ready($conn) ? 'COALESCE(pb.payment_discount_amount,0)' : '0';
         $stmt = $conn->prepare("
             SELECT
                 p.*,
@@ -522,6 +578,7 @@ function pp_payment_whatsapp_row(mysqli $conn, int $proformaId, int $paymentId):
                 pb.mobile,
                 pb.customer_id AS bill_customer_id,
                 pb.final_amount,
+                {$paymentDiscountExpr} AS payment_discount_amount,
                 pb.advance_amount,
                 pb.balance_amount,
                 COALESCE((
@@ -532,7 +589,7 @@ function pp_payment_whatsapp_row(mysqli $conn, int $proformaId, int $paymentId):
                       AND COALESCE(p2.is_cancelled, 0) = 0
                 ), 0) AS total_paid_after_payment,
                 GREATEST(
-                    pb.final_amount - COALESCE((
+                    pb.final_amount - {$paymentDiscountExpr} - COALESCE((
                         SELECT SUM(p3.amount)
                         FROM payments p3
                         WHERE p3.proforma_bill_id = p.proforma_bill_id
@@ -718,6 +775,7 @@ function pp_last_payment_whatsapp_status(mysqli $conn, int $paymentId): array
 try {
     pp_ensure_payment_cancel_columns($conn);
     pp_ensure_payment_return_columns($conn);
+    pp_ensure_payment_discount_column($conn);
 } catch (Throwable $e) {
     // Page will still work with its legacy columns if ALTER permission is unavailable.
 }
@@ -747,12 +805,18 @@ if ($pageMsg === 'payment_collected') {
     $messageType = 'warning';
 } elseif ($pageMsg === 'payment_cancelled') {
     $message = 'Payment cancelled and amount reverted successfully.';
+} elseif ($pageMsg === 'price_discount_applied') {
+    $message = 'Price discount applied successfully.';
 } elseif (!empty($_GET['err'])) {
     $message = 'Error: ' . trim((string)$_GET['err']);
     $messageType = 'danger';
 }
 
 $returnedAfterPayment = round((float)str_replace(',', '', (string)($_GET['return_amount'] ?? '0')), 2);
+$discountAfterPayment = round((float)str_replace(',', '', (string)($_GET['discount_amount'] ?? '0')), 2);
+if ($message !== '' && $discountAfterPayment > 0.009) {
+    $message .= ' Price discount: ' . pp_money($discountAfterPayment) . '.';
+}
 if ($message !== '' && $returnedAfterPayment > 0.009) {
     $message .= ' Return ' . pp_money($returnedAfterPayment) . ' to the customer.';
 }
@@ -778,16 +842,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
             $paymentDate = trim((string)($_POST['payment_date'] ?? date('Y-m-d')));
             $upiReference = trim((string)($_POST['upi_reference'] ?? ''));
             $remarks = trim((string)($_POST['remarks'] ?? ''));
-
-            if (!$useCash && !$useUpi) {
-                throw new RuntimeException('Select Cash, UPI or both.');
-            }
-            if ($useCash && $cashTendered <= 0) {
-                throw new RuntimeException('Cash Received must be greater than zero.');
-            }
-            if ($useUpi && $upiAmount <= 0) {
-                throw new RuntimeException('UPI Amount must be greater than zero.');
-            }
+            $priceDiscount = round((float)str_replace(',', '', (string)($_POST['price_discount'] ?? '0')), 2);
+            if ($priceDiscount < 0) $priceDiscount = 0;
             if ($paymentDate === '') $paymentDate = date('Y-m-d');
 
             $stmt = $conn->prepare("SELECT id, customer_id, final_amount, advance_amount, balance_amount FROM proforma_bills WHERE id = ? LIMIT 1");
@@ -800,13 +856,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
 
             /* Always calculate against the current active payment ledger. */
             $currentTotals = pp_payment_totals_from_db($conn, $id);
-            $balance = round((float)$currentTotals['balance_amount'], 2);
-            if ($balance <= 0.009) {
+            $balanceBeforeDiscount = round((float)$currentTotals['balance_amount'], 2);
+            if ($balanceBeforeDiscount <= 0.009) {
                 throw new RuntimeException('This proforma bill is already fully paid.');
+            }
+            if ($priceDiscount > $balanceBeforeDiscount + 0.009) {
+                throw new RuntimeException('Price Discount cannot exceed the current balance amount.');
+            }
+
+            $balance = round(max(0, $balanceBeforeDiscount - $priceDiscount), 2);
+
+            if ($balance > 0.009) {
+                if (!$useCash && !$useUpi) {
+                    throw new RuntimeException('Select Cash, UPI or both.');
+                }
+                if ($useCash && $cashTendered <= 0) {
+                    throw new RuntimeException('Cash Received must be greater than zero.');
+                }
+                if ($useUpi && $upiAmount <= 0) {
+                    throw new RuntimeException('UPI Amount must be greater than zero.');
+                }
+            } else {
+                $useCash = false;
+                $useUpi = false;
+                $cashTendered = 0.0;
+                $upiAmount = 0.0;
             }
 
             if ($useUpi && $upiAmount > $balance + 0.009) {
-                throw new RuntimeException('UPI Amount cannot exceed the current balance. Excess/Return is allowed only through Cash.');
+                throw new RuntimeException('UPI Amount cannot exceed the balance after discount. Excess/Return is allowed only through Cash.');
             }
 
             /*
@@ -822,8 +900,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
             $returnAmount = $useCash ? round(max(0, $cashTendered - $cashApplied), 2) : 0.0;
             $totalApplied = round($cashApplied + $upiApplied, 2);
 
-            if ($totalApplied <= 0.009) {
-                throw new RuntimeException('Payment amount must be greater than zero.');
+            if ($totalApplied <= 0.009 && $priceDiscount <= 0.009) {
+                throw new RuntimeException('Payment amount or Price Discount must be greater than zero.');
             }
             if ($useCash && $useUpi && $cashApplied <= 0.009) {
                 throw new RuntimeException('UPI already covers the balance. Unselect Cash or reduce UPI Amount.');
@@ -862,6 +940,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
 
             $conn->begin_transaction();
             try {
+                if ($priceDiscount > 0.009) {
+                    pp_apply_payment_discount($conn, $id, $priceDiscount);
+                }
+
                 $insertPaymentRow = function (
                     string $mode,
                     float $appliedAmount,
@@ -966,20 +1048,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $id > 0) {
             }
 
             if ($whatsappPaymentId <= 0) {
+                if ($priceDiscount > 0.009) {
+                    pp_redirect($id, 'price_discount_applied', '', [
+                        'discount_amount' => number_format($priceDiscount, 2, '.', '')
+                    ]);
+                }
                 throw new RuntimeException('Payment saved but WhatsApp payment reference could not be resolved.');
             }
 
             $waResult = pp_send_payment_whatsapp($conn, $id, $whatsappPaymentId);
             if (!empty($waResult['success'])) {
                 pp_redirect($id, 'payment_collected_wa_sent', '', [
-                    'return_amount' => $returnAmount > 0.009 ? number_format($returnAmount, 2, '.', '') : ''
+                    'return_amount' => $returnAmount > 0.009 ? number_format($returnAmount, 2, '.', '') : '',
+                    'discount_amount' => $priceDiscount > 0.009 ? number_format($priceDiscount, 2, '.', '') : ''
                 ]);
             }
 
             pp_redirect($id, 'payment_collected_wa_failed', '', [
                 'payment_id' => $whatsappPaymentId,
                 'wa_err' => (string)($waResult['message'] ?? 'Unknown WhatsApp error.'),
-                'return_amount' => $returnAmount > 0.009 ? number_format($returnAmount, 2, '.', '') : ''
+                'return_amount' => $returnAmount > 0.009 ? number_format($returnAmount, 2, '.', '') : '',
+                'discount_amount' => $priceDiscount > 0.009 ? number_format($priceDiscount, 2, '.', '') : ''
             ]);
         }
 
@@ -1606,7 +1695,7 @@ if ($bill && pp_table_exists($conn, 'payments')) {
 
     .payment-summary-grid {
         display: grid;
-        grid-template-columns: repeat(4, minmax(120px, 1fr));
+        grid-template-columns: repeat(5, minmax(110px, 1fr));
         gap: 8px;
     }
 
@@ -1812,18 +1901,25 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                                 <small>Status</small><strong><?= e($bill['status_name'] ?? '-') ?></strong>
                             </div>
                         </div>
-                        <div class="col-md-4">
+                        <div class="col-md-3">
                             <div class="info-box"><small>Final
                                     Amount</small><strong><?= e(pp_money($bill['final_amount'] ?? 0)) ?></strong></div>
                         </div>
-                        <div class="col-md-4">
+                        <div class="col-md-3">
+                            <div class="info-box"><small>Payment Price
+                                    Discount</small><strong
+                                    id="topPaymentDiscountAmount"><?= e(pp_money($bill['payment_discount_amount'] ?? 0)) ?></strong>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
                             <div class="info-box paid-box"><small>Paid
                                     Amount</small><strong><?= e(pp_money($bill['advance_amount'] ?? 0)) ?></strong>
                             </div>
                         </div>
-                        <div class="col-md-4">
+                        <div class="col-md-3">
                             <div class="info-box balance-due"><small>Balance
-                                    Amount</small><strong><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong>
+                                    Amount</small><strong
+                                    id="topBalanceAmount"><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong>
                             </div>
                         </div>
                     </div>
@@ -1844,7 +1940,16 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                                 <input type="date" name="payment_date" id="payment_date" class="form-control"
                                     value="<?= e(date('Y-m-d')) ?>" required>
                             </div>
-                            <div class="col-md-8">
+                            <div class="col-md-4">
+                                <label class="form-label fw-bold">Price Discount</label>
+                                <div class="input-group">
+                                    <span class="input-group-text">₹</span>
+                                    <input type="number" min="0" step="0.01" name="price_discount" id="price_discount"
+                                        class="form-control" value="0.00" placeholder="Additional settlement discount">
+                                </div>
+                                <small class="text-muted-custom fw-semibold">Additional payment-stage discount.</small>
+                            </div>
+                            <div class="col-md-4">
                                 <label class="form-label fw-bold">Payment Mode *</label>
                                 <div class="payment-mode-grid">
                                     <label class="payment-mode-card active" id="cashModeCard" for="use_cash">
@@ -1903,8 +2008,17 @@ if ($bill && pp_table_exists($conn, 'payments')) {
 
                         <div class="payment-summary-grid mt-3" aria-live="polite">
                             <div class="payment-summary-box">
-                                <small>Balance Due</small>
+                                <small>Current Balance</small>
                                 <strong id="paymentBalanceDue"><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong>
+                            </div>
+                            <div class="payment-summary-box">
+                                <small>Price Discount</small>
+                                <strong id="paymentDiscountAmount">₹0.00</strong>
+                            </div>
+                            <div class="payment-summary-box">
+                                <small>Balance After Discount</small>
+                                <strong
+                                    id="paymentBalanceAfterDiscount"><?= e(pp_money($bill['balance_amount'] ?? 0)) ?></strong>
                             </div>
                             <div class="payment-summary-box">
                                 <small>Total Received</small>
@@ -1929,8 +2043,12 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                         </div>
 
                         <div class="d-flex flex-wrap justify-content-end gap-2 mt-3">
-                            <button type="submit" class="btn btn-success rounded-pill px-4 fw-bold">Save
-                                Payment</button>
+                            <button type="submit" id="savePaymentBtn" class="btn btn-success rounded-pill px-4 fw-bold">
+                                <span class="save-payment-label">Save Payment</span>
+                                <span class="save-payment-loading d-none"><span
+                                        class="spinner-border spinner-border-sm me-1"
+                                        aria-hidden="true"></span>Saving...</span>
+                            </button>
                         </div>
                     </form>
 
@@ -2156,6 +2274,7 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         const upiPaymentBox = document.getElementById('upiPaymentBox');
         const cashAmountInput = document.getElementById('cash_amount');
         const upiAmountInput = document.getElementById('upi_amount');
+        const priceDiscountInput = document.getElementById('price_discount');
         const upiReferenceInput = document.getElementById('upi_reference');
         const paymentDateInput = document.getElementById('payment_date');
         const openCashBtn = document.getElementById('openCashDenomBtn');
@@ -2167,11 +2286,67 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         const denomError = document.getElementById('denomError');
         const saveDenomBtn = document.getElementById('saveDenomBtn');
         const receivedAmountEl = document.getElementById('paymentReceived');
+        const discountAmountEl = document.getElementById('paymentDiscountAmount');
+        const balanceAfterDiscountEl = document.getElementById('paymentBalanceAfterDiscount');
         const appliedAmountEl = document.getElementById('paymentAppliedAmount');
         const returnAmountEl = document.getElementById('paymentReturnAmount');
         const validationEl = document.getElementById('paymentValidationMessage');
+        const topPaymentDiscountAmountEl = document.getElementById('topPaymentDiscountAmount');
+        const topBalanceAmountEl = document.getElementById('topBalanceAmount');
+        const savePaymentBtn = document.getElementById('savePaymentBtn');
+        const savePaymentLabel = savePaymentBtn?.querySelector('.save-payment-label');
+        const savePaymentLoading = savePaymentBtn?.querySelector('.save-payment-loading');
+        const savedPaymentDiscount = <?= json_encode(round((float)($bill['payment_discount_amount'] ?? 0), 2)) ?>;
         const balanceDue = <?= json_encode(round((float)($bill['balance_amount'] ?? 0), 2)) ?>;
         let fallbackBackdrop = null;
+        let formSubmitting = false;
+
+        function showPaymentToast(message, type, title) {
+            type = type || 'danger';
+            title = title || (type === 'success' ? 'Success' : (type === 'warning' ? 'Attention' :
+                'Payment Not Saved'));
+
+            let container = document.querySelector('.toast-container');
+            if (!container) {
+                container = document.createElement('div');
+                container.className = 'toast-container position-fixed top-0 end-0 p-3';
+                container.style.zIndex = '12000';
+                document.body.appendChild(container);
+            }
+
+            const toast = document.createElement('div');
+            toast.className = 'toast toast-ui ' + type;
+            toast.setAttribute('role', 'alert');
+            toast.setAttribute('aria-live', 'assertive');
+            toast.setAttribute('aria-atomic', 'true');
+            toast.innerHTML =
+                '<div class="d-flex"><div class="toast-body"><div class="toast-title"></div><div class="toast-message"></div></div><button type="button" class="btn-close me-3 m-auto" data-bs-dismiss="toast" aria-label="Close"></button></div>';
+            toast.querySelector('.toast-title').textContent = title;
+            toast.querySelector('.toast-message').textContent = message;
+            container.appendChild(toast);
+
+            if (window.bootstrap && bootstrap.Toast) {
+                const inst = bootstrap.Toast.getOrCreateInstance(toast, {
+                    delay: 4200
+                });
+                toast.addEventListener('hidden.bs.toast', () => toast.remove(), {
+                    once: true
+                });
+                inst.show();
+            } else {
+                toast.classList.add('show');
+                setTimeout(() => toast.remove(), 4200);
+            }
+        }
+
+        function setSavingState(saving) {
+            formSubmitting = !!saving;
+            if (!savePaymentBtn) return;
+            savePaymentBtn.disabled = !!saving;
+            savePaymentBtn.setAttribute('aria-busy', saving ? 'true' : 'false');
+            savePaymentLabel?.classList.toggle('d-none', !!saving);
+            savePaymentLoading?.classList.toggle('d-none', !saving);
+        }
 
         function money(v) {
             return '₹' + Number(v || 0).toLocaleString('en-IN', {
@@ -2205,6 +2380,8 @@ if ($bill && pp_table_exists($conn, 'payments')) {
             const useUpi = upiCheck?.checked === true;
             const cashTendered = useCash ? Math.max(0, numericValue(cashAmountInput)) : 0;
             const upiAmount = useUpi ? Math.max(0, numericValue(upiAmountInput)) : 0;
+            const priceDiscount = Math.max(0, numericValue(priceDiscountInput));
+            const adjustedBalance = Math.max(0, Math.round((balanceDue - priceDiscount) * 100) / 100);
 
             let upiApplied = 0;
             let cashApplied = 0;
@@ -2215,17 +2392,23 @@ if ($bill && pp_table_exists($conn, 'payments')) {
 
             if (balanceDue <= 0) {
                 message = 'This Proforma is already fully paid.';
+            } else if (priceDiscount > balanceDue + 0.009) {
+                message = 'Price Discount cannot exceed Current Balance.';
+            } else if (adjustedBalance <= 0.009 && priceDiscount > 0.009) {
+                valid = true;
+                message = 'Price Discount clears the remaining balance. No payment amount is required.';
             } else if (!useCash && !useUpi) {
                 message = 'Select Cash, UPI or both.';
             } else if (useCash && cashTendered <= 0) {
                 message = 'Enter Cash Received.';
             } else if (useUpi && upiAmount <= 0) {
                 message = 'Enter UPI Amount.';
-            } else if (upiAmount > balanceDue + 0.009) {
-                message = 'UPI Amount cannot exceed Balance Due. Excess/Return is allowed only through Cash.';
+            } else if (upiAmount > adjustedBalance + 0.009) {
+                message =
+                    'UPI Amount cannot exceed Balance After Discount. Excess/Return is allowed only through Cash.';
             } else {
-                upiApplied = useUpi ? Math.min(upiAmount, balanceDue) : 0;
-                const remainingAfterUpi = Math.max(0, Math.round((balanceDue - upiApplied) * 100) / 100);
+                upiApplied = useUpi ? Math.min(upiAmount, adjustedBalance) : 0;
+                const remainingAfterUpi = Math.max(0, Math.round((adjustedBalance - upiApplied) * 100) / 100);
                 cashApplied = useCash ? Math.min(cashTendered, remainingAfterUpi) : 0;
                 returned = useCash ? Math.max(0, Math.round((cashTendered - cashApplied) * 100) / 100) : 0;
                 applied = Math.round((cashApplied + upiApplied) * 100) / 100;
@@ -2236,7 +2419,7 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                     message = 'Enter a payment amount.';
                 } else {
                     valid = true;
-                    const remaining = Math.max(0, Math.round((balanceDue - applied) * 100) / 100);
+                    const remaining = Math.max(0, Math.round((adjustedBalance - applied) * 100) / 100);
                     if (remaining <= 0.009) {
                         message = returned > 0.009 ?
                             'This payment clears the bill. Return ' + money(returned) + ' to the customer.' :
@@ -2248,8 +2431,14 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                 }
             }
 
-            const received = Math.round((cashTendered + upiAmount) * 100) / 100;
+            const received = (adjustedBalance <= 0.009 && priceDiscount > 0.009) ? 0 : Math.round((cashTendered +
+                upiAmount) * 100) / 100;
             if (receivedAmountEl) receivedAmountEl.textContent = money(received);
+            if (discountAmountEl) discountAmountEl.textContent = money(priceDiscount);
+            if (balanceAfterDiscountEl) balanceAfterDiscountEl.textContent = money(adjustedBalance);
+            if (topPaymentDiscountAmountEl) topPaymentDiscountAmountEl.textContent = money(savedPaymentDiscount +
+                priceDiscount);
+            if (topBalanceAmountEl) topBalanceAmountEl.textContent = money(adjustedBalance);
             if (appliedAmountEl) appliedAmountEl.textContent = money(applied);
             if (returnAmountEl) returnAmountEl.textContent = money(returned);
             if (denomTarget) denomTarget.textContent = money(cashTendered);
@@ -2266,6 +2455,8 @@ if ($bill && pp_table_exists($conn, 'payments')) {
                 useUpi,
                 cashTendered,
                 upiAmount,
+                priceDiscount,
+                adjustedBalance,
                 cashApplied,
                 upiApplied,
                 received,
@@ -2385,6 +2576,23 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         upiCheck?.addEventListener('change', syncPaymentModeUi);
         cashAmountInput?.addEventListener('input', calculatePayment);
         upiAmountInput?.addEventListener('input', calculatePayment);
+
+        function handleDiscountChange() {
+            let discount = Math.max(0, numericValue(priceDiscountInput));
+            if (discount > balanceDue) {
+                discount = balanceDue;
+                if (priceDiscountInput) priceDiscountInput.value = discount.toFixed(2);
+            }
+            const target = Math.max(0, Math.round((balanceDue - discount) * 100) / 100);
+            if (cashCheck?.checked && !upiCheck?.checked && cashAmountInput) cashAmountInput.value = target.toFixed(
+                2);
+            if (upiCheck?.checked && !cashCheck?.checked && upiAmountInput) upiAmountInput.value = target.toFixed(
+            2);
+            calculatePayment();
+        }
+        ['input', 'change', 'keyup'].forEach(function(eventName) {
+            priceDiscountInput?.addEventListener(eventName, handleDiscountChange);
+        });
         openCashBtn?.addEventListener('click', openDenominationModal);
         denomInputs.forEach(input => input.addEventListener('input', function() {
             denominationTotal();
@@ -2410,30 +2618,56 @@ if ($bill && pp_table_exists($conn, 'payments')) {
         });
 
         form.addEventListener('submit', function(e) {
+            if (formSubmitting) {
+                e.preventDefault();
+                return false;
+            }
+
             const payment = calculatePayment();
             if (!payment.valid) {
                 e.preventDefault();
-                alert(payment.message);
+                setSavingState(false);
+                showPaymentToast(payment.message, 'danger', 'Payment Not Saved');
+                if (validationEl) {
+                    validationEl.textContent = 'Payment not saved: ' + payment.message;
+                    validationEl.classList.add('bad');
+                    validationEl.classList.remove('ok');
+                }
                 return false;
             }
             if (!String(paymentDateInput?.value || '').trim()) {
                 e.preventDefault();
-                alert('Please select Payment Date.');
+                setSavingState(false);
+                showPaymentToast('Please select Payment Date.', 'danger', 'Payment Not Saved');
                 paymentDateInput?.focus();
                 return false;
             }
-            if (payment.useCash) {
+            if (payment.useCash && payment.adjustedBalance > 0.009) {
                 const total = denominationTotal();
                 if (Math.abs(total - payment.cashTendered) > 0.009) {
                     e.preventDefault();
-                    showError('Denomination total ' + money(total) + ' must match Cash Received ' + money(
-                        payment.cashTendered) + '.');
+                    setSavingState(false);
+                    const denomMessage = 'Cash denomination total ' + money(total) +
+                        ' must match Cash Received ' + money(payment.cashTendered) + '.';
+                    showError(denomMessage);
+                    showPaymentToast(denomMessage, 'danger', 'Payment Not Saved');
+                    if (validationEl) {
+                        validationEl.textContent = 'Payment not saved: ' + denomMessage;
+                        validationEl.classList.add('bad');
+                        validationEl.classList.remove('ok');
+                    }
                     openDenominationModal();
                     return false;
                 }
             }
 
-            let confirmMessage = 'Apply ' + money(payment.applied) + ' to this Proforma bill?';
+            let confirmMessage = payment.applied > 0.009 ?
+                'Apply ' + money(payment.applied) + ' to this Proforma bill?' :
+                'Apply Price Discount to this Proforma bill?';
+            if (payment.priceDiscount > 0.009) {
+                confirmMessage += '\nPrice Discount: ' + money(payment.priceDiscount) + '.';
+                confirmMessage += '\nBalance after discount: ' + money(payment.adjustedBalance) + '.';
+            }
             if (payment.useCash && payment.useUpi) {
                 confirmMessage += '\n\nSplit: Cash ' + money(payment.cashApplied) + ' + UPI ' + money(
                     payment.upiApplied) + '.';
@@ -2443,9 +2677,25 @@ if ($bill && pp_table_exists($conn, 'payments')) {
             }
             if (!confirm(confirmMessage)) {
                 e.preventDefault();
+                setSavingState(false);
+                showPaymentToast('Payment was not saved because the confirmation was cancelled.', 'warning',
+                    'Payment Not Saved');
+                if (validationEl) {
+                    validationEl.textContent = 'Payment not saved.';
+                    validationEl.classList.add('bad');
+                    validationEl.classList.remove('ok');
+                }
                 return false;
             }
+
+            setSavingState(true);
+            if (validationEl) {
+                validationEl.textContent = 'Saving payment...';
+                validationEl.classList.remove('bad');
+                validationEl.classList.add('ok');
+            }
         });
+
 
         syncPaymentModeUi();
         denominationTotal();
