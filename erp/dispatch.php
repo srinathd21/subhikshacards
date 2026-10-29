@@ -638,6 +638,23 @@ if (dspTableExists($conn, 'job_cards')) {
         $statusSelect = dspTableExists($conn, 'job_card_statuses') ? 'jcs.status_name, jcs.status_key,' : "NULL AS status_name, NULL AS status_key,";
         $statusJoin = dspTableExists($conn, 'job_card_statuses') ? 'LEFT JOIN job_card_statuses jcs ON jcs.id = jc.job_card_status_id' : '';
 
+        // Ready-for-Dispatch is determined from its completed tracking row, not only
+        // from job_cards.current_workflow_step_id. The next Dispatched stage can be
+        // auto-started immediately after Ready completion, so current step alone is unreliable.
+        $readyPackedExpr = dspColExists($conn, 'job_tracking', 'packed_item_count')
+            ? "MAX(CASE WHEN LOWER(COALESCE(ws2.step_key,'')) = 'ready_for_dispatch' THEN COALESCE(jt.packed_item_count,0) ELSE 0 END)"
+            : '0';
+        $readyPackageExpr = dspColExists($conn, 'job_tracking', 'package_count')
+            ? "MAX(CASE WHEN LOWER(COALESCE(ws2.step_key,'')) = 'ready_for_dispatch' THEN COALESCE(jt.package_count,0) ELSE 0 END)"
+            : '0';
+
+        $itemSelect = dspTableExists($conn, 'job_card_items')
+            ? "COALESCE(NULLIF(ji.products,''), NULLIF(jc.product_name,''), 'Cards') AS dispatch_products, COALESCE(ji.order_qty,0) AS dispatch_order_qty,"
+            : "COALESCE(NULLIF(jc.product_name,''), 'Cards') AS dispatch_products, 0 AS dispatch_order_qty,";
+        $itemJoin = dspTableExists($conn, 'job_card_items')
+            ? "LEFT JOIN (SELECT job_card_id, GROUP_CONCAT(item_name ORDER BY id SEPARATOR ', ') AS products, COALESCE(SUM(qty),0) AS order_qty FROM job_card_items GROUP BY job_card_id) ji ON ji.job_card_id = jc.id"
+            : '';
+
         $sql = "
             SELECT
                 jc.*,
@@ -648,6 +665,12 @@ if (dspTableExists($conn, 'job_cards')) {
                 ws.step_name AS current_step_name,
                 ws.step_key AS current_step_key,
                 creator.username AS created_by_name,
+                {$itemSelect}
+                COALESCE(dt.ready_tracking_completed, 0) AS ready_tracking_completed,
+                COALESCE(dt.dispatched_tracking_completed, 0) AS dispatched_tracking_completed,
+                COALESCE(dt.ready_packed_item_count, 0) AS ready_packed_item_count,
+                COALESCE(dt.ready_package_count, 0) AS ready_package_count,
+                COALESCE(dt.ready_remarks, '') AS ready_remarks,
                 COALESCE(dt.dispatch_tracking_status, '') AS dispatch_tracking_status,
                 COALESCE(dt.dispatch_completed_at, NULL) AS dispatch_completed_at,
                 COALESCE(dt.dispatch_remarks, '') AS tracking_dispatch_remarks
@@ -658,12 +681,18 @@ if (dspTableExists($conn, 'job_cards')) {
             LEFT JOIN printing_sub_types pst ON pst.id = jc.printing_sub_type_id
             LEFT JOIN workflow_steps ws ON ws.id = jc.current_workflow_step_id
             LEFT JOIN users creator ON creator.id = jc.created_by
+            {$itemJoin}
             LEFT JOIN (
                 SELECT
                     jt.job_card_id,
-                    MAX(CASE WHEN LOWER(COALESCE(ws2.step_key, '')) IN ('dispatch','send_to_dispatch','ready_for_dispatch','delivered','completed') OR LOWER(COALESCE(ws2.step_name, '')) LIKE '%dispatch%' OR LOWER(COALESCE(ws2.step_name, '')) LIKE '%deliver%' THEN jt.status ELSE '' END) AS dispatch_tracking_status,
-                    MAX(CASE WHEN LOWER(COALESCE(ws2.step_key, '')) IN ('dispatch','send_to_dispatch','ready_for_dispatch','delivered','completed') OR LOWER(COALESCE(ws2.step_name, '')) LIKE '%dispatch%' OR LOWER(COALESCE(ws2.step_name, '')) LIKE '%deliver%' THEN jt.actual_completed_at ELSE NULL END) AS dispatch_completed_at,
-                    MAX(CASE WHEN LOWER(COALESCE(ws2.step_key, '')) IN ('dispatch','send_to_dispatch','ready_for_dispatch','delivered','completed') OR LOWER(COALESCE(ws2.step_name, '')) LIKE '%dispatch%' OR LOWER(COALESCE(ws2.step_name, '')) LIKE '%deliver%' THEN jt.remarks ELSE '' END) AS dispatch_remarks
+                    MAX(CASE WHEN LOWER(COALESCE(ws2.step_key,'')) = 'ready_for_dispatch' AND LOWER(COALESCE(jt.status,'')) = 'completed' THEN 1 ELSE 0 END) AS ready_tracking_completed,
+                    MAX(CASE WHEN LOWER(COALESCE(ws2.step_key,'')) IN ('dispatch','dispatched','despatch') AND LOWER(COALESCE(jt.status,'')) = 'completed' THEN 1 ELSE 0 END) AS dispatched_tracking_completed,
+                    {$readyPackedExpr} AS ready_packed_item_count,
+                    {$readyPackageExpr} AS ready_package_count,
+                    MAX(CASE WHEN LOWER(COALESCE(ws2.step_key,'')) = 'ready_for_dispatch' THEN COALESCE(jt.remarks,'') ELSE '' END) AS ready_remarks,
+                    MAX(CASE WHEN LOWER(COALESCE(ws2.step_key,'')) IN ('dispatch','dispatched','despatch') THEN jt.status ELSE '' END) AS dispatch_tracking_status,
+                    MAX(CASE WHEN LOWER(COALESCE(ws2.step_key,'')) IN ('dispatch','dispatched','despatch') AND LOWER(COALESCE(jt.status,'')) = 'completed' THEN jt.actual_completed_at ELSE NULL END) AS dispatch_completed_at,
+                    MAX(CASE WHEN LOWER(COALESCE(ws2.step_key,'')) IN ('dispatch','dispatched','despatch') THEN COALESCE(jt.remarks,'') ELSE '' END) AS dispatch_remarks
                 FROM job_tracking jt
                 LEFT JOIN workflow_steps ws2 ON ws2.id = jt.workflow_step_id
                 GROUP BY jt.job_card_id
@@ -689,23 +718,30 @@ if (dspTableExists($conn, 'job_cards')) {
                 || !empty($row['delivered_at'] ?? '')
                 || !empty($row['completed_at'] ?? '');
 
+            $readyTrackingCompleted = (int)($row['ready_tracking_completed'] ?? 0) === 1;
+            $dispatchedTrackingCompleted = (int)($row['dispatched_tracking_completed'] ?? 0) === 1;
+
             $isDispatched = !$isCompleted && (
                 in_array($statusKey, ['dispatched', 'dispatch'], true)
                 || str_contains($statusName, 'dispatched')
                 || !empty($row['dispatched_at'] ?? '')
                 || $dispatchStatus === 'dispatched'
+                || $dispatchedTrackingCompleted
             );
 
+            // Authoritative Ready condition: Ready-for-Dispatch was completed, but
+            // final Dispatch has not been completed yet. This remains true even if
+            // the workflow auto-started the next `dispatched` row.
             $isReady = !$isCompleted
                 && !$isDispatched
                 && !in_array($statusKey, ['completed', 'cancelled'], true)
                 && empty($row['completed_at'] ?? '')
                 && (
-                    in_array($currentStepKey, ['ready_for_dispatch', 'ready_dispatch', 'dispatch', 'send_to_dispatch'], true)
-                    || str_contains($currentStepName, 'ready for dispatch')
-                    || str_contains($currentStepName, 'send to dispatch')
+                    $readyTrackingCompleted
                     || in_array($statusKey, ['ready_for_dispatch', 'ready_dispatch'], true)
                     || str_contains($statusName, 'ready for dispatch')
+                    || in_array($currentStepKey, ['ready_for_dispatch', 'ready_dispatch'], true)
+                    || str_contains($currentStepName, 'ready for dispatch')
                 );
 
             if ($isReady) $totalReady++;
@@ -1673,9 +1709,19 @@ if (dspTableExists($conn, 'job_cards')) {
                                     <td><?= e($row['customer_name'] ?? '-') ?><small
                                             class="d-block text-muted-custom"><?= e($row['mobile'] ?? '-') ?></small>
                                     </td>
-                                    <td><?= e($row['product_name'] ?? '-') ?><small
-                                            class="d-block text-muted-custom"><?= e($row['printing_name'] ?? '-') ?>
-                                            <?= e($row['sub_type_name'] ?? '') ?></small></td>
+                                    <td><?= e($row['dispatch_products'] ?? $row['product_name'] ?? '-') ?>
+                                        <?php if ($isReady): ?>
+                                        <small class="d-block text-muted-custom">Qty:
+                                            <?= e(number_format((float)($row['dispatch_order_qty'] ?? 0), 0)) ?> ·
+                                            Packed:
+                                            <?= e(number_format((float)($row['ready_packed_item_count'] ?? 0), 0)) ?> ·
+                                            Parcels:
+                                            <?= e(number_format((int)($row['ready_package_count'] ?? 0))) ?></small>
+                                        <?php else: ?>
+                                        <small class="d-block text-muted-custom"><?= e($row['printing_name'] ?? '-') ?>
+                                            <?= e($row['sub_type_name'] ?? '') ?></small>
+                                        <?php endif; ?>
+                                    </td>
                                     <td>
                                         <strong><?= e(dspDate($row['delivery_date'] ?? null)) ?></strong>
                                         <?php if ($dispatchTime): ?><small class="d-block text-muted-custom">Dispatched:
@@ -1780,8 +1826,16 @@ if (dspTableExists($conn, 'job_cards')) {
                                     <div class="mobile-card-title"><?= e($row['job_card_no'] ?? '-') ?></div>
                                     <span class="mobile-card-subtitle">Customer: <?= e($row['customer_name'] ?? '-') ?>
                                         | <?= e($row['mobile'] ?? '-') ?></span>
-                                    <span class="mobile-card-subtitle">Product:
-                                        <?= e($row['product_name'] ?? '-') ?></span>
+                                    <span class="mobile-card-subtitle">Products:
+                                        <?= e($row['dispatch_products'] ?? $row['product_name'] ?? '-') ?></span>
+                                    <?php if ($isReady): ?>
+                                    <span class="mobile-card-subtitle">Packed:
+                                        <?= e(number_format((float)($row['ready_packed_item_count'] ?? 0),0)) ?> |
+                                        Parcels: <?= e(number_format((int)($row['ready_package_count'] ?? 0))) ?></span>
+                                    <?php if (trim((string)($row['ready_remarks'] ?? '')) !== ''): ?><span
+                                        class="mobile-card-subtitle">Packing Note:
+                                        <?= e($row['ready_remarks']) ?></span><?php endif; ?>
+                                    <?php endif; ?>
                                     <span class="mobile-card-subtitle">Delivery:
                                         <?= e(dspDate($row['delivery_date'] ?? null)) ?></span>
                                     <?php if ($dispatchTime): ?>

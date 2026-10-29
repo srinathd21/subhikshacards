@@ -384,7 +384,10 @@ if ($error === '' && $hasProformaBills && $statusFilter !== 'cancelled') {
             $lastPaymentIdExpr = 'pa.last_payment_id';
         }
 
-        $balanceExpr = "GREATEST(COALESCE(pb.final_amount,0) - ({$paidExpr}), 0)";
+        $paymentDiscountSelect = payColExists($conn, 'proforma_bills', 'payment_discount_amount')
+            ? 'COALESCE(pb.payment_discount_amount,0)'
+            : '0';
+        $balanceExpr = "GREATEST(COALESCE(pb.final_amount,0) - ({$paymentDiscountSelect}) - ({$paidExpr}), 0)";
         $where = [];
         $params = [];
         $types = '';
@@ -454,7 +457,6 @@ if ($error === '' && $hasProformaBills && $statusFilter !== 'cancelled') {
         $lastPaymentSelect = $hasProformaPayments
             ? "lp.payment_no AS last_payment_no, lp.payment_mode AS last_payment_mode, lp.reference_no AS last_reference_no, lp.received_by AS last_received_by"
             : "NULL AS last_payment_no, NULL AS last_payment_mode, NULL AS last_reference_no, NULL AS last_received_by";
-
         $sql = "
             SELECT
                 pb.id AS bill_id,
@@ -464,6 +466,7 @@ if ($error === '' && $hasProformaBills && $statusFilter !== 'cancelled') {
                 pb.mobile,
                 pb.order_type,
                 pb.final_amount,
+                {$paymentDiscountSelect} AS payment_discount_amount,
                 pb.delivery_date,
                 pb.created_at AS proforma_created_at,
                 ({$paidExpr}) AS paid_amount,
@@ -1062,14 +1065,15 @@ if ($exportPdf) {
 
         <table>
             <colgroup>
-                <col style="width:13%">
-                <col style="width:18%">
                 <col style="width:12%">
+                <col style="width:17%">
                 <col style="width:11%">
+                <col style="width:10%">
+                <col style="width:10%">
+                <col style="width:10%">
+                <col style="width:10%">
                 <col style="width:11%">
-                <col style="width:11%">
-                <col style="width:13%">
-                <col style="width:11%">
+                <col style="width:9%">
             </colgroup>
             <thead>
                 <tr>
@@ -1077,6 +1081,7 @@ if ($exportPdf) {
                     <th>Customer</th>
                     <th>Job Card</th>
                     <th class="num">Total</th>
+                    <th class="num">Discount</th>
                     <th class="num">Paid</th>
                     <th class="num">Balance</th>
                     <th>Date / Mode</th>
@@ -1086,7 +1091,7 @@ if ($exportPdf) {
             <tbody>
                 <?php if (!$displayRows): ?>
                 <tr>
-                    <td colspan="8" class="empty">No payment records found for the selected filters.</td>
+                    <td colspan="9" class="empty">No payment records found for the selected filters.</td>
                 </tr>
                 <?php else: ?>
                 <?php foreach ($displayRows as $row): ?>
@@ -1120,6 +1125,9 @@ if ($exportPdf) {
                     </td>
                     <td><?= e($isQuickSale ? 'N/A' : ($row['job_card_no'] ?? 'Not Created')) ?></td>
                     <td class="num"><strong><?= e(payMoney($row['final_amount'] ?? 0)) ?></strong></td>
+                    <td class="num">
+                        <?= e(payMoney((!$isQuickSale && !$isCancelled) ? ($row['payment_discount_amount'] ?? 0) : 0)) ?>
+                    </td>
                     <td class="num"><?= e(payMoney($isCancelled ? ($row['cancelled_amount'] ?? 0) : $paid)) ?></td>
                     <td class="num"><?= e(payMoney($balance)) ?></td>
                     <td><?= e(payDate($dateValue)) ?><span
@@ -1976,6 +1984,7 @@ if ($exportPdf) {
                                     <th>Customer</th>
                                     <th>Job Card</th>
                                     <th>Total</th>
+                                    <th>Discount</th>
                                     <th>Paid</th>
                                     <th>Balance</th>
                                     <th>Last Payment</th>
@@ -1986,7 +1995,7 @@ if ($exportPdf) {
                             <tbody>
                                 <?php if (!$displayRows): ?>
                                 <tr>
-                                    <td colspan="9" class="text-center text-muted-custom py-4">No payment details found
+                                    <td colspan="10" class="text-center text-muted-custom py-4">No payment details found
                                         for the selected filters.</td>
                                 </tr>
                                 <?php endif; ?>
@@ -2028,6 +2037,9 @@ if ($exportPdf) {
                                             Created</span><?php endif; ?>
                                     </td>
                                     <td><strong><?= e(payMoney($row['final_amount'] ?? 0)) ?></strong></td>
+                                    <td><?php if (!$isQuickSale && !$isCancelled && (float)($row['payment_discount_amount'] ?? 0) > 0.009): ?><span
+                                            class="text-success fw-bold"><?= e(payMoney($row['payment_discount_amount'])) ?></span><?php else: ?><span
+                                            class="text-muted-custom">₹0.00</span><?php endif; ?></td>
                                     <td>
                                         <?php if ($isCancelled): ?><span class="text-danger fw-bold">Cancelled
                                             <?= e(payMoney($row['cancelled_amount'] ?? 0)) ?></span>
@@ -2095,6 +2107,9 @@ if ($exportPdf) {
                                         <?= e($row['job_card_no'] ?? 'Not Created') ?></span><?php endif; ?>
                                     <span class="mobile-card-subtitle">Total:
                                         <?= e(payMoney($row['final_amount'] ?? 0)) ?></span>
+                                    <?php if (!$isQuickSale && !$isCancelled && (float)($row['payment_discount_amount'] ?? 0) > 0.009): ?><span
+                                        class="mobile-card-subtitle text-success fw-bold">Payment Discount:
+                                        <?= e(payMoney($row['payment_discount_amount'])) ?></span><?php endif; ?>
                                     <?php if ($isCancelled): ?><span
                                         class="mobile-card-subtitle text-danger fw-bold">Cancelled Amount:
                                         <?= e(payMoney($row['cancelled_amount'] ?? 0)) ?></span><span
